@@ -1106,37 +1106,37 @@ def render_indicator_card_tv(title, val_str, score, change, change_pct, details)
 def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
     if sig == "SB":
-        bg_color = "rgba(230, 100, 0, 0.08)" # Elegant dark orange
-        border_color = "#e66400"
-        text_color = "#e66400"
+        bg_color = "rgba(16, 185, 129, 0.08)" # Emerald Green
+        border_color = "#10b981"
+        text_color = "#10b981"
         title = f"STARKER BUY-BIAS (STRONG BUY für {base_curr}/{quote_curr})"
         desc = f"Die makroökonomische Divergenz spricht deutlich für den {base_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bullishen Einstiegen (SMC / FVG) im Chart."
         badge = "STRONG BUY"
     elif sig == "MB":
-        bg_color = "rgba(230, 100, 0, 0.03)"
-        border_color = "rgba(230, 100, 0, 0.4)"
-        text_color = "#e66400"
+        bg_color = "rgba(226, 177, 60, 0.05)" # Premium Golden Yellow
+        border_color = "#e2b13c"
+        text_color = "#e2b13c"
         title = f"MITTLERER BUY-BIAS (MID BUY für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {base_curr} (Divergenz: {divergence:+.1f} Punkte). Nutze charttechnische Bestätigung vor Einstiegen."
         badge = "MID BUY"
     elif sig == "NT":
-        bg_color = "rgba(132, 142, 156, 0.05)"
-        border_color = "#30363d"
+        bg_color = "rgba(132, 142, 156, 0.05)" # Gray
+        border_color = "#444c56"
         text_color = "#8b949e"
         title = f"NEUTRAL / NO TRADE ({base_curr}/{quote_curr})"
         desc = f"Keine signifikante fundamentale Divergenz zwischen {base_curr} und {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Seitwärtsbewegung wahrscheinlich. Neutraler Bias."
         badge = "NEUTRAL"
     elif sig == "MS":
-        bg_color = "rgba(140, 140, 154, 0.03)"
-        border_color = "rgba(140, 140, 154, 0.4)"
-        text_color = "#8c8c9a"
+        bg_color = "rgba(226, 177, 60, 0.05)" # Premium Golden Yellow
+        border_color = "#e2b13c"
+        text_color = "#e2b13c"
         title = f"MITTLERER SELL-BIAS (MID SELL für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche nach charttechnischen Bestätigungen für Short-Setups."
         badge = "MID SELL"
     elif sig == "SS":
-        bg_color = "rgba(140, 140, 154, 0.08)"
-        border_color = "#8c8c9a"
-        text_color = "#8c8c9a"
+        bg_color = "rgba(16, 185, 129, 0.08)" # Emerald Green
+        border_color = "#10b981"
+        text_color = "#10b981"
         title = f"STARKER SELL-BIAS (STRONG SELL für {base_curr}/{quote_curr})"
         desc = f"Die makroökonomische Divergenz spricht deutlich für den {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bearishen Einstiegen im Chart."
         badge = "STRONG SELL"
@@ -1149,7 +1149,7 @@ def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_t
         badge = "ERR"
 
     if override_reason:
-        desc += f"<br><br><span style='color:#e66400; font-weight:600;'>⚠️ Signal-Filter:</span> {override_reason}"
+        desc += f"<br><br><span style='color:#e2b13c; font-weight:600;'>⚠️ Signal-Filter:</span> {override_reason}"
 
     html_content = f"""
     <div style="
