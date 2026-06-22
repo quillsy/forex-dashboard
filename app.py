@@ -1103,41 +1103,41 @@ def render_indicator_card_tv(title, val_str, score, change, change_pct, details)
     """
     st.markdown(card_html, unsafe_allow_html=True)
 
-def render_bias_box(divergence, base_curr, quote_curr):
+def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
-    if divergence > 50.0:
+    if sig == "SB":
         bg_color = "rgba(230, 100, 0, 0.08)" # Elegant dark orange
         border_color = "#e66400"
         text_color = "#e66400"
-        title = f"STARKER BUY-BIAS (STRONG LONG für {base_curr}/{quote_curr})"
+        title = f"STARKER BUY-BIAS (STRONG BUY für {base_curr}/{quote_curr})"
         desc = f"Die makroökonomische Divergenz spricht deutlich für den {base_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bullishen Einstiegen (SMC / FVG) im Chart."
         badge = "STRONG BUY"
-    elif 25.0 <= divergence <= 50.0:
+    elif sig == "MB":
         bg_color = "rgba(230, 100, 0, 0.03)"
         border_color = "rgba(230, 100, 0, 0.4)"
         text_color = "#e66400"
-        title = f"MODERATER BUY-BIAS (MILD LONG für {base_curr}/{quote_curr})"
+        title = f"MITTLERER BUY-BIAS (MID BUY für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {base_curr} (Divergenz: {divergence:+.1f} Punkte). Nutze charttechnische Bestätigung vor Einstiegen."
-        badge = "MILD BUY"
-    elif -25.0 < divergence < 25.0:
+        badge = "MID BUY"
+    elif sig == "NT":
         bg_color = "rgba(132, 142, 156, 0.05)"
         border_color = "#30363d"
         text_color = "#8b949e"
         title = f"NEUTRAL / NO TRADE ({base_curr}/{quote_curr})"
         desc = f"Keine signifikante fundamentale Divergenz zwischen {base_curr} und {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Seitwärtsbewegung wahrscheinlich. Neutraler Bias."
         badge = "NEUTRAL"
-    elif -50.0 <= divergence <= -25.0:
+    elif sig == "MS":
         bg_color = "rgba(140, 140, 154, 0.03)"
         border_color = "rgba(140, 140, 154, 0.4)"
         text_color = "#8c8c9a"
-        title = f"MODERATER SELL-BIAS (MILD SHORT für {base_curr}/{quote_curr})"
+        title = f"MITTLERER SELL-BIAS (MID SELL für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche nach charttechnischen Bestätigungen für Short-Setups."
-        badge = "MILD SELL"
-    elif divergence < -50.0:
+        badge = "MID SELL"
+    elif sig == "SS":
         bg_color = "rgba(140, 140, 154, 0.08)"
         border_color = "#8c8c9a"
         text_color = "#8c8c9a"
-        title = f"STARKER SELL-BIAS (STRONG SHORT für {base_curr}/{quote_curr})"
+        title = f"STARKER SELL-BIAS (STRONG SELL für {base_curr}/{quote_curr})"
         desc = f"Die makroökonomische Divergenz spricht deutlich für den {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bearishen Einstiegen im Chart."
         badge = "STRONG SELL"
     else:
@@ -1147,6 +1147,9 @@ def render_bias_box(divergence, base_curr, quote_curr):
         title = "BERECHNUNGSFEHLER"
         desc = "Unzureichende Daten zur Bestimmung des Biases."
         badge = "ERR"
+
+    if override_reason:
+        desc += f"<br><br><span style='color:#e66400; font-weight:600;'>⚠️ Signal-Filter:</span> {override_reason}"
 
     html_content = f"""
     <div style="
@@ -1342,6 +1345,43 @@ if data_loaded:
     # Divergence Score
     divergence = base_total_score - quote_total_score
     
+    # Calculate trading signal and apply rules
+    if divergence >= 35.0:
+        sig = "SB"
+        badge = "STRONG BUY"
+    elif 15.0 <= divergence < 35.0:
+        sig = "MB"
+        badge = "MID BUY"
+    elif -15.0 < divergence < 15.0:
+        sig = "NT"
+        badge = "NEUTRAL"
+    elif -35.0 < divergence <= -15.0:
+        sig = "MS"
+        badge = "MID SELL"
+    else:
+        sig = "SS"
+        badge = "STRONG SELL"
+
+    override_reason = None
+    # Base currency filters
+    if base_total_score > 60.0 and sig in ["MS", "SS"]:
+        sig = "NT"
+        badge = "NEUTRAL"
+        override_reason = f"Wirtschaftsscore von {base_curr} ({base_total_score:.1f}/100) ist stark (> 60), daher wurde das negative Signal auf Neutral (NT) angehoben."
+    elif base_total_score < 40.0 and sig in ["MB", "SB"]:
+        sig = "NT"
+        badge = "NEUTRAL"
+        override_reason = f"Wirtschaftsscore von {base_curr} ({base_total_score:.1f}/100) ist schwach (< 40), daher wurde das positive Signal auf Neutral (NT) abgesenkt."
+    # Quote currency filters
+    elif quote_total_score > 60.0 and sig in ["MB", "SB"]:
+        sig = "NT"
+        badge = "NEUTRAL"
+        override_reason = f"Wirtschaftsscore von {quote_curr} ({quote_total_score:.1f}/100) ist stark (> 60), daher wurde das positive Signal auf Neutral (NT) abgesenkt."
+    elif quote_total_score < 40.0 and sig in ["MS", "SS"]:
+        sig = "NT"
+        badge = "NEUTRAL"
+        override_reason = f"Wirtschaftsscore von {quote_curr} ({quote_total_score:.1f}/100) ist schwach (< 40), daher wurde das negative Signal auf Neutral (NT) angehoben."
+    
     # Pre-calculate indicator change details
     base_rate_details = get_indicator_change_details(base_fundamental['df_rate'], 'rate')
     base_unemp_details = get_indicator_change_details(base_fundamental['df_unemp'], 'unemp')
@@ -1383,7 +1423,7 @@ if data_loaded:
     # TAB 1: DASHBOARD OVERVIEW
     with tab1:
         # Bias alert box
-        render_bias_box(divergence, base_curr, quote_curr)
+        render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason)
         
         # Base vs Quote columns
         col1, col2 = st.columns(2)
@@ -1582,10 +1622,11 @@ if data_loaded:
         sc1, sc2 = st.columns(2)
         
         with sc1:
+            bias_text = "LONG (Kauf)" if sig in ["SB", "MB"] else ("SHORT (Verkauf)" if sig in ["SS", "MS"] else "NEUTRAL (Kein Trade)")
             st.markdown(f"""
             #### 1. Den fundamentalen Bias bestimmen
             - Prüfe den aktuellen **Divergenz-Score ({divergence:+.1f})**.
-            - **Bias:** {"LONG (Kauf)" if divergence >= 25.0 else ("SHORT (Verkauf)" if divergence <= -25.0 else "NEUTRAL (Kein Trade)")}
+            - **Signal:** {badge} ({bias_text})
             - Dies bestimmt deine ausschließliche Trading-Richtung für die kommenden Tage/Wochen. Bei einem **LONG-Bias** suchst du *ausschließlich* nach Kaufmöglichkeiten.
             
             #### 2. Liquidity Sweep abwarten
@@ -1611,7 +1652,8 @@ if data_loaded:
         st.markdown("#### 📋 Einstiegs-Checkliste")
         
         # Display checklist using Streamlit checkboxes
-        st.checkbox("1. Hat das Währungspaar eine klare fundamentale Divergenz (Divergenz-Score >= +25 oder <= -25)?", value=abs(divergence) >= 25.0, disabled=True)
+        has_divergence = sig in ["SB", "MB", "MS", "SS"]
+        st.checkbox("1. Hat das Währungspaar eine klare fundamentale Divergenz (Signal ist nicht NEUTRAL)?", value=has_divergence, disabled=True)
         st.checkbox("2. Stimmt die aktuelle charttechnische Ausrichtung mit dem fundamentalen Bias überein?", value=False)
         st.checkbox("3. Wurde auf dem 15m/1h-Chart ein signifikanter Liquiditätspool (High/Low) gesweept?", value=False)
         st.checkbox("4. Gab es einen Market Structure Shift (Strukturbruch) mit starkem Displacement?", value=False)
