@@ -529,7 +529,7 @@ def generate_mock_series(series_id):
     return None
 
 # ----------------- 2. FRED API FETCHING -----------------
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_fred_data(series_id, api_key):
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
@@ -578,7 +578,7 @@ def get_macro_data(series_id, api_key, use_demo):
     return df
 
 # ----------------- 2.1 ALPHA VANTAGE API FETCHING -----------------
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_alphavantage_data(function, country, api_key):
     if not api_key:
         return None
@@ -1364,6 +1364,7 @@ if data_loaded:
         st.sidebar.success(f"⚡ Aktiv: Live FRED & AV API ({base_curr}/{quote_curr})")
         
     st.sidebar.button("🔄 Daten aktualisieren", on_click=st.cache_data.clear)
+    st.sidebar.info("💡 Die Daten werden automatisch alle 5 Minuten im Hintergrund aktualisiert.")
     
     # ----------------- TABS SYSTEM (REITER) -----------------
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
