@@ -89,7 +89,7 @@ st.markdown("""
         border: 1px solid rgba(16, 185, 129, 0.15);
     }
     
-    /* News cards */
+    /* News Ticker Card Style (Bottom) */
     .news-card-custom {
         background-color: #0c0c0e;
         border: 1px solid #1f2026;
@@ -98,12 +98,10 @@ st.markdown("""
         margin-bottom: 12px;
         transition: border-color 0.2s, background-color 0.2s;
     }
-    
     .news-card-custom:hover {
         border-color: #e2b13c;
         background-color: #111114;
     }
-    
     .news-title-custom {
         font-size: 0.9rem;
         font-weight: 600;
@@ -112,16 +110,56 @@ st.markdown("""
         display: block;
         margin-bottom: 4px;
     }
-    
     .news-title-custom:hover {
         color: #e2b13c !important;
         text-decoration: underline;
     }
-    
     .news-meta-custom {
         font-size: 0.7rem;
         color: #7d7d8a;
         margin-bottom: 6px;
+    }
+
+    /* News & Research Hub - Full Card style (Grid) */
+    .news-card {
+        background-color: #0c0c0e;
+        border: 1px solid #1f2026;
+        border-radius: 6px;
+        padding: 16px;
+        margin-bottom: 15px;
+        transition: border-color 0.2s, background-color 0.2s;
+        height: 420px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }
+    .news-card:hover {
+        border-color: #e2b13c;
+        background-color: #111114;
+    }
+    .news-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #f0f0f5 !important;
+        margin-bottom: 6px;
+        text-decoration: none;
+        display: block;
+        line-height: 1.35;
+    }
+    .news-title:hover {
+        color: #e2b13c !important;
+        text-decoration: underline;
+    }
+    .news-meta {
+        font-size: 0.72rem;
+        color: #7d7d8a;
+        margin-bottom: 8px;
+    }
+    .news-desc {
+        font-size: 0.82rem;
+        color: #b2b2be;
+        margin-bottom: 8px;
+        line-height: 1.4;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -147,8 +185,6 @@ CURRENCIES = {
     "AUD": {"name": "Australian Dollar", "flag": "🇦🇺", "country": "Australia", "wb_code": "AUS"},
     "NZD": {"name": "New Zealand Dollar", "flag": "🇳🇿", "country": "New Zealand", "wb_code": "NZL"}
 }
-
-FX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]
 
 # ----------------- 0. MOCK DATA GENERATORS (Graceful Fallback) -----------------
 def generate_mock_fred(series_id):
@@ -186,9 +222,9 @@ def generate_mock_av(from_symbol, to_symbol):
 
 def generate_mock_news():
     return [
-        {"title": "FED signalisiert Zinswende: Dollar gewinnt an Stärke gegenüber dem Euro", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die US-Notenbank deutet eine längere Phase hoher Leitzinsen an.", "api_source": "MOCK-News"},
-        {"title": "EZB hält Leitzins unverändert: EUR/USD gerät unter Druck", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die EZB bestätigt den Leitzins. Analysten erwarten schwächere Euro-Notierungen.", "api_source": "MOCK-News"},
-        {"title": "Bank of Japan erhöht Leitzins minimal: JPY reagiert volatil", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die japanische Notenbank hebt den Zinssatz leicht an, um dem schwachen Yen entgegenzuwirken.", "api_source": "MOCK-News"}
+        {"title": "FED signalisiert Zinswende: Dollar gewinnt an Stärke gegenüber dem Euro", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die US-Notenbank deutet eine längere Phase hoher Leitzinsen an.", "urlToImage": None, "api_source": "MOCK-News"},
+        {"title": "EZB hält Leitzins unverändert: EUR/USD gerät unter Druck", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die EZB bestätigt den Leitzins. Analysten erwarten schwächere Euro-Notierungen.", "urlToImage": None, "api_source": "MOCK-News"},
+        {"title": "Bank of Japan erhöht Leitzins minimal: JPY reagiert volatil", "source": "MockNews", "publishedAt": datetime.now().strftime("%Y-%m-%d %H:%M"), "url": "#", "description": "Die japanische Notenbank hebt den Zinssatz leicht an, um dem schwachen Yen entgegenzuwirken.", "urlToImage": None, "api_source": "MOCK-News"}
     ]
 
 def generate_mock_benzinga():
@@ -294,44 +330,6 @@ def fetch_av_live(from_symbol, to_symbol, key):
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
 
-def fetch_newsdata_live(key):
-    url = f"https://newsdata.io/api/1/latest?apikey={key}&q=Forex OR Dollar&language=en,de"
-    r = requests.get(url, timeout=8)
-    r.raise_for_status()
-    res = r.json()
-    if res.get("status") != "success":
-        raise ValueError("NewsData error")
-    articles = []
-    for a in res.get("results", []):
-        articles.append({
-            "title": a.get("title") or "Ohne Titel",
-            "source": a.get("source_id") or "NewsData",
-            "publishedAt": a.get("pubDate") or "",
-            "url": a.get("link") or "#",
-            "description": a.get("description") or "",
-            "api_source": "NewsData.io"
-        })
-    return articles
-
-def fetch_newsapi_live(key):
-    url = f"https://newsapi.org/v2/everything?q=Forex OR Dollar&sortBy=publishedAt&pageSize=12&apiKey={key}&language=en,de"
-    r = requests.get(url, timeout=8)
-    r.raise_for_status()
-    res = r.json()
-    if res.get("status") != "ok":
-        raise ValueError("NewsAPI error")
-    articles = []
-    for a in res.get("articles", []):
-        articles.append({
-            "title": a.get("title") or "Ohne Titel",
-            "source": a.get("source", {}).get("name") or "NewsAPI",
-            "publishedAt": a.get("publishedAt") or "",
-            "url": a.get("url") or "#",
-            "description": a.get("description") or "",
-            "api_source": "NewsAPI.org"
-        })
-    return articles
-
 def fetch_benzinga_live(key):
     url = f"https://api.benzinga.com/api/v2.1/calendar/economics?token={key}"
     r = requests.get(url, timeout=8)
@@ -360,7 +358,7 @@ def fetch_fmp_live(pair, key):
     if not isinstance(res, list) or len(res) == 0:
         raise ValueError("No FMP ratings data")
     latest = res[0]
-    # Estimate buy/hold/sell counts based on available indicators
+    # Estimate buy/hold/sell counts
     b = int(latest.get("analystRatingsbuy", 10))
     h = int(latest.get("analystRatingsHold", 5))
     s = int(latest.get("analystRatingsSell", 2))
@@ -391,7 +389,6 @@ def fetch_fmp_live(pair, key):
     }
 
 def fetch_fcs_history_live(pair, key):
-    # Map periods to fcs period
     url = f"https://api-v4.fcsapi.com/forex/history?symbol={pair}&period=1d&access_key={key}"
     r = requests.get(url, timeout=8)
     r.raise_for_status()
@@ -462,27 +459,6 @@ def get_av_data(from_symbol, to_symbol, key):
         return df, datetime.now(), True
     except Exception:
         return generate_mock_av(from_symbol, to_symbol), datetime.now(), False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_news_data(newsdata_key, newsapi_key):
-    # Primary: NewsData.io
-    if newsdata_key:
-        try:
-            articles = fetch_newsdata_live(newsdata_key)
-            return articles, "NewsData.io", True, datetime.now()
-        except Exception:
-            pass
-            
-    # Fallback: NewsAPI.org
-    if newsapi_key:
-        try:
-            articles = fetch_newsapi_live(newsapi_key)
-            return articles, "NewsAPI.org (Fallback)", True, datetime.now()
-        except Exception:
-            pass
-            
-    # Last resort mock
-    return generate_mock_news(), "MOCK-News Engine", False, datetime.now()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_benzinga_data(key):
@@ -556,6 +532,83 @@ def get_worldbank_data(country_code, indicator):
         return generate_mock_worldbank(country_code, indicator), datetime.now(), False
 
 
+# ----------------- NEWS LOADER & FALLBACKS -----------------
+@st.cache_data(ttl=300, show_spinner=False)
+def get_news_data_search(query, newsdata_key, newsapi_key):
+    # Zero-Overlap Architecture for News Search
+    # 1. Primary: NewsData.io
+    if newsdata_key:
+        try:
+            url = "https://newsdata.io/api/1/latest"
+            params = {
+                "apikey": newsdata_key,
+                "q": query,
+                "language": "en,de"
+            }
+            r = requests.get(url, params=params, timeout=8)
+            if r.status_code == 200:
+                res = r.json()
+                if res.get("status") == "success":
+                    articles = []
+                    for a in res.get("results", []):
+                        articles.append({
+                            "title": a.get("title") or "Ohne Titel",
+                            "description": a.get("description") or "",
+                            "url": a.get("link") or "#",
+                            "source": a.get("source_id") or "NewsData",
+                            "publishedAt": a.get("pubDate") or "",
+                            "urlToImage": a.get("image_url"),
+                            "api": "NewsData.io"
+                        })
+                    if articles:
+                        return articles, "NewsData.io", True, datetime.now()
+        except Exception:
+            pass
+            
+    # 2. Fallback: NewsAPI.org
+    if newsapi_key:
+        try:
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                "q": query,
+                "apiKey": newsapi_key,
+                "sortBy": "publishedAt",
+                "pageSize": 25,
+                "language": "de,en"
+            }
+            r = requests.get(url, params=params, timeout=8)
+            if r.status_code == 200:
+                res = r.json()
+                if res.get("status") == "ok":
+                    articles = []
+                    for a in res.get("articles", []):
+                        if a.get("title") and a.get("title") != "[Removed]":
+                            articles.append({
+                                "title": a.get("title"),
+                                "description": a.get("description") or "",
+                                "url": a.get("url") or "#",
+                                "source": a.get("source", {}).get("name") or "NewsAPI",
+                                "publishedAt": a.get("publishedAt") or "",
+                                "urlToImage": a.get("urlToImage"),
+                                "api": "NewsAPI.org"
+                            })
+                    if articles:
+                        return articles, "NewsAPI.org (Fallback)", True, datetime.now()
+        except Exception:
+            pass
+            
+    # 3. Last resort mock
+    mock_articles = []
+    base_mock = generate_mock_news()
+    for m in base_mock:
+        m_copy = m.copy()
+        m_copy["title"] = f"[{query}] " + m_copy["title"]
+        m_copy["urlToImage"] = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
+        m_copy["api"] = "MOCK-News Engine"
+        mock_articles.append(m_copy)
+    return mock_articles, "MOCK-News Engine", False, datetime.now()
+
+
 # ----------------- Helper Functions -----------------
 def calculate_smas(df):
     if len(df) >= 50:
@@ -576,28 +629,78 @@ def format_freshness(timestamp):
     mins = secs // 60
     return f"vor {mins}m {secs % 60}s"
 
-def deduplicate_news(articles):
-    seen = set()
-    deduped = []
+def get_default_query(base, quote):
+    cb_names = {
+        'USD': 'Fed OR FOMC OR "Federal Reserve" OR Powell',
+        'EUR': 'ECB OR EZB OR Lagarde OR Eurozone',
+        'GBP': 'BoE OR "Bank of England" OR Bailey',
+        'CHF': 'SNB OR "Swiss National Bank" OR Jordan',
+        'CAD': 'BoC OR "Bank of Canada" OR Macklem',
+        'AUD': 'RBA OR "Reserve Bank of Australia" OR Bullock',
+        'NZD': 'RBNZ OR "Reserve Bank of New Zealand" OR Orr',
+        'JPY': 'BoJ OR "Bank of Japan" OR Ueda'
+    }
+    base_term = cb_names.get(base, base)
+    quote_term = cb_names.get(quote, quote)
+    return f"({base} OR {quote} OR {base_term} OR {quote_term}) AND (inflation OR interest OR GDP OR Leitzins)"
+
+def deduplicate_articles(articles):
+    seen_urls = set()
+    seen_titles = set()
+    unique_articles = []
     for art in articles:
-        norm = "".join(art["title"].split()).lower()[:50]
-        if norm not in seen:
-            seen.add(norm)
-            deduped.append(art)
-    return deduped
+        url = art.get("url")
+        if url:
+            url_norm = url.replace("https://", "").replace("http://", "").rstrip("/")
+        else:
+            url_norm = ""
+            
+        title = art.get("title", "").strip().lower()
+        for suffix in [" - reuters", " - bloomberg", " - cnbc", " - marketwatch", " | reuters", " | bloomberg", " | cnbc"]:
+            if title.endswith(suffix):
+                title = title[:-len(suffix)].strip()
+                
+        title_clean = "".join(c for c in title if c.isalnum())
+        title_trunc = title_clean[:35]
+        
+        if not title_trunc:
+            continue
+            
+        if url_norm in seen_urls or title_trunc in seen_titles:
+            continue
+            
+        if url_norm:
+            seen_urls.add(url_norm)
+        seen_titles.add(title_trunc)
+        unique_articles.append(art)
+    return unique_articles
+
+def categorize_article(art):
+    title_desc = f"{art.get('title', '')} {art.get('description', '')}".lower()
+    trade_keywords = ["export", "import", "trade", "handel", "zoll", "tariffs", "lieferkette", "supply chain", "bilanz", "freihandel"]
+    if any(kw in title_desc for kw in trade_keywords):
+        return "🚢 Import & Export"
+        
+    rates_keywords = ["fed", "fomc", "leitzins", "zins", "interest", "ecb", "ezb", "rate", "central bank", "zentralbank", "powell", "lagarde", "geldpolitik"]
+    if any(kw in title_desc for kw in rates_keywords):
+        return "🏦 Geldpolitik & Zinsen"
+        
+    country_keywords = ["usa", "us-dollar", "america", "eurozone", "deutsch", "germany", "schweiz", "swiss", "kanada", "canada", "australi", "neuseeland", "new zealand", "japan", "england", "britain", "uk ", "gbp"]
+    if any(kw in title_desc for kw in country_keywords):
+        return "🌍 Länder-Analysen"
+        
+    return "📊 Sonstige Makro-News"
 
 def get_country_rate(country_code, fred_key):
-    # Mock fallback latest central bank rates
     fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 5.00, "JPN": 0.25, "CHE": 1.25}
     series_map = {
         "USA": "FEDFUNDS",
-        "EMU": "ECBMAINVAL", # ECB Policy Rate
-        "GBR": "IUDSOIA",    # BoE rate
-        "JPN": "INTGSTJP",   # BoJ policy rate
-        "CHE": "INTGSTCH"    # SNB policy rate
+        "EMU": "ECBMAINVAL",
+        "GBR": "IUDSOIA",
+        "JPN": "INTGSTJP",
+        "CHE": "INTGSTCH"
     }
     
-    # Try fetching FRED
     if country_code in series_map:
         sid = series_map[country_code]
         df, t, is_live = get_fred_data(sid, fred_key)
@@ -612,22 +715,18 @@ def get_country_rate(country_code, fred_key):
 
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
-    # Weights: Leitzins (30%), Inflation (30%), Unemployment (20%), GDP growth (20%)
     if curr == "USD":
         df_rate, _, _ = get_fred_data("FEDFUNDS", fred_key)
         df_unemp, _, _ = get_fred_data("UNRATE", fred_key)
         df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
         df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
         
-        # Leitzins Score
         latest_rate = df_rate.iloc[-1]["value"] if not df_rate.empty else 5.25
         rate_score = np.clip((latest_rate / 6.0) * 100, 0, 100)
         
-        # Unemployment Score
         latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else 3.8
         unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
         
-        # Inflation Score
         if not df_cpi.empty and len(df_cpi) >= 13:
             df_cpi_c = df_cpi.copy()
             df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
@@ -636,7 +735,6 @@ def compute_currency_score(curr, fred_key):
             latest_cpi = 2.4
         cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
         
-        # GDP Score
         if not df_gdp.empty and len(df_gdp) >= 5:
             df_gdp_c = df_gdp.copy()
             df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
@@ -645,7 +743,6 @@ def compute_currency_score(curr, fred_key):
             latest_gdp = 1.8
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
     else:
-        # Countries outside USA use World Bank data
         code = CURRENCIES[curr]["wb_code"]
         df_gdp, _, _ = get_worldbank_data(code, "NY.GDP.MKTP.KD.ZG")
         df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
@@ -653,7 +750,7 @@ def compute_currency_score(curr, fred_key):
         rate_val, _, _ = get_country_rate(code, fred_key)
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
-        unemp_score = 65.0 # Fallback unemp score
+        unemp_score = 65.0
         
         latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else 2.5
         cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
@@ -669,35 +766,35 @@ def compute_currency_score(curr, fred_key):
 def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
     if sig == "SB":
-        bg_color = "rgba(16, 185, 129, 0.08)" # Emerald Green
+        bg_color = "rgba(16, 185, 129, 0.08)"
         border_color = "#10b981"
         text_color = "#10b981"
         title = f"STARKER BUY-BIAS (STRONG BUY für {base_curr}/{quote_curr})"
         desc = f"Die makroökonomische Divergenz spricht deutlich für den {base_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bullishen Einstiegen (SMC / FVG) im Chart."
         badge = "STRONG BUY"
     elif sig == "MB":
-        bg_color = "rgba(226, 177, 60, 0.05)" # Premium Golden Yellow
+        bg_color = "rgba(226, 177, 60, 0.05)"
         border_color = "#e2b13c"
         text_color = "#e2b13c"
         title = f"MITTLERER BUY-BIAS (MID BUY für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {base_curr} (Divergenz: {divergence:+.1f} Punkte). Nutze charttechnische Bestätigung vor Einstiegen."
         badge = "MID BUY"
     elif sig == "NT":
-        bg_color = "rgba(132, 142, 156, 0.05)" # Gray
+        bg_color = "rgba(132, 142, 156, 0.05)"
         border_color = "#444c56"
         text_color = "#8b949e"
         title = f"NEUTRAL / NO TRADE ({base_curr}/{quote_curr})"
         desc = f"Keine signifikante fundamentale Divergenz zwischen {base_curr} und {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Seitwärtsbewegung wahrscheinlich. Neutraler Bias."
         badge = "NEUTRAL"
     elif sig == "MS":
-        bg_color = "rgba(226, 177, 60, 0.05)" # Premium Golden Yellow
+        bg_color = "rgba(226, 177, 60, 0.05)"
         border_color = "#e2b13c"
         text_color = "#e2b13c"
         title = f"MITTLERER SELL-BIAS (MID SELL für {base_curr}/{quote_curr})"
         desc = f"Milder fundamentaler Vorteil für {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche nach charttechnischen Bestätigungen für Short-Setups."
         badge = "MID SELL"
     elif sig == "SS":
-        bg_color = "rgba(16, 185, 129, 0.08)" # Emerald Green
+        bg_color = "rgba(16, 185, 129, 0.08)"
         border_color = "#10b981"
         text_color = "#10b981"
         title = f"STARKER SELL-BIAS (STRONG SELL für {base_curr}/{quote_curr})"
@@ -769,13 +866,66 @@ def render_metric_card(title, val_str, source_text, is_live):
     """
     st.markdown(card_html, unsafe_allow_html=True)
 
+def render_articles_grid(articles_list):
+    if not articles_list:
+        st.info("Keine Artikel in dieser Kategorie vorhanden.")
+        return
+        
+    cols = st.columns(3)
+    for idx, art in enumerate(articles_list):
+        col_idx = idx % 3
+        with cols[col_idx]:
+            # Prepare pubdate
+            pub_date_str = ""
+            if art['publishedAt']:
+                try:
+                    dt = pd.to_datetime(art['publishedAt'])
+                    pub_date_str = dt.strftime('%d.%m.%Y %H:%M')
+                except:
+                    pub_date_str = str(art['publishedAt'])
+            
+            # Image tag
+            fallback_img = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
+            img_html = ""
+            if art.get('urlToImage'):
+                img_html = f'<img src="{art["urlToImage"]}" referrerpolicy="no-referrer" onerror="this.onerror=null; this.src=\'{fallback_img}\';" style="width:100%; height:130px; object-fit:cover; border-radius:6px; margin-bottom:10px; border: 1px solid #1f2026;">'
+            else:
+                img_html = f'<div style="width:100%; height:130px; background-color:#0c0c0e; border-radius:6px; margin-bottom:10px; display:flex; justify-content:center; align-items:center; border: 1px solid #1f2026;"><span style="font-size:2rem;">📊</span></div>'
+                
+            desc_str = art.get('description', '')
+            if not desc_str:
+                desc_str = "Keine Kurzbeschreibung verfügbar. Bitte folge dem Link, um den vollständigen Artikel zu lesen."
+            if len(desc_str) > 200:
+                desc_str = desc_str[:197] + "..."
+                
+            st.markdown(f"""
+            <div class="news-card">
+                <div>
+                    {img_html}
+                    <a class="news-title" href="{art['url']}" target="_blank">{art['title']}</a>
+                    <div class="news-meta">Quelle: <strong>{art['source']}</strong> | {pub_date_str}</div>
+                    <p class="news-desc">{desc_str}</p>
+                </div>
+                <div style="border-top:1px solid #1f2026; padding-top:8px; margin-top:8px; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:0.68rem; color:#8b949e; background-color:#1f2026; padding:2px 6px; border-radius:3px;">{art.get('api', 'News')}</span>
+                    <a href="{art['url']}" target="_blank" style="font-size:0.75rem; color:#e2b13c; text-decoration:none; font-weight:600;">Lesen ↗</a>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
 
 # ----------------- 3. SIDEBAR CONFIGURATION -----------------
 st.sidebar.title("⚙️ Dashboard-Einstellungen")
 
-# Active Pair Selector
-selected_pair = st.sidebar.selectbox("💱 Aktives Währungspaar", options=FX_PAIRS, index=0)
-base_curr, quote_curr = selected_pair.split("/")
+# Pairwise Selector for any of the 8 currencies
+st.sidebar.markdown("### 💱 Währungspaar wählen")
+base_curr = st.sidebar.selectbox("Basiswährung (Base)", options=list(CURRENCIES.keys()), index=1) # Default EUR
+quote_curr = st.sidebar.selectbox("Quote-Währung (Quote)", options=list(CURRENCIES.keys()), index=0) # Default USD
+selected_pair = f"{base_curr}/{quote_curr}"
+
+if base_curr == quote_curr:
+    st.sidebar.error("Basis- und Quote-Währung dürfen nicht identisch sein.")
+    st.stop()
 
 # Manual cache clear
 st.sidebar.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
@@ -828,7 +978,7 @@ with st.spinner("Initialisiere globale Marktdaten..."):
 
 # ----------------- 5. HEADER SECTION -----------------
 st.title("⚖️ Forex Fundamental Suite")
-st.markdown("Professionelle makroökonomische Divergenz-Engine mit Zero-Overlap-Architektur.")
+st.markdown(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
 
 # Always show bias banner and economy scores at the top
 render_bias_box(divergence, base_curr, quote_curr, base_score, quote_score, sig, override_reason)
@@ -853,13 +1003,14 @@ with col_score_q:
 
 
 # ----------------- 6. TABS MODULES -----------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📅 Economic Calendar",
     "🏦 Zinsdifferenz",
     "📊 Analysten-Konsens",
     "🧠 Sentiment-Score",
     "🧮 Korrelationsmatrix",
-    "📈 Langfristige Historie"
+    "📈 Langfristige Historie",
+    "📰 News & Research"
 ])
 
 # ----------------- TAB 1: ECONOMIC CALENDAR (Benzinga) -----------------
@@ -868,8 +1019,6 @@ with tab1:
     st.caption("Echtzeit-Timeline der kommenden globalen Events der nächsten 30 Tage.")
     
     df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
-    
-    # Header freshness
     st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
     
     # Filter
@@ -888,9 +1037,7 @@ with tab1:
     if sel_importance != "All":
         filtered_cal = filtered_cal[filtered_cal["importance"] == sel_importance]
         
-    # Render table with color-coded actual vs consensus
     if not filtered_cal.empty:
-        # Style actual vs consensus
         styled_rows = []
         for idx, row in filtered_cal.iterrows():
             act = row["actual"]
@@ -899,7 +1046,6 @@ with tab1:
             act_style = ""
             if act is not None and cons is not None and cons != "-":
                 try:
-                    # Strip symbols like %, K, M
                     act_num = float(str(act).replace("%","").replace("K","").replace("M","").strip())
                     cons_num = float(str(cons).replace("%","").replace("K","").replace("M","").strip())
                     if act_num >= cons_num:
@@ -952,18 +1098,15 @@ with tab2:
     st.header("🏦 Zinsdifferenz & Notenbanken")
     st.caption("Vergleich der aktuellen Leitzinsen der wichtigsten Notenbanken weltweit.")
     
-    # Read FRED key
     df_f_funds, t_fred, is_live_fred = get_fred_data("FEDFUNDS", FRED_KEY)
     st.sidebar.caption(f"**FRED:** {format_freshness(t_fred)} ({'Live' if is_live_fred else 'Demo'})")
     
-    # Get rates
     rate_usd, change_usd, source_usd = get_country_rate("USA", FRED_KEY)
     rate_eur, change_eur, source_eur = get_country_rate("EMU", FRED_KEY)
     rate_gbp, change_gbp, source_gbp = get_country_rate("GBR", FRED_KEY)
     rate_jpy, change_jpy, source_jpy = get_country_rate("JPN", FRED_KEY)
     rate_chf, change_chf, source_chf = get_country_rate("CHE", FRED_KEY)
     
-    # Display cards
     z_col1, z_col2, z_col3, z_col4, z_col5 = st.columns(5)
     with z_col1:
         render_metric_card("Fed Rates (USD)", f"{rate_usd:.2f}%", source_usd, is_live_fred)
@@ -981,10 +1124,8 @@ with tab2:
         render_metric_card("SNB Rates (CHF)", f"{rate_chf:.2f}%", source_chf, is_live_fred)
         st.metric("Veränderung", f"{rate_chf:.2f}%", f"{change_chf:+d} Bps", label_visibility="collapsed")
         
-    # Draw chart
     banks = ["USD (Fed)", "EUR (ECB)", "GBP (BoE)", "CHF (SNB)", "JPY (BoJ)"]
     rates = [rate_usd, rate_eur, rate_gbp, rate_chf, rate_jpy]
-    changes = [change_usd, change_eur, change_gbp, change_chf, change_jpy]
     
     fig_rates = go.Figure()
     fig_rates.add_trace(go.Bar(
@@ -1013,7 +1154,7 @@ with tab2:
 # ----------------- TAB 3: ANALYSTEN-KONSENS (FMP) -----------------
 with tab3:
     st.header("📊 Analysten-Konsens & Kursziele")
-    st.caption(f"Konsens-Ratings und durchschnittliche Kursziele für das Währungspaar **{base_curr}/{quote_curr}**.")
+    st.caption(f"Konsens-Ratings und durchschnittliche Kursziele für das Währungspaar **{selected_pair}**.")
     
     fmp_data, t_fmp, is_live_fmp = get_fmp_data(selected_pair, FMP_KEY)
     st.sidebar.caption(f"**FMP:** {format_freshness(t_fmp)} ({'Live' if is_live_fmp else 'Demo'})")
@@ -1021,8 +1162,6 @@ with tab3:
     c_col1, c_col2 = st.columns([1, 1.2])
     with c_col1:
         st.subheader("Verteilung der Analysten-Ratings")
-        
-        # Draw pie/bar
         labels = ["Buy", "Hold", "Sell"]
         counts = [fmp_data["buy"], fmp_data["hold"], fmp_data["sell"]]
         
@@ -1045,7 +1184,6 @@ with tab3:
         
     with c_col2:
         st.subheader("Konsens-Kursziele")
-        
         avg_t = fmp_data["target_mean"]
         high_t = fmp_data["target_high"]
         low_t = fmp_data["target_low"]
@@ -1068,14 +1206,13 @@ with tab3:
     st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_fmp else ''}'>Quelle: Financial Modeling Prep</div>", unsafe_allow_html=True)
 
 # ----------------- TAB 4: SENTIMENT-SCORE (StockData.org) -----------------
-with tab3 if False else tab4:
+with tab4:
     st.header("🧠 Markt-Sentiment (News Tonalität)")
-    st.caption(f"Berechnetes News-Sentiment (-10 bis +10) für das Paar **{base_curr}/{quote_curr}** basierend auf künstlicher Intelligenz.")
+    st.caption(f"Berechnetes News-Sentiment (-10 bis +10) für das Paar **{selected_pair}** basierend auf künstlicher Intelligenz.")
     
     sent_val, t_sent, is_live_sent = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
     st.sidebar.caption(f"**StockData:** {format_freshness(t_sent)} ({'Live' if is_live_sent else 'Demo'})")
     
-    # Plotly Gauge Chart for Sentiment
     fig_gauge = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = sent_val,
@@ -1108,12 +1245,11 @@ with tab3 if False else tab4:
     )
     st.plotly_chart(fig_gauge, use_container_width=True)
     
-    # Signal Interpretation
     st.markdown("#### Sentiment-Einordnung:")
     if sent_val >= 3.5:
-        st.success(f"🟢 **Bullish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend positiv für den {base_curr}.")
+        st.success(f"🟢 **Bullish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend positiv für das Währungspaar.")
     elif sent_val <= -3.5:
-        st.error(f"🔴 **Bearish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend negativ für den {base_curr}.")
+        st.error(f"🔴 **Bearish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend negativ für das Währungspaar.")
     else:
         st.warning(f"🟡 **Neutral ({sent_val:+.1f})** – Ausgeglichene Tonalität im News-Umfeld.")
         
@@ -1127,7 +1263,6 @@ with tab5:
     df_corr, t_corr, is_live_corr = get_fcs_correlation_data(FCS_KEY)
     st.sidebar.caption(f"**FCS API:** {format_freshness(t_corr)} ({'Live' if is_live_corr else 'Demo'})")
     
-    # Draw Plotly Heatmap
     fig_heatmap = px.imshow(
         df_corr,
         text_auto=".2f",
@@ -1155,7 +1290,6 @@ with tab6:
     df_hist, t_hist, is_live_hist = get_fcs_history_data(selected_pair, FCS_KEY)
     
     if not df_hist.empty:
-        # Range slider chart
         fig_hist = go.Figure()
         fig_hist.add_trace(go.Scatter(
             x=df_hist["date"], y=df_hist["close"],
@@ -1186,46 +1320,80 @@ with tab6:
         
     st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_hist else ''}'>Quelle: FCS API</div>", unsafe_allow_html=True)
 
+# ----------------- TAB 7: NEWS & RESEARCH HUB (Restored News Pages) -----------------
+with tab7:
+    st.header("📰 News & Research Hub")
+    st.caption(f"Aktuelle fundamentale Marktnachrichten für das Paar **{selected_pair}** mit thematischer Gruppierung.")
+    
+    # Pre-calculated default query
+    default_q = get_default_query(base_curr, quote_curr)
+    
+    # Search input
+    search_q = st.text_input("🔍 Nachrichten durchsuchen", value=default_q, help="Nutze Stichworte wie Inflation, Leitzins, Fed, EZB etc.")
+    
+    if search_q:
+        with st.spinner("Suche aktuelle Nachrichten..."):
+            raw_articles, news_source, is_news_live, t_news = get_news_data_search(search_q, NEWSDATA_KEY, NEWSAPI_KEY)
+            st.sidebar.caption(f"**News Hub:** {format_freshness(t_news)} ({'Live' if is_news_live else 'Demo'})")
+            
+            # Deduplicate articles
+            news_articles = deduplicate_articles(raw_articles)
+            
+        if news_articles:
+            st.info(f"Es wurden {len(news_articles)} relevante und einzigartige Artikel gefunden. (Aktiv: {news_source})")
+            
+            # Categorize articles
+            grouped_articles = {
+                "🏦 Geldpolitik & Zinsen": [],
+                "🚢 Import & Export": [],
+                "🌍 Länder-Analysen": [],
+                "📊 Sonstige Makro-News": []
+            }
+            
+            for art in news_articles:
+                cat = categorize_article(art)
+                grouped_articles[cat].append(art)
+                
+            # Create sub-tabs
+            sub_tabs = st.tabs([
+                "📋 Alle News", 
+                "🏦 Geldpolitik & Zinsen", 
+                "🚢 Import & Export", 
+                "🌍 Länder-Analysen", 
+                "📊 Sonstige Makro-News"
+            ])
+            
+            with sub_tabs[0]:
+                render_articles_grid(news_articles)
+            with sub_tabs[1]:
+                render_articles_grid(grouped_articles["🏦 Geldpolitik & Zinsen"])
+            with sub_tabs[2]:
+                render_articles_grid(grouped_articles["🚢 Import & Export"])
+            with sub_tabs[3]:
+                render_articles_grid(grouped_articles["🌍 Länder-Analysen"])
+            with sub_tabs[4]:
+                render_articles_grid(grouped_articles["📊 Sonstige Makro-News"])
+        else:
+            st.warning("Keine aktuellen Nachrichten zu diesem Suchbegriff gefunden.")
+            
+    st.markdown("<div class='source-tag'>Quelle: NewsData.io & NewsAPI.org</div>", unsafe_allow_html=True)
 
-# ----------------- 7. FALLBACK & NEWS (FRED & NewsData.io) -----------------
+
+# ----------------- 7. FALLBACK BOTTOM BAR (Leitdaten) -----------------
 st.markdown("---")
-col_macro_bottom, col_news_bottom = st.columns([1.2, 1])
+st.subheader("🇺🇸 US-Makroökonomische Leitdaten")
 
-with col_macro_bottom:
-    st.subheader("🇺🇸 US-Makroökonomische Leitdaten")
-    
-    df_funds, _, _ = get_fred_data("FEDFUNDS", FRED_KEY)
-    df_unemp, _, _ = get_fred_data("UNRATE", FRED_KEY)
-    df_cpi, _, _ = get_fred_data("CPIAUCSL", FRED_KEY)
-    
-    m_col1, m_col2, m_col3 = st.columns(3)
-    with m_col1:
-        latest_val = df_funds.iloc[-1]["value"] if not df_funds.empty else 0.0
-        render_metric_card("Fed Funds Rate", f"{latest_val:.2f}%", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
-    with m_col2:
-        latest_val = df_unemp.iloc[-1]["value"] if not df_unemp.empty else 0.0
-        render_metric_card("Arbeitslosenquote", f"{latest_val:.2f}%", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
-    with m_col3:
-        latest_val = df_cpi.iloc[-1]["value"] if not df_cpi.empty else 0.0
-        render_metric_card("Verbraucherpreise (CPI)", f"{latest_val:.1f}", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
+df_funds, _, _ = get_fred_data("FEDFUNDS", FRED_KEY)
+df_unemp, _, _ = get_fred_data("UNRATE", FRED_KEY)
+df_cpi, _, _ = get_fred_data("CPIAUCSL", FRED_KEY)
 
-with col_news_bottom:
-    st.subheader("📰 Nachrichten-Ticker")
-    
-    # Load news
-    articles, source_name, is_news_live, t_news = get_news_data(NEWSDATA_KEY, NEWSAPI_KEY)
-    st.sidebar.caption(f"**News Hub:** {format_freshness(t_news)} ({'Live' if is_news_live else 'Demo'})")
-    
-    deduped_articles = deduplicate_news(articles)
-    
-    if deduped_articles:
-        for a in deduped_articles[:4]:
-            st.markdown(f"""
-            <div class="news-card-custom">
-                <a class="news-title-custom" href="{a['url']}" target="_blank">{a['title']}</a>
-                <div class="news-meta-custom">Quelle: <strong>{a['source']}</strong> | {a['publishedAt'][:16]}</div>
-                <div class="source-tag">Quelle: {a['api_source']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("Keine aktuellen Nachrichten vorhanden.")
+m_col1, m_col2, m_col3 = st.columns(3)
+with m_col1:
+    latest_val = df_funds.iloc[-1]["value"] if not df_funds.empty else 0.0
+    render_metric_card("Fed Funds Rate", f"{latest_val:.2f}%", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
+with m_col2:
+    latest_val = df_unemp.iloc[-1]["value"] if not df_unemp.empty else 0.0
+    render_metric_card("Arbeitslosenquote", f"{latest_val:.2f}%", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
+with m_col3:
+    latest_val = df_cpi.iloc[-1]["value"] if not df_cpi.empty else 0.0
+    render_metric_card("Verbraucherpreise (CPI)", f"{latest_val:.1f}", f"FRED ({'Live' if FRED_KEY else 'Demo'})", bool(FRED_KEY))
