@@ -1279,30 +1279,41 @@ st.sidebar.markdown("""
 # Keys expander at the very bottom
 st.sidebar.markdown("---")
 with st.sidebar.expander("🔑 keys"):
+    try:
+        default_fred = st.secrets.get("FRED_API_KEY", "16a7c7fcd052b9da3b801f2691a37d3b")
+        default_av = st.secrets.get("AV_API_KEY", "BATX15WEXQJY7SS5")
+        default_newsapi = st.secrets.get("NEWSAPI_KEY", "498a4855604345789b4a6eb4757f6ce8")
+        default_newsdata = st.secrets.get("NEWSDATA_KEY", "pub_de1743243cb64703ac59bf87ae1566b7")
+    except Exception:
+        default_fred = "16a7c7fcd052b9da3b801f2691a37d3b"
+        default_av = "BATX15WEXQJY7SS5"
+        default_newsapi = "498a4855604345789b4a6eb4757f6ce8"
+        default_newsdata = "pub_de1743243cb64703ac59bf87ae1566b7"
+
     api_key = st.text_input(
         "FRED API-Key",
         type="password",
-        value="16a7c7fcd052b9da3b801f2691a37d3b",
+        value=default_fred,
         help="Erstelle einen kostenlosen Key unter https://fred.stlouisfed.org",
         placeholder="Eingabe für Live-Modus..."
     )
     av_key = st.text_input(
         "Alpha Vantage API-Key",
         type="password",
-        value="BATX15WEXQJY7SS5",
+        value=default_av,
         help="Erstelle einen Key unter https://www.alphavantage.co",
         placeholder="Eingabe für Live-Modus..."
     )
     newsapi_key = st.text_input(
         "NewsAPI.org Key",
         type="password",
-        value="498a4855604345789b4a6eb4757f6ce8",
+        value=default_newsapi,
         help="Erstelle einen Key auf newsapi.org"
     )
     newsdata_key = st.text_input(
         "NewsData.io Key",
         type="password",
-        value="pub_de1743243cb64703ac59bf87ae1566b7",
+        value=default_newsdata,
         help="Erstelle einen Key auf newsdata.io"
     )
     use_demo = st.checkbox(
