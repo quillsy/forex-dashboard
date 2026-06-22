@@ -694,7 +694,9 @@ def compute_currency_fundamental_suite(curr, fred_key, av_key, use_demo):
         if np.isnan(latest_cpi_yoy):
             latest_cpi_yoy = 2.0
             
-    df_av_cpi = get_av_macro_data('CPI', CURRENCIES[curr]['av_country'], av_key, use_demo)
+    df_av_cpi = None
+    if curr == 'USD':
+        df_av_cpi = get_av_macro_data('CPI', CURRENCIES[curr]['av_country'], av_key, use_demo)
     latest_av_cpi_yoy = None
     if df_av_cpi is not None and not df_av_cpi.empty:
         latest_av_val = df_av_cpi.iloc[-1]['value']
