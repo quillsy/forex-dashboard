@@ -763,42 +763,42 @@ def compute_currency_score(curr, fred_key):
 
 
 # ----------------- UI RENDERERS -----------------
-def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
+def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
     if sig == "SB":
         bg_color = "rgba(16, 185, 129, 0.08)"
         border_color = "#10b981"
         text_color = "#10b981"
         title = f"STARKER BUY-BIAS (STRONG BUY für {base_curr}/{quote_curr})"
-        desc = f"Die makroökonomische Divergenz spricht deutlich für den {base_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bullishen Einstiegen (SMC / FVG) im Chart."
+        desc = f"Die makroökonomische Divergenz spricht deutlich für den {base_curr} (Signal-Wert: {signal_val:+.1f}). Suche primär nach bullishen Einstiegen (SMC / FVG) im Chart."
         badge = "STRONG BUY"
     elif sig == "MB":
         bg_color = "rgba(226, 177, 60, 0.05)"
         border_color = "#e2b13c"
         text_color = "#e2b13c"
         title = f"MITTLERER BUY-BIAS (MID BUY für {base_curr}/{quote_curr})"
-        desc = f"Milder fundamentaler Vorteil für {base_curr} (Divergenz: {divergence:+.1f} Punkte). Nutze charttechnische Bestätigung vor Einstiegen."
+        desc = f"Milder fundamentaler Vorteil für {base_curr} (Signal-Wert: {signal_val:+.1f}). Nutze charttechnische Bestätigung vor Einstiegen."
         badge = "MID BUY"
     elif sig == "NT":
         bg_color = "rgba(132, 142, 156, 0.05)"
         border_color = "#444c56"
         text_color = "#8b949e"
         title = f"NEUTRAL / NO TRADE ({base_curr}/{quote_curr})"
-        desc = f"Keine signifikante fundamentale Divergenz zwischen {base_curr} und {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Seitwärtsbewegung wahrscheinlich. Neutraler Bias."
+        desc = f"Keine signifikante fundamentale Divergenz zwischen {base_curr} und {quote_curr} (Signal-Wert: {signal_val:+.1f}). Seitwärtsbewegung wahrscheinlich. Neutraler Bias."
         badge = "NEUTRAL"
     elif sig == "MS":
         bg_color = "rgba(226, 177, 60, 0.05)"
         border_color = "#e2b13c"
         text_color = "#e2b13c"
         title = f"MITTLERER SELL-BIAS (MID SELL für {base_curr}/{quote_curr})"
-        desc = f"Milder fundamentaler Vorteil für {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche nach charttechnischen Bestätigungen für Short-Setups."
+        desc = f"Milder fundamentaler Vorteil für {quote_curr} (Signal-Wert: {signal_val:+.1f}). Suche nach charttechnischen Bestätigungen für Short-Setups."
         badge = "MID SELL"
     elif sig == "SS":
         bg_color = "rgba(16, 185, 129, 0.08)"
         border_color = "#10b981"
         text_color = "#10b981"
         title = f"STARKER SELL-BIAS (STRONG SELL für {base_curr}/{quote_curr})"
-        desc = f"Die makroökonomische Divergenz spricht deutlich für den {quote_curr} (Divergenz: {divergence:+.1f} Punkte). Suche primär nach bearishen Einstiegen im Chart."
+        desc = f"Die makroökonomische Divergenz spricht deutlich für den {quote_curr} (Signal-Wert: {signal_val:+.1f}). Suche primär nach bearishen Einstiegen im Chart."
         badge = "STRONG SELL"
     else:
         bg_color = "rgba(132, 142, 156, 0.05)"
@@ -826,7 +826,7 @@ def render_bias_box(divergence, base_curr, quote_curr, base_total_score, quote_t
                 text-transform: uppercase;
                 letter-spacing: 1.2px;
                 color: #8b949e;
-            ">{base_curr}/{quote_curr} Fundamentale Divergenz: {divergence:+.1f}</span>
+            ">{base_curr}/{quote_curr} Fundamental-Signal: {signal_val:+.1f}</span>
             <span style="
                 background-color: {border_color}22;
                 color: {text_color};
@@ -935,19 +935,23 @@ with st.spinner("Initialisiere globale Marktdaten..."):
     # Pre-load macro scores
     base_score = compute_currency_score(base_curr, FRED_KEY)
     quote_score = compute_currency_score(quote_curr, FRED_KEY)
-    divergence = base_score - quote_score
     
-    # Calculate filtered trading signal
-    if divergence >= 35.0:
+    # Calculate corrected signal value (scaled to range -50 to +50)
+    raw_diff = base_score - quote_score
+    signal_value = raw_diff / 2.0
+    signal_value = max(-50.0, min(50.0, signal_value))
+    
+    # Calculate filtered trading signal based on new boundaries
+    if signal_value >= 35.0:
         sig = "SB"
         badge = "STRONG BUY"
-    elif 15.0 <= divergence < 35.0:
+    elif 15.0 <= signal_value < 35.0:
         sig = "MB"
         badge = "MID BUY"
-    elif -15.0 < divergence < 15.0:
+    elif -15.0 < signal_value < 15.0:
         sig = "NT"
         badge = "NEUTRAL"
-    elif -35.0 < divergence <= -15.0:
+    elif -35.0 < signal_value <= -15.0:
         sig = "MS"
         badge = "MID SELL"
     else:
@@ -981,7 +985,7 @@ st.title("⚖️ Forex Fundamental Suite")
 st.markdown(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
 
 # Always show bias banner and economy scores at the top
-render_bias_box(divergence, base_curr, quote_curr, base_score, quote_score, sig, override_reason)
+render_bias_box(signal_value, base_curr, quote_curr, base_score, quote_score, sig, override_reason)
 
 col_score_b, col_score_q = st.columns(2)
 with col_score_b:
