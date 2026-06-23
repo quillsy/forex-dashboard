@@ -332,22 +332,59 @@ def fetch_av_live(from_symbol, to_symbol, key):
 
 def fetch_benzinga_live(key):
     url = f"https://api.benzinga.com/api/v2.1/calendar/economics?token={key}"
-    r = requests.get(url, timeout=8)
+    r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
     r.raise_for_status()
     res = r.json()
     calendar = res.get("economics", [])
     parsed = []
     for item in calendar:
+        dt = item.get("date") or ""
+        tm = item.get("time") or ""
+        combined_time = f"{dt} {tm}".strip()
+        
+        act_val = item.get("actual")
+        if act_val is not None and str(act_val).strip() != "":
+            act_unit = item.get("actual_t") or ""
+            actual_str = f"{act_val}{act_unit}"
+        else:
+            actual_str = None
+
+        cons_val = item.get("consensus")
+        if cons_val is not None and str(cons_val).strip() != "":
+            cons_unit = item.get("consensus_t") or ""
+            consensus_str = f"{cons_val}{cons_unit}"
+        else:
+            consensus_str = "-"
+
+        prior_val = item.get("prior")
+        if prior_val is not None and str(prior_val).strip() != "":
+            prior_unit = item.get("prior_t") or ""
+            prior_str = f"{prior_val}{prior_unit}"
+        else:
+            prior_str = "-"
+
+        imp_raw = item.get("importance")
+        if imp_raw == 3 or imp_raw == "3" or imp_raw == "High":
+            imp = "High"
+        elif imp_raw == 2 or imp_raw == "2" or imp_raw == "Medium":
+            imp = "Medium"
+        else:
+            imp = "Low"
+
         parsed.append({
-            "time": item.get("date") or "",
+            "time": combined_time,
             "country": item.get("country") or "",
             "event": item.get("event_name") or "",
-            "consensus": item.get("consensus") or "-",
-            "actual": item.get("actual") or None,
-            "prior": item.get("prior") or "-",
-            "importance": item.get("importance") or "Medium"
+            "consensus": consensus_str,
+            "actual": actual_str,
+            "prior": prior_str,
+            "importance": imp
         })
-    return pd.DataFrame(parsed)
+    df = pd.DataFrame(parsed)
+    if not df.empty:
+        df["dt_temp"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df.sort_values("dt_temp", ascending=True).drop(columns=["dt_temp"])
+    return df
 
 def fetch_fmp_live(pair, key):
     symbol = pair.replace("/", "")
