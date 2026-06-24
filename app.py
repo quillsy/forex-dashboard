@@ -772,6 +772,57 @@ def get_latest_worldbank_trade_balance(country_code):
         pass
     return None
 
+@st.cache_data(ttl=86400) # 1 day
+def get_oecd_cli_data():
+    url = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_STES@DF_CLI/?format=csv"
+    try:
+        response = requests.get(url, timeout=20)
+        if response.status_code == 200:
+            df = pd.read_csv(io.StringIO(response.text))
+            return df
+    except Exception:
+        pass
+    return None
+
+def get_latest_oecd_cli(curr):
+    mapping = {
+        "USD": "USA",
+        "EUR": "EA20",
+        "GBP": "GBR",
+        "CHF": "CHE",
+        "CAD": "CAN",
+        "AUD": "AUS",
+        "NZD": "NZL",
+        "JPY": "JPN"
+    }
+    country_code = mapping.get(curr)
+    if not country_code:
+        return None
+        
+    df = get_oecd_cli_data()
+    if df is None or df.empty:
+        return None
+        
+    try:
+        df_m = df[(df["FREQ"] == "M") & (df["REF_AREA"] == country_code)]
+        if df_m.empty and curr == "EUR":
+            df_m = df[(df["FREQ"] == "M") & (df["REF_AREA"] == "EA19")]
+            
+        if df_m.empty:
+            return None
+            
+        # Try indicators in order of preference: LI (CLI), BCICP (BCI proxy), CCICP (CCI proxy)
+        for indicator in ["LI", "BCICP", "CCICP"]:
+            df_ind = df_m[df_m["MEASURE"] == indicator]
+            if not df_ind.empty:
+                latest = df_ind.sort_values("TIME_PERIOD").iloc[-1]
+                val = float(latest["OBS_VALUE"])
+                if not pd.isna(val):
+                    return val, latest["TIME_PERIOD"]
+    except Exception:
+        pass
+    return None
+
 
 # ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -2241,8 +2292,8 @@ with tab9:
 
 # ----------------- TAB 10: RISIKOINDIKATOREN (IMF) -----------------
 with tab10:
-    st.header("⚠️ Risikoindikatoren (IMF & World Bank)")
-    st.caption("Vergleich von Staatsverschuldung, Haushaltsdefizit, Leistungsbilanz (IMF DataMapper) und Handelsbilanz (World Bank) für alle G8 Währungen.")
+    st.header("⚠️ Risikoindikatoren (IMF, World Bank & OECD)")
+    st.caption("Vergleich von Staatsverschuldung, Haushaltsdefizit, Leistungsbilanz (IMF DataMapper), Handelsbilanz (World Bank) und Composite Leading Indicators (OECD) für alle G8 Währungen.")
     
     rows_risk = []
     for curr, info in CURRENCIES.items():
@@ -2251,6 +2302,15 @@ with tab10:
         ca = get_latest_imf_value(curr, "BCA_NGDPD")
         tb = get_latest_worldbank_trade_balance(info["wb_code"])
         
+        # Fetch OECD CLI
+        cli_data = get_latest_oecd_cli(curr)
+        if cli_data:
+            cli_val, cli_date = cli_data
+            trend_str = "über Trend" if cli_val > 100.0 else ("unter Trend" if cli_val < 100.0 else "auf Trend")
+            cli_str = f"{cli_val:.2f} ({trend_str}, {cli_date})"
+        else:
+            cli_str = "N/A"
+            
         debt_str = f"{debt:.1f}%" if debt is not None else "Daten momentan nicht verfügbar"
         deficit_str = f"{deficit:+.1f}%" if deficit is not None else "Daten momentan nicht verfügbar"
         ca_str = f"{ca:+.1f}%" if ca is not None else "Daten momentan nicht verfügbar"
@@ -2262,7 +2322,8 @@ with tab10:
             "Staatsverschuldung (% BIP)": debt_str,
             "Haushaltsdefizit (% BIP)": deficit_str,
             "Leistungsbilanz (% BIP)": ca_str,
-            "Handelsbilanz (% BIP)": tb_str
+            "Handelsbilanz (% BIP)": tb_str,
+            "OECD Leading Indicator (CLI)": cli_str
         })
         
     df_risk = pd.DataFrame(rows_risk)
