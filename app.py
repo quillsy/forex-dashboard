@@ -1245,21 +1245,17 @@ render_bias_box(signal_value, base_curr, quote_curr, base_score, quote_score, si
 
 col_score_b, col_score_q = st.columns(2)
 with col_score_b:
-    st.markdown(f"""
-    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-        <span class="metric-label">{CURRENCIES[base_curr]['flag']} {base_curr} Wirtschaftsscore</span>
-        <div class="metric-value">{base_score:.1f} / 100</div>
-        <div class="source-tag">Zusammengesetzter Score</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+<span class="metric-label">{CURRENCIES[base_curr]['flag']} {base_curr} Wirtschaftsscore</span>
+<div class="metric-value">{base_score:.1f} / 100</div>
+<div class="source-tag">Zusammengesetzter Score</div>
+</div>""", unsafe_allow_html=True)
 with col_score_q:
-    st.markdown(f"""
-    <div class="metric-card-custom" style="border-left: 4px solid #444c56;">
-        <span class="metric-label">{CURRENCIES[quote_curr]['flag']} {quote_curr} Wirtschaftsscore</span>
-        <div class="metric-value">{quote_score:.1f} / 100</div>
-        <div class="source-tag">Zusammengesetzter Score</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #444c56;">
+<span class="metric-label">{CURRENCIES[quote_curr]['flag']} {quote_curr} Wirtschaftsscore</span>
+<div class="metric-value">{quote_score:.1f} / 100</div>
+<div class="source-tag">Zusammengesetzter Score</div>
+</div>""", unsafe_allow_html=True)
 
 
 # ----------------- 6. TABS MODULES -----------------
@@ -1390,21 +1386,19 @@ with tab1:
     st.subheader("📋 Währungspaare Checkliste")
     
     # Create HTML table
-    html_table = """
-    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
-        <thead>
-            <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
-                <th style="padding:12px 10px;">Währungspaar</th>
-                <th style="padding:12px 10px;">Zins-Differenz (bps)</th>
-                <th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
-                <th style="padding:12px 10px; text-align:center;">Signal-Klassifikation</th>
-                <th style="padding:12px 10px;">Analysten-Konsens</th>
-                <th style="padding:12px 10px; text-align:center;">Sentiment</th>
-                <th style="padding:12px 10px;">Nächstes Event</th>
-            </tr>
-        </thead>
-        <tbody>
-    """
+    html_table = """<table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
+<thead>
+<tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
+<th style="padding:12px 10px;">Währungspaar</th>
+<th style="padding:12px 10px;">Zins-Differenz (bps)</th>
+<th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
+<th style="padding:12px 10px; text-align:center;">Signal-Klassifikation</th>
+<th style="padding:12px 10px;">Analysten-Konsens</th>
+<th style="padding:12px 10px; text-align:center;">Sentiment</th>
+<th style="padding:12px 10px;">Nächstes Event</th>
+</tr>
+</thead>
+<tbody>"""
     
     G8_PAIRS = [
         ("USD", "EUR"),
@@ -1444,19 +1438,17 @@ with tab1:
         
         next_ev = get_next_event_for_pair(base, quote, df_cal)
         
-        rows.append(f"""
-            <tr style="border-bottom:1px solid #1f2026;">
-                <td style="padding:12px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}</td>
-                <td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{diff_str}</td>
-                <td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{badge_color};">{sig_val:+.1f}</td>
-                <td style="padding:12px 10px; text-align:center;">
-                    <span style="background-color:{badge_color}18; color:{badge_color}; border:1px solid {badge_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{badge_name}</span>
-                </td>
-                <td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{rec_str}</td>
-                <td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str}</td>
-                <td style="padding:12px 10px; color:#8c8c9a; font-size:0.8rem;">{next_ev}</td>
-            </tr>
-        """)
+        rows.append(f"""<tr style="border-bottom:1px solid #1f2026;">
+<td style="padding:12px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}</td>
+<td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{diff_str}</td>
+<td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{badge_color};">{sig_val:+.1f}</td>
+<td style="padding:12px 10px; text-align:center;">
+<span style="background-color:{badge_color}18; color:{badge_color}; border:1px solid {badge_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{badge_name}</span>
+</td>
+<td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{rec_str}</td>
+<td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str}</td>
+<td style="padding:12px 10px; color:#8c8c9a; font-size:0.8rem;">{next_ev}</td>
+</tr>""")
         
     html_table += "".join(rows) + "</tbody></table>"
     st.markdown(html_table, unsafe_allow_html=True)
@@ -1594,30 +1586,25 @@ with tab3:
     rates_rows = []
     for curr, data in rates_data.items():
         color_class = "color:#10b981;" if data["bps_change"] > 0 else "color:#ef4444;" if data["bps_change"] < 0 else "color:#7d7d8a;"
-        rates_rows.append(f"""
-        <tr style="border-bottom:1px solid #1f2026;">
-            <td style="padding:10px 5px; font-weight:600;">{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})</td>
-            <td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:600;">{data['rate']:.2f}%</td>
-            <td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:700; {color_class}">{data['bps_change']:+d} bps</td>
-            <td style="padding:10px 5px; color:#8c8c9a; font-size:0.75rem;">{data['source']}</td>
-        </tr>
-        """)
+        rates_rows.append(f"""<tr style="border-bottom:1px solid #1f2026;">
+<td style="padding:10px 5px; font-weight:600;">{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})</td>
+<td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:600;">{data['rate']:.2f}%</td>
+<td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:700; {color_class}">{data['bps_change']:+d} bps</td>
+<td style="padding:10px 5px; color:#8c8c9a; font-size:0.75rem;">{data['source']}</td>
+</tr>""")
         
-    rates_table_html = f"""
-    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
-        <thead>
-            <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700;">
-                <th style="padding:10px 5px;">Zentralbank</th>
-                <th style="padding:10px 5px;">Leitzins</th>
-                <th style="padding:10px 5px;">Änderung zum Vormonat</th>
-                <th style="padding:10px 5px;">Quelle</th>
-            </tr>
-        </thead>
-        <tbody>
-            {"".join(rates_rows)}
-        </tbody>
-    </table>
-    """
+    rates_table_html = """<table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+<thead>
+<tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700;">
+<th style="padding:10px 5px;">Zentralbank</th>
+<th style="padding:10px 5px;">Leitzins</th>
+<th style="padding:10px 5px;">Änderung zum Vormonat</th>
+<th style="padding:10px 5px;">Quelle</th>
+</tr>
+</thead>
+<tbody>
+""" + "".join(rates_rows) + """</tbody>
+</table>"""
     st.markdown(rates_table_html, unsafe_allow_html=True)
     st.markdown("<div class='source-tag'>Quelle: FRED, ECB Portal, SNB Portal & Zins-Kontrollzentrum</div>", unsafe_allow_html=True)
 
