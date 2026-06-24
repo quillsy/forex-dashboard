@@ -977,14 +977,26 @@ def compute_currency_score(curr, fred_key):
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
     else:
         code = CURRENCIES[curr]["wb_code"]
+        
+        # GDP und CPI von World Bank holen
         df_gdp, _, _ = get_worldbank_data(code, "NY.GDP.MKTP.KD.ZG")
         df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
         
+        # Rate (Zins) von FRED oder manueller Eingabe
         rate_val, _, _ = get_country_rate(code, fred_key)
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
-        unemp_score = 65.0
+        # NEU: Arbeitslosenquote dynamisch von World Bank holen (oder intelligenter Fallback)
+        df_unemp, _, _ = get_worldbank_data(code, "SL.UEM.TOTL.ZG")
+        if not df_unemp.empty:
+            latest_unemp = df_unemp.iloc[-1]["value"]
+            unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
+        else:
+            # Fallback: Schätze die Arbeitslosenquote anhand der GDP-Wachstumsrate
+            latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else 1.5
+            unemp_score = np.clip(65 + (latest_gdp - 2.0) * 5, 40, 85)
         
+        # CPI und GDP (wie gehabt)
         latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else 2.5
         cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
         
