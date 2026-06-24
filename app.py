@@ -2126,7 +2126,8 @@ with tab7:
             df_macro_eod = pd.DataFrame(rows_macro)
             st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
         else:
-            st.info("Daten momentan nicht verfügbar")
+            st.error("EODHD Macro Indicators API nicht verfügbar – bitte EODHD-Plan prüfen")
+            st.info("Hinweis: Für den Abruf von Länder-Fundamentaldaten ist der kostenpflichtige EODHD-Plan erforderlich (z.B. Fundamental Data oder ein anderes Paket mit Zugang zu makroökonomischen Indikatoren). Der kostenlose Standard-API-Schlüssel erlaubt nur EOD-Kursdaten.")
 
 # ----------------- TAB 8: ROHSTOFFE & MÄRKTE -----------------
 with tab8:
