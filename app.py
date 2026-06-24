@@ -20,6 +20,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize session state for manual interest rates
+if "manual_rate_GBP" not in st.session_state:
+    st.session_state["manual_rate_GBP"] = 3.75
+if "manual_rate_JPY" not in st.session_state:
+    st.session_state["manual_rate_JPY"] = 1.00
+if "manual_rate_AUD" not in st.session_state:
+    st.session_state["manual_rate_AUD"] = 4.35
+if "manual_rate_CAD" not in st.session_state:
+    st.session_state["manual_rate_CAD"] = 2.25
+if "manual_rate_NZD" not in st.session_state:
+    st.session_state["manual_rate_NZD"] = 2.25
+
 # ----------------- Obsidian Dark Theme CSS -----------------
 st.markdown("""
 <style>
@@ -904,14 +916,14 @@ def categorize_article(art):
 def get_country_rate(country_code, fred_key):
     # Retrieve manual rates from session state if available, otherwise use defaults
     manual_rates = {
-        "GBR": st.session_state.get("manual_rate_GBP", 5.25),
-        "JPN": st.session_state.get("manual_rate_JPY", 0.10),
+        "GBR": st.session_state.get("manual_rate_GBP", 3.75),
+        "JPN": st.session_state.get("manual_rate_JPY", 1.00),
         "AUD": st.session_state.get("manual_rate_AUD", 4.35),
-        "CAD": st.session_state.get("manual_rate_CAD", 5.00),
-        "NZD": st.session_state.get("manual_rate_NZD", 5.50)
+        "CAD": st.session_state.get("manual_rate_CAD", 2.25),
+        "NZD": st.session_state.get("manual_rate_NZD", 2.25)
     }
     
-    fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 5.25, "JPN": 0.10, "CHE": 1.25, "AUS": 4.35, "CAN": 5.00, "NZL": 5.50}
+    fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 3.75, "JPN": 1.00, "CHE": 1.25, "AUS": 4.35, "CAN": 2.25, "NZL": 2.25}
     
     if country_code == "USA":
         df, _, _ = get_fred_data("FEDFUNDS", fred_key)
@@ -1177,20 +1189,20 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏦 Zins-Kontrollzentrum")
 st.sidebar.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
 
-st.session_state["manual_rate_GBP"] = st.sidebar.number_input(
-    "Bank of England (GBP) %", min_value=0.0, max_value=15.0, value=5.25, step=0.05
+st.sidebar.number_input(
+    "Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", step=0.05
 )
-st.session_state["manual_rate_JPY"] = st.sidebar.number_input(
-    "Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, value=0.10, step=0.05
+st.sidebar.number_input(
+    "Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", step=0.05
 )
-st.session_state["manual_rate_AUD"] = st.sidebar.number_input(
-    "Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, value=4.35, step=0.05
+st.sidebar.number_input(
+    "Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05
 )
-st.session_state["manual_rate_CAD"] = st.sidebar.number_input(
-    "Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, value=5.00, step=0.05
+st.sidebar.number_input(
+    "Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05
 )
-st.session_state["manual_rate_NZD"] = st.sidebar.number_input(
-    "Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, value=5.50, step=0.05
+st.sidebar.number_input(
+    "Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05
 )
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
