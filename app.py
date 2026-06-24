@@ -187,6 +187,9 @@ FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
 ITICK_KEY = os.getenv("ITICK_API_KEY")
 FCS_KEY = os.getenv("FCS_API_KEY")
 STOCKDATA_KEY = os.getenv("STOCKDATA_API_KEY")
+TIINGO_KEY = os.getenv("TIINGO_API_KEY")
+EODHD_KEY = os.getenv("EODHD_API_KEY")
+BLS_KEY = os.getenv("BLS_API_KEY")
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
@@ -570,6 +573,204 @@ def fetch_worldbank_live(country_code, indicator):
     df = pd.DataFrame(parsed)
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
+
+
+# ----------------- NEW DATA FETCHERS & HELPERS (Tiingo, BLS, IMF, EODHD, World Bank) -----------------
+@st.cache_data(ttl=3600)
+def get_tiingo_prices(ticker, api_key):
+    if not api_key:
+        return None
+    url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Token {api_key}"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data and isinstance(data, list):
+                # Ascending order: data[-1] is the most recent
+                return data[-1]
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=86400)
+def get_bls_data(api_key):
+    if not api_key:
+        return None
+    url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+    headers = {"Content-type": "application/json"}
+    
+    current_year = datetime.now().year
+    start_year = str(current_year - 2)
+    end_year = str(current_year)
+    
+    payload = {
+        "seriesid": ["CES0000000001", "CES0500000003", "LNS11300000"],
+        "startyear": start_year,
+        "endyear": end_year,
+        "registrationkey": api_key
+    }
+    try:
+        import json
+        response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=12)
+        if response.status_code == 200:
+            res_json = response.json()
+            if res_json.get("status") == "REQUEST_SUCCEEDED":
+                return res_json
+    except Exception:
+        pass
+    return None
+
+def parse_bls_series(bls_data, series_id):
+    if not bls_data:
+        return pd.DataFrame()
+    try:
+        series_list = bls_data.get("Results", {}).get("series", [])
+        for s in series_list:
+            if s.get("seriesID") == series_id:
+                data_points = s.get("data", [])
+                if not data_points:
+                    return pd.DataFrame()
+                
+                records = []
+                for dp in data_points:
+                    year = dp.get("year")
+                    period = dp.get("period")
+                    period_name = dp.get("periodName")
+                    val_str = dp.get("value")
+                    try:
+                        val = float(val_str)
+                    except ValueError:
+                        continue
+                    
+                    if period.startswith("M") and period[1:].isdigit():
+                        month = int(period[1:])
+                        date_obj = datetime(int(year), month, 1)
+                        records.append({
+                            "date": date_obj,
+                            "value": val,
+                            "period_name": period_name,
+                            "year": year
+                        })
+                df = pd.DataFrame(records)
+                if not df.empty:
+                    df = df.sort_values("date").reset_index(drop=True)
+                return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+@st.cache_data(ttl=604800) # 1 week
+def get_imf_data(indicator):
+    url = f"https://www.imf.org/external/datamapper/api/v1/{indicator}"
+    try:
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+    except Exception:
+        pass
+    return None
+
+def get_latest_imf_value(curr, indicator):
+    mapping = {
+        "USD": ["USA"],
+        "EUR": ["EUR", "EMU", "U2", "DEU"],
+        "GBP": ["GBR"],
+        "CHF": ["CHE"],
+        "CAD": ["CAN"],
+        "AUD": ["AUS"],
+        "NZD": ["NZL"],
+        "JPY": ["JPN"]
+    }
+    candidates = mapping.get(curr, [curr])
+    data = get_imf_data(indicator)
+    if not data:
+        return None
+    try:
+        indicator_data = data.get("values", {}).get(indicator, {})
+        for code in candidates:
+            values_dict = indicator_data.get(code, {})
+            if values_dict:
+                years = [int(yr) for yr in values_dict.keys() if yr.isdigit()]
+                if years:
+                    latest_year = str(max(years))
+                    val = values_dict[latest_year]
+                    if val is not None:
+                        return val
+    except Exception:
+        pass
+    return None
+
+def format_imf_indicator(base, quote, indicator):
+    base_val = get_latest_imf_value(base, indicator)
+    quote_val = get_latest_imf_value(quote, indicator)
+    base_str = f"{base_val:.1f}%" if base_val is not None else "N/A"
+    quote_str = f"{quote_val:.1f}%" if quote_val is not None else "N/A"
+    return f"{base_str} / {quote_str}"
+
+@st.cache_data(ttl=86400) # 1 day
+def get_eodhd_history_prices(pair, api_key):
+    if not api_key:
+        return None
+    symbol = f"{pair.replace('/', '')}.FOREX"
+    url = f"https://eodhd.com/api/eod/{symbol}?api_token={api_key}&fmt=json&from=1995-01-01"
+    try:
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            if data and isinstance(data, list):
+                parsed = []
+                for item in data:
+                    parsed.append({
+                        "date": pd.to_datetime(item.get("date")),
+                        "close": float(item.get("close"))
+                    })
+                df = pd.DataFrame(parsed)
+                if not df.empty:
+                    return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=86400) # 1 day
+def get_eodhd_macro_all(country_code, api_key):
+    if not api_key:
+        return None
+    url = f"https://eodhd.com/api/macro-indicator/{country_code}?api_token={api_key}&fmt=json"
+    try:
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+    except Exception:
+        pass
+    return None
+
+def find_eodhd_indicator_by_keyword(macro_data, keyword):
+    if not macro_data or not isinstance(macro_data, list):
+        return None, None, None
+    for entry in macro_data:
+        code = entry.get("IndicatorCode", "").lower()
+        name = entry.get("IndicatorName", "").lower()
+        if keyword in code or keyword in name:
+            data = entry.get("data", {})
+            if data:
+                years = [int(yr) for yr in data.keys() if yr.isdigit()]
+                if years:
+                    latest_year = str(max(years))
+                    return entry.get("IndicatorName"), data[latest_year], latest_year
+    return None, None, None
+
+def get_latest_worldbank_trade_balance(country_code):
+    try:
+        df, _, _ = get_worldbank_data(country_code, "NE.RSB.GNFS.ZS")
+        if df is not None and not df.empty:
+            return df.iloc[-1]["value"]
+    except Exception:
+        pass
+    return None
 
 
 # ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
@@ -1324,7 +1525,7 @@ def get_next_event_for_pair(base, quote, df_c):
     time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
     return f"{next_event['country']}: {next_event['event']} ({time_str})"
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "🏠 Übersicht & Checkliste",
     "📅 Economic Calendar",
     "🏦 Zinsdifferenz",
@@ -1332,6 +1533,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🧠 Sentiment-Score",
     "🧮 Korrelationsmatrix",
     "📈 Langfristige Historie",
+    "🛍️ Rohstoffe & Märkte",
+    "🇺🇸 US-Arbeitsmarkt (BLS)",
+    "⚠️ Risikoindikatoren (IMF)",
     "📰 News & Research Hub"
 ])
 
@@ -1380,6 +1584,8 @@ with tab1:
 <th style="padding:12px 10px; text-align:center;">Signal-Klassifikation</th>
 <th style="padding:12px 10px;">Analysten-Konsens</th>
 <th style="padding:12px 10px; text-align:center;">Sentiment</th>
+<th style="padding:12px 10px;">Staatsverschuldung</th>
+<th style="padding:12px 10px;">Leistungsbilanz</th>
 <th style="padding:12px 10px;">Nächstes Event</th>
 </tr>
 </thead>
@@ -1421,6 +1627,10 @@ with tab1:
             sent_color = "#8b949e"
         sent_str = f"<span style='color:{sent_color}; font-weight:600;'>{sent_val:+.1f}</span>"
         
+        # New indicators from IMF
+        debt_str = format_imf_indicator(base, quote, "GGXWDG_NGDP")
+        ca_str = format_imf_indicator(base, quote, "BCA_NGDPD")
+        
         next_ev = get_next_event_for_pair(base, quote, df_cal)
         
         rows.append(f"""<tr style="border-bottom:1px solid #1f2026;">
@@ -1432,12 +1642,14 @@ with tab1:
 </td>
 <td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{rec_str}</td>
 <td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str}</td>
+<td style="padding:12px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{debt_str}</td>
+<td style="padding:12px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{ca_str}</td>
 <td style="padding:12px 10px; color:#8c8c9a; font-size:0.8rem;">{next_ev}</td>
 </tr>""")
         
     html_table += "".join(rows) + "</tbody></table>"
     st.markdown(html_table, unsafe_allow_html=True)
-    st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung</div>", unsafe_allow_html=True)
+    st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung (Risikodaten Quelle: IMF DataMapper)</div>", unsafe_allow_html=True)
 
 # ----------------- TAB 2: ECONOMIC CALENDAR -----------------
 with tab2:
@@ -1446,19 +1658,35 @@ with tab2:
     
     # Filter
     countries_available = ["All"] + list(df_cal["country"].unique())
-    importances_available = ["All", "High", "Medium", "Low"]
+    importances_available = ["High & Medium (Standard)", "All", "High", "Medium", "Low"]
+    categories_available = ["All", "Central Bank", "Inflation", "Employment", "Growth"]
     
-    f_col1, f_col2 = st.columns(2)
+    f_col1, f_col2, f_col3 = st.columns(3)
     with f_col1:
         sel_country = st.selectbox("Land filtern", options=countries_available, index=0, key="cal_country_filter")
     with f_col2:
         sel_importance = st.selectbox("Wichtigkeit", options=importances_available, index=0, key="cal_imp_filter")
+    with f_col3:
+        sel_category = st.selectbox("Kategorie filtern", options=categories_available, index=0, key="cal_cat_filter")
         
     filtered_cal = df_cal.copy()
     if sel_country != "All":
         filtered_cal = filtered_cal[filtered_cal["country"] == sel_country]
-    if sel_importance != "All":
+        
+    if sel_importance == "High & Medium (Standard)":
+        filtered_cal = filtered_cal[filtered_cal["importance"].isin(["High", "Medium"])]
+    elif sel_importance != "All":
         filtered_cal = filtered_cal[filtered_cal["importance"] == sel_importance]
+        
+    if sel_category != "All":
+        keywords = {
+            "Central Bank": ["fed", "fomc", "rate", "interest", "leitzins", "notenbank", "ezb", "ecb", "snb", "boe", "boj", "rba", "boc", "rbnz", "policy", "mep", "geldpolitik"],
+            "Inflation": ["cpi", "ppi", "inflation", "teuerung", "pce"],
+            "Employment": ["unemployment", "arbeitslos", "payrolls", "nfp", "employment", "beschäftigung", "jobs"],
+            "Growth": ["gdp", "pmi", "bruttoinlandsprodukt", "wachstum", "growth", "retail sales", "einzelhandel"]
+        }.get(sel_category, [])
+        pattern = "|".join(keywords)
+        filtered_cal = filtered_cal[filtered_cal["event"].str.contains(pattern, case=False, na=False)]
         
     if not filtered_cal.empty:
         st.markdown("### 📋 Event-Abarbeitungsliste")
@@ -1738,11 +1966,30 @@ with tab7:
     st.caption(f"Langfristiger Kursverlauf ab 1995 zur Analyse übergeordneter wirtschaftlicher Zyklen.")
     
     major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
-    hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0)
     
-    df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
+    col_prov, col_pair = st.columns(2)
+    with col_prov:
+        data_source = st.radio("Historische Datenquelle", options=["FCS API (Standard)", "EODHD (Ergänzend)"], horizontal=True, key="hist_source_radio")
+    with col_pair:
+        hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0, key="hist_pair_select")
+        
+    df_hist = pd.DataFrame()
+    is_live_hist = False
+    source_label = "FCS API"
     
-    if not df_hist.empty:
+    if data_source == "FCS API (Standard)":
+        df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
+        source_label = "FCS API"
+    else:
+        # EODHD
+        if not EODHD_KEY:
+            st.warning("EODHD API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie EODHD_API_KEY.")
+        else:
+            df_hist = get_eodhd_history_prices(hist_pair, EODHD_KEY)
+            is_live_hist = True
+            source_label = "EODHD"
+            
+    if df_hist is not None and not df_hist.empty:
         fig_hist = go.Figure()
         fig_hist.add_trace(go.Scatter(
             x=df_hist["date"], y=df_hist["close"],
@@ -1771,10 +2018,287 @@ with tab7:
     else:
         st.warning("Keine langfristigen Historien-Daten verfügbar.")
         
-    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_hist else ''}'>Quelle: FCS API</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='source-tag'>Quelle: {source_label}</div>", unsafe_allow_html=True)
+    
+    # Show EODHD Macro fundamentals if source is EODHD
+    if data_source == "EODHD (Ergänzend)" and EODHD_KEY:
+        st.subheader("📊 EODHD Länder-Fundamentaldaten")
+        base_iso = CURRENCIES[base_curr]["wb_code"]
+        quote_iso = CURRENCIES[quote_curr]["wb_code"]
+        
+        base_macro = get_eodhd_macro_all(base_iso, EODHD_KEY)
+        quote_macro = get_eodhd_macro_all(quote_iso, EODHD_KEY)
+        
+        if base_macro or quote_macro:
+            indicators_to_find = [
+                ("gdp_growth_annual", "GDP-Wachstum (jährlich)"),
+                ("inflation_consumer_prices_annual", "Inflation (Verbraucherpreise, jährlich)"),
+                ("unemployment", "Arbeitslosigkeit (% der Erwerbspersonen)"),
+                ("population_total", "Bevölkerung gesamt")
+            ]
+            
+            rows_macro = []
+            for keyword, display_name in indicators_to_find:
+                _, b_val, b_yr = find_eodhd_indicator_by_keyword(base_macro, keyword)
+                _, q_val, q_yr = find_eodhd_indicator_by_keyword(quote_macro, keyword)
+                
+                b_str = f"{b_val:,.1f}% ({b_yr})" if b_val is not None and "population" not in keyword else (f"{b_val:,.0f} ({b_yr})" if b_val is not None else "N/A")
+                q_str = f"{q_val:,.1f}% ({q_yr})" if q_val is not None and "population" not in keyword else (f"{q_val:,.0f} ({q_yr})" if q_val is not None else "N/A")
+                
+                rows_macro.append({
+                    "Indikator": display_name,
+                    f"{base_curr}": b_str,
+                    f"{quote_curr}": q_str
+                })
+            df_macro_eod = pd.DataFrame(rows_macro)
+            st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
+        else:
+            st.info("Daten momentan nicht verfügbar")
 
-# ----------------- TAB 8: NEWS & RESEARCH HUB -----------------
+# ----------------- TAB 8: ROHSTOFFE & MÄRKTE -----------------
 with tab8:
+    st.header("🛍️ Rohstoffe & Märkte")
+    st.caption("Aktuelle Rohstoffpreise und Marktvolatilität (VIX) geladen über Tiingo.")
+    
+    if not TIINGO_KEY:
+        st.warning("Tiingo API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie TIINGO_API_KEY.")
+    else:
+        gld_data = get_tiingo_prices("GLD", TIINGO_KEY)
+        slv_data = get_tiingo_prices("SLV", TIINGO_KEY)
+        uso_data = get_tiingo_prices("USO", TIINGO_KEY)
+        bno_data = get_tiingo_prices("BNO", TIINGO_KEY)
+        vix_data = get_tiingo_prices("VIXY", TIINGO_KEY)
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        def display_commodity_card(col, name, data, flag):
+            with col:
+                if data:
+                    close = data.get("close")
+                    high = data.get("high")
+                    low = data.get("low")
+                    date_str = data.get("date", "")[:10]
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">{flag} {name} (ETF)</span>
+                        <div class="metric-value">${close:.2f}</div>
+                        <div style="font-size:0.8rem; color:#7d7d8a; margin-top:5px;">
+                            High: ${high:.2f} | Low: ${low:.2f}<br>
+                            Datum: {date_str}
+                        </div>
+                        <div class="source-tag">Quelle: Tiingo</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #ef4444;">
+                        <span class="metric-label">{flag} {name}</span>
+                        <div class="metric-value" style="font-size: 0.95rem; color:#7d7d8a;">Daten momentan nicht verfügbar</div>
+                        <div class="source-tag">Quelle: Tiingo</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+        display_commodity_card(col1, "Gold", gld_data, "🟡")
+        display_commodity_card(col2, "Silber", slv_data, "⚪")
+        display_commodity_card(col3, "WTI Öl", uso_data, "🛢️")
+        display_commodity_card(col4, "Brent Öl", bno_data, "🛢️")
+        display_commodity_card(col5, "VIX Index", vix_data, "📈")
+
+# ----------------- TAB 9: US-ARBEITSMARKT (BLS) -----------------
+with tab9:
+    st.header("🇺🇸 US-Arbeitsmarkt (BLS)")
+    st.caption("Detaillierte US-Arbeitsmarktdaten geladen direkt von der Bureau of Labor Statistics (BLS) Public Data API.")
+    
+    if not BLS_KEY:
+        st.warning("BLS API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie BLS_API_KEY.")
+    else:
+        bls_json = get_bls_data(BLS_KEY)
+        if not bls_json:
+            st.error("Daten momentan nicht verfügbar")
+        else:
+            df_nfp = parse_bls_series(bls_json, "CES0000000001")
+            df_wage = parse_bls_series(bls_json, "CES0500000003")
+            df_part = parse_bls_series(bls_json, "LNS11300000")
+            
+            if df_nfp.empty or df_wage.empty or df_part.empty:
+                st.error("Daten momentan nicht verfügbar")
+            else:
+                latest_nfp = df_nfp.iloc[-1]["value"]
+                nfp_change = 0.0
+                if len(df_nfp) > 1:
+                    nfp_change = latest_nfp - df_nfp.iloc[-2]["value"]
+                
+                latest_wage = df_wage.iloc[-1]["value"]
+                wage_change_pct = 0.0
+                if len(df_wage) > 1:
+                    wage_change_pct = ((latest_wage - df_wage.iloc[-2]["value"]) / df_wage.iloc[-2]["value"]) * 100
+                    
+                latest_part = df_part.iloc[-1]["value"]
+                part_change = 0.0
+                if len(df_part) > 1:
+                    part_change = latest_part - df_part.iloc[-2]["value"]
+                    
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Non-Farm Payrolls</span>
+                        <div class="metric-value">{latest_nfp:,.1f}K</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if nfp_change >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            Change: {nfp_change:+.1f}K (Jobs)
+                        </div>
+                        <div class="source-tag">Quelle: BLS API</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Durchschnittlicher Stundenlohn</span>
+                        <div class="metric-value">${latest_wage:.2f}</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if wage_change_pct >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            MoM: {wage_change_pct:+.2f}%
+                        </div>
+                        <div class="source-tag">Quelle: BLS API</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col3:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Erwerbsquote (Participation Rate)</span>
+                        <div class="metric-value">{latest_part:.1f}%</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if part_change >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            Change: {part_change:+.2f}%
+                        </div>
+                        <div class="source-tag">Quelle: BLS API</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                df_nfp_12 = df_nfp.tail(12).copy()
+                df_nfp_12["MoM_Change"] = df_nfp_12["value"].diff()
+                df_nfp_12["MoM_Change"] = df_nfp_12["MoM_Change"].fillna(0.0)
+                
+                st.subheader("📈 Entwicklung der letzten 12 Monate")
+                
+                fig_nfp = px.bar(
+                    df_nfp_12,
+                    x="date",
+                    y="MoM_Change",
+                    title="NFP Monatliche Veränderung (in Tausend)",
+                    labels={"MoM_Change": "Netto-Stellenschaffung (k)", "date": "Datum"},
+                    color="MoM_Change",
+                    color_continuous_scale="RdYlGn",
+                    text_auto=".1f"
+                )
+                fig_nfp.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a", size=10),
+                    xaxis=dict(showgrid=False),
+                    yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
+                    height=300
+                )
+                st.plotly_chart(fig_nfp, use_container_width=True)
+                
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    fig_wages = px.line(
+                        df_wage.tail(12),
+                        x="date",
+                        y="value",
+                        title="Stundenlöhne ($/Std)",
+                        labels={"value": "Durchschnittlicher Stundenlohn ($)", "date": "Datum"},
+                        markers=True
+                    )
+                    fig_wages.update_traces(line_color="#10b981")
+                    fig_wages.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color="#7d7d8a", size=10),
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
+                        height=250
+                    )
+                    st.plotly_chart(fig_wages, use_container_width=True)
+                with col_c2:
+                    fig_part = px.line(
+                        df_part.tail(12),
+                        x="date",
+                        y="value",
+                        title="Erwerbsquote (%)",
+                        labels={"value": "Quote (%)", "date": "Datum"},
+                        markers=True
+                    )
+                    fig_part.update_traces(line_color="#34d399")
+                    fig_part.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color="#7d7d8a", size=10),
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
+                        height=250
+                    )
+                    st.plotly_chart(fig_part, use_container_width=True)
+
+# ----------------- TAB 10: RISIKOINDIKATOREN (IMF) -----------------
+with tab10:
+    st.header("⚠️ Risikoindikatoren (IMF & World Bank)")
+    st.caption("Vergleich von Staatsverschuldung, Haushaltsdefizit, Leistungsbilanz (IMF DataMapper) und Handelsbilanz (World Bank) für alle G8 Währungen.")
+    
+    rows_risk = []
+    for curr, info in CURRENCIES.items():
+        debt = get_latest_imf_value(curr, "GGXWDG_NGDP")
+        deficit = get_latest_imf_value(curr, "GGXCNL_NGDP")
+        ca = get_latest_imf_value(curr, "BCA_NGDPD")
+        tb = get_latest_worldbank_trade_balance(info["wb_code"])
+        
+        debt_str = f"{debt:.1f}%" if debt is not None else "Daten momentan nicht verfügbar"
+        deficit_str = f"{deficit:+.1f}%" if deficit is not None else "Daten momentan nicht verfügbar"
+        ca_str = f"{ca:+.1f}%" if ca is not None else "Daten momentan nicht verfügbar"
+        tb_str = f"{tb:+.1f}%" if tb is not None else "Daten momentan nicht verfügbar"
+        
+        rows_risk.append({
+            "Währung": f"{info['flag']} {curr}",
+            "Land/Region": info["country"],
+            "Staatsverschuldung (% BIP)": debt_str,
+            "Haushaltsdefizit (% BIP)": deficit_str,
+            "Leistungsbilanz (% BIP)": ca_str,
+            "Handelsbilanz (% BIP)": tb_str
+        })
+        
+    df_risk = pd.DataFrame(rows_risk)
+    st.dataframe(df_risk, use_container_width=True, hide_index=True)
+    
+    plot_data = []
+    for curr in CURRENCIES.keys():
+        debt = get_latest_imf_value(curr, "GGXWDG_NGDP")
+        if debt is not None:
+            plot_data.append({"Currency": curr, "Debt": debt})
+    if plot_data:
+        df_plot = pd.DataFrame(plot_data)
+        fig_debt = px.bar(
+            df_plot,
+            x="Currency",
+            y="Debt",
+            title="Staatsverschuldung im Vergleich (% des BIP)",
+            labels={"Debt": "Schuldenquote (% BIP)", "Currency": "Währung"},
+            color="Debt",
+            color_continuous_scale="Reds",
+            text_auto=".1f"
+        )
+        fig_debt.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color="#7d7d8a", size=10),
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
+            height=300
+        )
+        st.plotly_chart(fig_debt, use_container_width=True)
+        
+    st.markdown("<div class='source-tag'>Quelle: IMF DataMapper (Debt/Deficit/Current Account), World Bank (Trade Balance)</div>", unsafe_allow_html=True)
+
+# ----------------- TAB 11: NEWS & RESEARCH HUB -----------------
+with tab11:
     st.header("📰 News & Research Hub")
     st.caption(f"Aktuelle fundamentale Marktnachrichten für das Paar **{selected_pair}** mit thematischer Gruppierung.")
     
