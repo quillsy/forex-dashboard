@@ -1,4 +1,5 @@
 import os
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -166,13 +167,14 @@ st.markdown("""
 
 # ----------------- Load API Keys from Env -----------------
 FRED_KEY = os.getenv("FRED_API_KEY")
-AV_KEY = os.getenv("AV_API_KEY")
-NEWSDATA_KEY = os.getenv("NEWSDATA_KEY")
+AV_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+NEWSDATA_KEY = os.getenv("NEWSDATA_API_KEY")
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
-BENZINGA_KEY = os.getenv("BENZINGA_KEY")
-FMP_KEY = os.getenv("FMP_KEY")
+BENZINGA_KEY = os.getenv("BENZINGA_API_KEY")
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
+ITICK_KEY = os.getenv("ITICK_API_KEY")
 FCS_KEY = os.getenv("FCS_API_KEY")
-STOCKDATA_KEY = os.getenv("STOCKDATA_KEY")
+STOCKDATA_KEY = os.getenv("STOCKDATA_API_KEY")
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
@@ -238,23 +240,71 @@ def generate_mock_benzinga():
     ]
     return pd.DataFrame(events)
 
-def generate_mock_fmp():
+def generate_mock_finnhub(pair):
+    # Deterministic based on pair name
+    import random
+    random.seed(hash(pair) % 20000)
+    base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+    base = base_prices.get(pair, 1.0)
+    
+    buy = random.randint(10, 20)
+    hold = random.randint(5, 12)
+    sell = random.randint(1, 5)
+    strong_buy = random.randint(2, 8)
+    strong_sell = random.randint(0, 2)
+    
+    target_mean = base * random.uniform(0.98, 1.02)
+    target_high = target_mean * random.uniform(1.02, 1.05)
+    target_low = target_mean * random.uniform(0.95, 0.98)
+    
+    # History list of dicts
+    history = [
+        {"date": (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"), "firm": "Goldman Sachs", "rating": "Buy", "target": round(target_mean * 1.01, 4)},
+        {"date": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"), "firm": "JPMorgan Chase", "rating": "Hold", "target": round(target_mean * 0.99, 4)},
+        {"date": (datetime.now() - timedelta(days=12)).strftime("%Y-%m-%d"), "firm": "Morgan Stanley", "rating": "Buy", "target": round(target_mean * 1.02, 4)},
+        {"date": (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d"), "firm": "Barclays", "rating": "Sell", "target": round(target_mean * 0.96, 4)}
+    ]
+    
     return {
-        "buy": 14, "hold": 8, "sell": 3,
-        "target_high": 1.1400, "target_low": 1.0500, "target_mean": 1.1020,
-        "history": [
-            {"date": (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"), "firm": "Goldman Sachs", "rating": "Buy", "target": 1.1200},
-            {"date": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"), "firm": "JPMorgan Chase", "rating": "Hold", "target": 1.0900},
-            {"date": (datetime.now() - timedelta(days=12)).strftime("%Y-%m-%d"), "firm": "Morgan Stanley", "rating": "Buy", "target": 1.1300},
-            {"date": (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d"), "firm": "Barclays", "rating": "Sell", "target": 1.0600}
-        ]
+        "buy": buy + strong_buy,
+        "hold": hold,
+        "sell": sell + strong_sell,
+        "strongBuy": strong_buy,
+        "buy_only": buy,
+        "strongSell": strong_sell,
+        "sell_only": sell,
+        "target_high": round(target_high, 4),
+        "target_low": round(target_low, 4),
+        "target_mean": round(target_mean, 4),
+        "history": history
+    }
+
+def generate_mock_itick(pair):
+    import random
+    from datetime import datetime
+    random.seed(hash(pair) % 10000)
+    base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+    base = base_prices.get(pair, 1.0)
+    change = random.normalvariate(0, 0.005)
+    close = base * (1 + change)
+    op = base * (1 + change * 0.5)
+    hi = max(op, close) * 1.002
+    lo = min(op, close) * 0.998
+    vol = random.uniform(50000, 150000)
+    return {
+        "open": op,
+        "high": hi,
+        "low": lo,
+        "close": close,
+        "volume": vol,
+        "timestamp": int(datetime.now().timestamp() * 1000)
     }
 
 def generate_mock_fcs_history(from_symbol, to_symbol):
     np.random.seed(95)
     dates = pd.date_range(start="1995-01-01", end=datetime.now(), freq="D")
     pair = f"{from_symbol}/{to_symbol}"
-    base_prices = {"EUR/USD": 1.15, "GBP/USD": 1.55, "USD/JPY": 105.0, "USD/CHF": 1.12, "AUD/USD": 0.72, "USD/CAD": 1.25, "NZD/USD": 0.65}
+    base_prices = {"EUR/USD": 1.15, "GBP/USD": 1.55, "USD/JPY": 105.0, "USD/CHF": 1.12, "AUD/USD": 0.72, "USD/CAD": 1.25, "NZD/USD": 0.65, "EUR/GBP": 0.85}
     base = base_prices.get(pair, 1.0)
     prices = [base]
     for _ in range(len(dates)-1):
@@ -268,20 +318,22 @@ def generate_mock_fcs_history(from_symbol, to_symbol):
     })
 
 def generate_mock_fcs_correlation():
-    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]
+    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
     matrix = [
-        [1.0, 0.78, -0.45, -0.68, 0.58, -0.52, 0.61],
-        [0.78, 1.0, -0.38, -0.59, 0.52, -0.48, 0.55],
-        [-0.45, -0.38, 1.0, 0.72, -0.31, 0.35, -0.28],
-        [-0.68, -0.59, 0.72, 1.0, -0.49, 0.44, -0.42],
-        [0.58, 0.52, -0.31, -0.49, 1.0, -0.65, 0.85],
-        [-0.52, -0.48, 0.35, 0.44, -0.65, 1.0, -0.59],
-        [0.61, 0.55, -0.28, -0.42, 0.85, -0.59, 1.0]
+        [1.0, 0.78, -0.45, -0.68, 0.58, -0.52, 0.61, 0.15],
+        [0.78, 1.0, -0.38, -0.59, 0.52, -0.48, 0.55, -0.45],
+        [-0.45, -0.38, 1.0, 0.72, -0.31, 0.35, -0.28, -0.12],
+        [-0.68, -0.59, 0.72, 1.0, -0.49, 0.44, -0.42, -0.18],
+        [0.58, 0.52, -0.31, -0.49, 1.0, -0.65, 0.85, 0.05],
+        [-0.52, -0.48, 0.35, 0.44, -0.65, 1.0, -0.59, -0.08],
+        [0.61, 0.55, -0.28, -0.42, 0.85, -0.59, 1.0, 0.02],
+        [0.15, -0.45, -0.12, -0.18, 0.05, -0.08, 0.02, 1.0]
     ]
     return pd.DataFrame(matrix, index=pairs, columns=pairs)
 
 def generate_mock_stockdata():
     return np.clip(np.random.normal(1.5, 3.5), -10.0, 10.0)
+
 
 def generate_mock_worldbank(wb_code, indicator):
     np.random.seed(99)
@@ -386,43 +438,75 @@ def fetch_benzinga_live(key):
         df = df.sort_values("dt_temp", ascending=True).drop(columns=["dt_temp"])
     return df
 
-def fetch_fmp_live(pair, key):
-    symbol = pair.replace("/", "")
-    url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{symbol}?apikey={key}"
+def fetch_finnhub_live(pair, key):
+    symbol = f"OANDA:{pair.replace('/', '_')}"
+    url = f"https://finnhub.io/api/v1/stock/recommendation?symbol={symbol}&token={key}"
     r = requests.get(url, timeout=8)
     r.raise_for_status()
     res = r.json()
     if not isinstance(res, list) or len(res) == 0:
-        raise ValueError("No FMP ratings data")
-    latest = res[0]
-    # Estimate buy/hold/sell counts
-    b = int(latest.get("analystRatingsbuy", 10))
-    h = int(latest.get("analystRatingsHold", 5))
-    s = int(latest.get("analystRatingsSell", 2))
+        raise ValueError(f"No Finnhub recommendations for symbol {symbol}")
     
-    url_target = f"https://financialmodelingprep.com/api/v3/price-target-consensus?symbol={symbol}&apikey={key}"
-    r_target = requests.get(url_target, timeout=5)
-    mean_val = None
-    if r_target.status_code == 200:
-        target_res = r_target.json()
-        if isinstance(target_res, list) and len(target_res) > 0:
-            mean_val = float(target_res[0].get("targetConsensus", 1.0))
-            
+    latest = res[0]
+    buy = int(latest.get("buy") or 0)
+    hold = int(latest.get("hold") or 0)
+    sell = int(latest.get("sell") or 0)
+    strong_buy = int(latest.get("strongBuy") or 0)
+    strong_sell = int(latest.get("strongSell") or 0)
+    
+    target_mean = 1.0
+    target_high = 1.0
+    target_low = 1.0
+    try:
+        url_target = f"https://finnhub.io/api/v1/stock/price-target?symbol={symbol}&token={key}"
+        rt = requests.get(url_target, timeout=5)
+        if rt.status_code == 200:
+            target_data = rt.json()
+            target_mean = float(target_data.get("targetMean") or 1.0)
+            target_high = float(target_data.get("targetHigh") or 1.0)
+            target_low = float(target_data.get("targetLow") or 1.0)
+    except Exception:
+        pass
+        
     history = []
     for item in res[:5]:
         history.append({
-            "date": item.get("date"),
-            "firm": "Consensus Rating",
-            "rating": "Buy" if b > h else "Hold",
-            "target": mean_val
+            "date": item.get("period") or "",
+            "firm": "Finnhub Consensus",
+            "rating": f"Buy: {item.get('buy')}, Hold: {item.get('hold')}, Sell: {item.get('sell')}",
+            "target": target_mean
         })
         
     return {
-        "buy": b, "hold": h, "sell": s,
-        "target_high": mean_val * 1.05 if mean_val else None,
-        "target_low": mean_val * 0.95 if mean_val else None,
-        "target_mean": mean_val,
+        "buy": buy + strong_buy,
+        "hold": hold,
+        "sell": sell + strong_sell,
+        "strongBuy": strong_buy,
+        "buy_only": buy,
+        "strongSell": strong_sell,
+        "sell_only": sell,
+        "target_high": target_high,
+        "target_low": target_low,
+        "target_mean": target_mean,
         "history": history
+    }
+
+def fetch_itick_live(pair, key):
+    symbol = pair.replace("/", "")
+    url = f"https://api.itick.org/forex/quote?region=GB&code={symbol}"
+    r = requests.get(url, headers={"Accept": "application/json", "token": key}, timeout=8)
+    r.raise_for_status()
+    res = r.json()
+    if res.get("code") != 0 or "data" not in res:
+        raise ValueError(res.get("msg") or "Invalid response format from iTick")
+    data = res["data"]
+    return {
+        "open": float(data["o"]),
+        "high": float(data["h"]),
+        "low": float(data["l"]),
+        "close": float(data["ld"]),
+        "volume": float(data.get("v") or 0.0),
+        "timestamp": data.get("t")
     }
 
 def fetch_fcs_history_live(pair, key):
@@ -510,14 +594,57 @@ def get_benzinga_data(key):
         return generate_mock_benzinga(), datetime.now(), False
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def get_fmp_data(pair, key):
+def get_finnhub_data(pair, key):
     if not key:
-        return generate_mock_fmp(), datetime.now(), False
+        return generate_mock_finnhub(pair), datetime.now(), False
     try:
-        data = fetch_fmp_live(pair, key)
+        data = fetch_finnhub_live(pair, key)
         return data, datetime.now(), True
     except Exception:
-        return generate_mock_fmp(), datetime.now(), False
+        return generate_mock_finnhub(pair), datetime.now(), False
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_itick_data(pair, key):
+    if not key:
+        return generate_mock_itick(pair), datetime.now(), False
+    try:
+        data = fetch_itick_live(pair, key)
+        return data, datetime.now(), True
+    except Exception:
+        return generate_mock_itick(pair), datetime.now(), False
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_av_technical_data(pair, key):
+    if not key:
+        import random
+        random.seed(hash(pair) % 15000)
+        base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+        base = base_prices.get(pair, 1.0)
+        return {
+            "SMA_50": base * random.uniform(0.99, 1.01),
+            "SMA_200": base * random.uniform(0.97, 0.99)
+        }, datetime.now(), False
+    try:
+        from_sym, to_sym = pair.split("/")
+        df = fetch_av_live(from_sym, to_sym, key)
+        if not df.empty and len(df) >= 50:
+            df = calculate_smas(df)
+            latest = df.iloc[-1]
+            return {
+                "SMA_50": float(latest["SMA_50"]) if "SMA_50" in latest else None,
+                "SMA_200": float(latest["SMA_200"]) if "SMA_200" in latest else None
+            }, datetime.now(), True
+        else:
+            raise ValueError("Insufficient data for SMA")
+    except Exception:
+        import random
+        random.seed(hash(pair) % 15000)
+        base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+        base = base_prices.get(pair, 1.0)
+        return {
+            "SMA_50": base * random.uniform(0.99, 1.01),
+            "SMA_200": base * random.uniform(0.97, 0.99)
+        }, datetime.now(), False
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fcs_history_data(pair, key):
@@ -536,7 +663,7 @@ def get_fcs_correlation_data(key):
     if not key:
         return generate_mock_fcs_correlation(), datetime.now(), False
     try:
-        pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]
+        pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
         prices = {}
         for p in pairs:
             df = fetch_fcs_history_live(p, key)
@@ -567,6 +694,52 @@ def get_worldbank_data(country_code, indicator):
         return df, datetime.now(), True
     except Exception:
         return generate_mock_worldbank(country_code, indicator), datetime.now(), False
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ecb_rate_cached():
+    url = "https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.DFR.LEV?lastNObservations=2&format=jsondata"
+    r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
+    r.raise_for_status()
+    res = r.json()
+    series = res["dataSets"][0]["series"]
+    series_key = list(series.keys())[0]
+    obs = series[series_key]["observations"]
+    sorted_keys = sorted(obs.keys(), key=int)
+    latest_val = float(obs[sorted_keys[-1]][0])
+    prev_val = float(obs[sorted_keys[-2]][0]) if len(sorted_keys) > 1 else latest_val
+    bps_change = int((latest_val - prev_val) * 100)
+    return latest_val, bps_change
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_snb_rate_cached():
+    url = "https://data.snb.ch/api/cube/snboffzisa/data/csv/en"
+    r = requests.get(url, timeout=8)
+    r.raise_for_status()
+    lines = r.text.split("\n")
+    data_lines = []
+    start_reading = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('"Date";'):
+            start_reading = True
+        if start_reading:
+            data_lines.append(line)
+    if not data_lines:
+        raise ValueError("Could not find data in SNB CSV")
+    
+    df = pd.read_csv(io.StringIO("\n".join(data_lines)), sep=";")
+    df_lz = df[df["D0"] == "LZ"].copy()
+    if df_lz.empty:
+        raise ValueError("LZ key not found in SNB data")
+    
+    df_lz = df_lz.sort_values("Date")
+    latest_val = float(df_lz.iloc[-1]["Value"])
+    prev_val = float(df_lz.iloc[-2]["Value"]) if len(df_lz) > 1 else latest_val
+    bps_change = int((latest_val - prev_val) * 100)
+    return latest_val, bps_change
+
 
 
 # ----------------- NEWS LOADER & FALLBACKS -----------------
@@ -698,7 +871,7 @@ def deduplicate_articles(articles):
                 title = title[:-len(suffix)].strip()
                 
         title_clean = "".join(c for c in title if c.isalnum())
-        title_trunc = title_clean[:35]
+        title_trunc = title_clean[:100]
         
         if not title_trunc:
             continue
@@ -729,26 +902,49 @@ def categorize_article(art):
     return "📊 Sonstige Makro-News"
 
 def get_country_rate(country_code, fred_key):
-    fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 5.00, "JPN": 0.25, "CHE": 1.25}
-    series_map = {
-        "USA": "FEDFUNDS",
-        "EMU": "ECBMAINVAL",
-        "GBR": "IUDSOIA",
-        "JPN": "INTGSTJP",
-        "CHE": "INTGSTCH"
+    # Retrieve manual rates from session state if available, otherwise use defaults
+    manual_rates = {
+        "GBR": st.session_state.get("manual_rate_GBP", 5.25),
+        "JPN": st.session_state.get("manual_rate_JPY", 0.10),
+        "AUD": st.session_state.get("manual_rate_AUD", 4.35),
+        "CAD": st.session_state.get("manual_rate_CAD", 5.00),
+        "NZD": st.session_state.get("manual_rate_NZD", 5.50)
     }
     
-    if country_code in series_map:
-        sid = series_map[country_code]
-        df, t, is_live = get_fred_data(sid, fred_key)
+    fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 5.25, "JPN": 0.10, "CHE": 1.25, "AUS": 4.35, "CAN": 5.00, "NZL": 5.50}
+    
+    if country_code == "USA":
+        df, _, _ = get_fred_data("FEDFUNDS", fred_key)
         if not df.empty:
             latest = df.iloc[-1]["value"]
             prev = df.iloc[-2]["value"] if len(df) > 1 else latest
             bps_change = int((latest - prev) * 100)
-            return latest, bps_change, f"FRED ({'Live' if is_live else 'Demo'})"
+            return latest, bps_change, "FRED"
+        return 5.25, 0, "FRED (Fallback)"
+        
+    elif country_code == "EMU":
+        try:
+            val, bps_change = get_ecb_rate_cached()
+            return val, bps_change, "ECB Data Portal"
+        except Exception:
+            return 2.25, 0, "ECB (Fallback)"
             
-    val = fallback_rates.get(country_code, 2.00)
-    return val, 0, "Statische Fallback-Quelle"
+    elif country_code == "CHE":
+        try:
+            val, bps_change = get_snb_rate_cached()
+            return val, bps_change, "SNB Portal"
+        except Exception:
+            return 0.0, 0, "SNB (Fallback)"
+            
+    map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
+    key = map_code.get(country_code, country_code)
+    
+    val = manual_rates.get(key, fallback_rates.get(country_code, 2.0))
+    priors = {"GBR": 5.25, "JPN": 0.10, "AUD": 4.35, "CAD": 5.00, "NZD": 5.50}
+    prior_val = priors.get(key, val)
+    bps_change = int((val - prior_val) * 100)
+    
+    return val, bps_change, "Zins-Kontrollzentrum"
 
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
@@ -967,6 +1163,29 @@ if base_curr == quote_curr:
 # Manual cache clear
 st.sidebar.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
 
+# Zins-Kontrollzentrum (Manual inputs)
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🏦 Zins-Kontrollzentrum")
+st.sidebar.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
+
+st.session_state["manual_rate_GBP"] = st.sidebar.number_input(
+    "Bank of England (GBP) %", min_value=0.0, max_value=15.0, value=5.25, step=0.05
+)
+st.session_state["manual_rate_JPY"] = st.sidebar.number_input(
+    "Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, value=0.10, step=0.05
+)
+st.session_state["manual_rate_AUD"] = st.sidebar.number_input(
+    "Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, value=4.35, step=0.05
+)
+st.session_state["manual_rate_CAD"] = st.sidebar.number_input(
+    "Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, value=5.00, step=0.05
+)
+st.session_state["manual_rate_NZD"] = st.sidebar.number_input(
+    "Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, value=5.50, step=0.05
+)
+
+st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
+
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 with st.spinner("Initialisiere globale Marktdaten..."):
     # Pre-load macro scores
@@ -974,7 +1193,7 @@ with st.spinner("Initialisiere globale Marktdaten..."):
     quote_score = compute_currency_score(quote_curr, FRED_KEY)
     
     # Calculate corrected signal value (scaled to range -50 to +50)
-    raw_diff = base_score - quote_score
+    raw_diff = quote_score - base_score
     signal_value = raw_diff / 2.0
     signal_value = max(-50.0, min(50.0, signal_value))
     
@@ -1013,9 +1232,9 @@ with st.spinner("Initialisiere globale Marktdaten..."):
         badge = "NEUTRAL"
         override_reason = f"Wirtschaftsscore von {quote_curr} ({quote_score:.1f}/100) ist schwach (< 40), das negative Signal wurde auf Neutral (NT) angehoben."
 
-    # Load AV close price
-    df_av, t_av, is_live_av = get_av_data(base_curr, quote_curr, AV_KEY)
-    latest_close = df_av.iloc[-1]["close"] if not df_av.empty else 0.0
+    # Load iTick close price
+    itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
+    latest_close = itick_data["close"] if itick_data else 0.0
 
 # ----------------- 5. HEADER SECTION -----------------
 st.title("⚖️ Forex Fundamental Suite")
@@ -1044,23 +1263,209 @@ with col_score_q:
 
 
 # ----------------- 6. TABS MODULES -----------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
+st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
+
+def get_pair_signal_and_badge(base, quote):
+    b_score = compute_currency_score(base, FRED_KEY)
+    q_score = compute_currency_score(quote, FRED_KEY)
+    r_diff = q_score - b_score
+    sig_val = r_diff / 2.0
+    sig_val = max(-50.0, min(50.0, sig_val))
+    
+    if sig_val >= 35.0:
+        s = "SB"
+        b = "STRONG BUY"
+        c = "#10b981"
+    elif 15.0 <= sig_val < 35.0:
+        s = "MB"
+        b = "MID BUY"
+        c = "#34d399"
+    elif -15.0 < sig_val < 15.0:
+        s = "NT"
+        b = "NEUTRAL"
+        c = "#8b949e"
+    elif -35.0 < sig_val <= -15.0:
+        s = "MS"
+        b = "MID SELL"
+        c = "#f87171"
+    else:
+        s = "SS"
+        b = "STRONG SELL"
+        c = "#ef4444"
+        
+    # Overrides
+    if b_score > 60.0 and s in ["MS", "SS"]:
+        b = "NEUTRAL"
+        c = "#8b949e"
+        s = "NT"
+    elif b_score < 40.0 and s in ["MB", "SB"]:
+        b = "NEUTRAL"
+        c = "#8b949e"
+        s = "NT"
+    elif q_score > 60.0 and s in ["MB", "SB"]:
+        b = "NEUTRAL"
+        c = "#8b949e"
+        s = "NT"
+    elif q_score < 40.0 and s in ["MS", "SS"]:
+        b = "NEUTRAL"
+        c = "#8b949e"
+        s = "NT"
+        
+    return b, c, sig_val
+
+def get_next_event_for_pair(base, quote, df_c):
+    curr_to_countries = {
+        "USD": ["USA", "US"],
+        "EUR": ["EUR", "DEU", "FRA", "ITA", "EMU"],
+        "GBP": ["GBR", "UK", "GB"],
+        "CHF": ["CHE", "CH", "SUI"],
+        "CAD": ["CAN", "CA"],
+        "AUD": ["AUS", "AU"],
+        "NZD": ["NZL", "NZ"],
+        "JPY": ["JPN", "JP"]
+    }
+    base_match = curr_to_countries.get(base, [base])
+    quote_match = curr_to_countries.get(quote, [quote])
+    pair_cal = df_c[df_c["country"].isin(base_match + quote_match)].copy()
+    if pair_cal.empty:
+        return "Keine Events"
+    pair_cal["parsed_time"] = pd.to_datetime(pair_cal["time"], errors="coerce")
+    pair_cal = pair_cal.dropna(subset=["parsed_time"])
+    if pair_cal.empty:
+        return "Keine Events"
+    now_dt = datetime.now()
+    future_events = pair_cal[pair_cal["parsed_time"] >= now_dt]
+    if not future_events.empty:
+        next_event = future_events.sort_values("parsed_time").iloc[0]
+    else:
+        next_event = pair_cal.sort_values("parsed_time", ascending=False).iloc[0]
+    time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
+    return f"{next_event['country']}: {next_event['event']} ({time_str})"
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "🏠 Übersicht & Checkliste",
     "📅 Economic Calendar",
     "🏦 Zinsdifferenz",
     "📊 Analysten-Konsens",
     "🧠 Sentiment-Score",
     "🧮 Korrelationsmatrix",
     "📈 Langfristige Historie",
-    "📰 News & Research"
+    "📰 News & Research Hub"
 ])
 
-# ----------------- TAB 1: ECONOMIC CALENDAR (Benzinga) -----------------
+# ----------------- TAB 1: ÜBERSICHT & CHECKLISTE -----------------
 with tab1:
-    st.header("📅 Globaler Wirtschaftskalender")
-    st.caption("Echtzeit-Timeline der kommenden globalen Events der nächsten 30 Tage.")
+    st.header("🏠 G8 Fundamental-Checkliste")
+    st.caption("Auf einen Blick die makroökonomischen Scores und Handelssignale für alle Währungspaare vergleichen.")
     
-    df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
-    st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
+    # 1. Macro scores comparison chart
+    scores = {curr: compute_currency_score(curr, FRED_KEY) for curr in CURRENCIES.keys()}
+    df_scores = pd.DataFrame(list(scores.items()), columns=["Currency", "Score"])
+    currency_order = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+    df_scores['Currency'] = pd.Categorical(df_scores['Currency'], categories=currency_order, ordered=True)
+    df_scores = df_scores.sort_values('Currency')
+    
+    fig_all_scores = px.bar(
+        df_scores,
+        x="Currency",
+        y="Score",
+        color="Score",
+        color_continuous_scale="Viridis",
+        text_auto=".1f"
+    )
+    fig_all_scores.update_layout(
+        title="Wirtschaftsscores der G8 Länder im Vergleich",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color="#7d7d8a", size=10),
+        xaxis=dict(showgrid=False, linecolor="#1f2026"),
+        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026", range=[0, 100]),
+        height=320,
+        margin=dict(l=10, r=10, t=40, b=10)
+    )
+    st.plotly_chart(fig_all_scores, use_container_width=True)
+    
+    # 2. Pairs table checklist
+    st.subheader("📋 Währungspaare Checkliste")
+    
+    # Create HTML table
+    html_table = """
+    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
+        <thead>
+            <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
+                <th style="padding:12px 10px;">Währungspaar</th>
+                <th style="padding:12px 10px;">Zins-Differenz (bps)</th>
+                <th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
+                <th style="padding:12px 10px; text-align:center;">Signal-Klassifikation</th>
+                <th style="padding:12px 10px;">Analysten-Konsens</th>
+                <th style="padding:12px 10px; text-align:center;">Sentiment</th>
+                <th style="padding:12px 10px;">Nächstes Event</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+    
+    G8_PAIRS = [
+        ("USD", "EUR"),
+        ("USD", "GBP"),
+        ("USD", "CHF"),
+        ("USD", "CAD"),
+        ("USD", "AUD"),
+        ("USD", "NZD"),
+        ("USD", "JPY"),
+        ("EUR", "GBP")
+    ]
+    
+    rows = []
+    for base, quote in G8_PAIRS:
+        p_name = f"{base}/{quote}"
+        badge_name, badge_color, sig_val = get_pair_signal_and_badge(base, quote)
+        
+        base_rate, _, _ = get_country_rate(CURRENCIES[base]["wb_code"], FRED_KEY)
+        quote_rate, _, _ = get_country_rate(CURRENCIES[quote]["wb_code"], FRED_KEY)
+        diff_bps = int((quote_rate - base_rate) * 100)
+        diff_str = f"{base_rate:.2f}% vs {quote_rate:.2f}% ({diff_bps:+d} bps)"
+        
+        rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
+        buy_count = rec_data.get("buy", 0)
+        hold_count = rec_data.get("hold", 0)
+        sell_count = rec_data.get("sell", 0)
+        rec_str = f"<span style='color:#10b981; font-weight:600;'>B:{buy_count}</span> / <span style='color:#e2b13c;'>H:{hold_count}</span> / <span style='color:#ef4444;'>S:{sell_count}</span>"
+        
+        sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
+        if sent_val >= 3.5:
+            sent_color = "#10b981"
+        elif sent_val <= -3.5:
+            sent_color = "#ef4444"
+        else:
+            sent_color = "#8b949e"
+        sent_str = f"<span style='color:{sent_color}; font-weight:600;'>{sent_val:+.1f}</span>"
+        
+        next_ev = get_next_event_for_pair(base, quote, df_cal)
+        
+        rows.append(f"""
+            <tr style="border-bottom:1px solid #1f2026;">
+                <td style="padding:12px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}</td>
+                <td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{diff_str}</td>
+                <td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{badge_color};">{sig_val:+.1f}</td>
+                <td style="padding:12px 10px; text-align:center;">
+                    <span style="background-color:{badge_color}18; color:{badge_color}; border:1px solid {badge_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{badge_name}</span>
+                </td>
+                <td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{rec_str}</td>
+                <td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str}</td>
+                <td style="padding:12px 10px; color:#8c8c9a; font-size:0.8rem;">{next_ev}</td>
+            </tr>
+        """)
+        
+    html_table += "".join(rows) + "</tbody></table>"
+    st.markdown(html_table, unsafe_allow_html=True)
+    st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung</div>", unsafe_allow_html=True)
+
+# ----------------- TAB 2: ECONOMIC CALENDAR -----------------
+with tab2:
+    st.header("📅 Globaler Wirtschaftskalender")
+    st.caption("Echtzeit-Timeline der kommenden globalen Events der nächsten 30 Tage mit Checkliste für manuelle Analyse.")
     
     # Filter
     countries_available = ["All"] + list(df_cal["country"].unique())
@@ -1068,9 +1473,9 @@ with tab1:
     
     f_col1, f_col2 = st.columns(2)
     with f_col1:
-        sel_country = st.selectbox("Land filtern", options=countries_available, index=0)
+        sel_country = st.selectbox("Land filtern", options=countries_available, index=0, key="cal_country_filter")
     with f_col2:
-        sel_importance = st.selectbox("Wichtigkeit", options=importances_available, index=0)
+        sel_importance = st.selectbox("Wichtigkeit", options=importances_available, index=0, key="cal_imp_filter")
         
     filtered_cal = df_cal.copy()
     if sel_country != "All":
@@ -1079,105 +1484,101 @@ with tab1:
         filtered_cal = filtered_cal[filtered_cal["importance"] == sel_importance]
         
     if not filtered_cal.empty:
-        styled_rows = []
-        for idx, row in filtered_cal.iterrows():
+        st.markdown("### 📋 Event-Abarbeitungsliste")
+        for idx, row in filtered_cal.reset_index().iterrows():
             act = row["actual"]
             cons = row["consensus"]
+            prior = row["prior"]
             
             act_style = ""
-            if act is not None and cons is not None and cons != "-":
-                try:
-                    act_num = float(str(act).replace("%","").replace("K","").replace("M","").strip())
-                    cons_num = float(str(cons).replace("%","").replace("K","").replace("M","").strip())
-                    if act_num >= cons_num:
-                        act_style = f"<span style='color:#10b981; font-weight:700;'>{act}</span>"
-                    else:
-                        act_style = f"<span style='color:#ef4444; font-weight:700;'>{act}</span>"
-                except Exception:
-                    act_style = f"<span>{act}</span>"
+            act_clean = str(act).strip() if act is not None and not pd.isna(act) else None
+            if act_clean and act_clean.lower() not in ("nan", "none", "", "-"):
+                cons_clean = str(cons).strip() if cons is not None and not pd.isna(cons) else None
+                if cons_clean and cons_clean.lower() not in ("nan", "none", "", "-"):
+                    try:
+                        act_num = float(act_clean.replace("%","").replace("K","").replace("M","").replace("Barrels","").strip())
+                        cons_num = float(cons_clean.replace("%","").replace("K","").replace("M","").replace("Barrels","").strip())
+                        if act_num >= cons_num:
+                            act_color = "#10b981"
+                        else:
+                            act_color = "#ef4444"
+                    except Exception:
+                        act_color = "#f0f0f5"
+                else:
+                    act_color = "#f0f0f5"
+                act_disp = f"**Ist:** <span style='color:{act_color};'>{act_clean}</span>"
             else:
-                act_style = f"<span style='color:#7d7d8a;'>-</span>"
+                act_disp = "**Ist:** -"
                 
-            styled_rows.append(f"""
-            <tr>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;">{row['time']}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026; font-weight:600;">{row['country']}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;">{row['event']}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;">{cons}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;">{act_style}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;">{row['prior']}</td>
-                <td style="padding:10px 5px; border-bottom:1px solid #1f2026;"><span style="font-size:0.75rem; background-color:{'rgba(239, 68, 68, 0.1)' if row['importance'] == 'High' else 'rgba(255, 255, 255, 0.03)'}; color:{'#ef4444' if row['importance'] == 'High' else '#7d7d8a'}; padding:2px 6px; border-radius:3px;">{row['importance']}</span></td>
-            </tr>
-            """)
+            cons_disp = cons if cons else "-"
+            prior_disp = prior if prior else "-"
             
-        html_table = f"""
-        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
-            <thead>
-                <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700;">
-                    <th style="padding:10px 5px;">Datum/Uhrzeit</th>
-                    <th style="padding:10px 5px;">Land</th>
-                    <th style="padding:10px 5px;">Event</th>
-                    <th style="padding:10px 5px;">Konsensus</th>
-                    <th style="padding:10px 5px;">Ist-Wert</th>
-                    <th style="padding:10px 5px;">Vorherig</th>
-                    <th style="padding:10px 5px;">Wichtigkeit</th>
-                </tr>
-            </thead>
-            <tbody>
-                {"".join(styled_rows)}
-            </tbody>
-        </table>
-        """
-        st.markdown(html_table, unsafe_allow_html=True)
+            cb_key = f"evt_{row['country']}_{row['time']}_{idx}"
+            
+            c_cb, c_info, c_metrics = st.columns([0.1, 0.6, 0.3])
+            with c_cb:
+                checked = st.checkbox("", key=cb_key, label_visibility="collapsed")
+            with c_info:
+                country_flag = ""
+                for c_key, c_val in CURRENCIES.items():
+                    if c_val["wb_code"] == row["country"] or c_key == row["country"] or c_val["country"] == row["country"]:
+                        country_flag = c_val["flag"]
+                if not country_flag:
+                    if row["country"] == "USA": country_flag = "🇺🇸"
+                    elif row["country"] in ("DEU", "EUR"): country_flag = "🇪🇺"
+                    elif row["country"] == "GBR": country_flag = "🇬🇧"
+                    elif row["country"] == "CHE": country_flag = "🇨🇭"
+                    elif row["country"] == "JPN": country_flag = "🇯🇵"
+                    elif row["country"] == "AUS": country_flag = "🇦🇺"
+                    elif row["country"] == "CAN": country_flag = "🇨🇦"
+                    elif row["country"] == "NZL": country_flag = "🇳🇿"
+                
+                imp_badge = f"<span style='font-size:0.75rem; background-color:{'rgba(239, 68, 68, 0.15)' if row['importance'] == 'High' else 'rgba(255, 255, 255, 0.03)'}; color:{'#ef4444' if row['importance'] == 'High' else '#7d7d8a'}; padding:2px 6px; border-radius:3px;'>{row['importance']}</span>"
+                
+                strike_start = "~~" if checked else ""
+                strike_end = "~~" if checked else ""
+                
+                st.markdown(f"{country_flag} **{row['country']}** | {row['time']} | {imp_badge} <br> {strike_start}**{row['event']}**{strike_end}", unsafe_allow_html=True)
+            with c_metrics:
+                st.markdown(f"Consensus: {cons_disp} | Prior: {prior_disp} <br> {act_disp}", unsafe_allow_html=True)
+                
+            st.markdown("<hr style='margin:5px 0; border-color:#1f2026;' />", unsafe_allow_html=True)
     else:
         st.info("Keine Events für die gewählten Filter vorhanden.")
         
     st.markdown(f"<div style='margin-top:15px;' class='source-tag {'source-tag-live' if is_live_cal else ''}'>Quelle: Benzinga</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 2: ZINSDIFFERENZ (FRED & World Bank) -----------------
-with tab2:
+# ----------------- TAB 3: ZINSDIFFERENZ -----------------
+with tab3:
     st.header("🏦 Zinsdifferenz & Notenbanken")
-    st.caption("Vergleich der aktuellen Leitzinsen der wichtigsten Notenbanken weltweit.")
+    st.caption("Vergleich der aktuellen Leitzinsen der 8 Haupt-Zentralbanken.")
     
-    df_f_funds, t_fred, is_live_fred = get_fred_data("FEDFUNDS", FRED_KEY)
-    st.sidebar.caption(f"**FRED:** {format_freshness(t_fred)} ({'Live' if is_live_fred else 'Demo'})")
-    
-    rate_usd, change_usd, source_usd = get_country_rate("USA", FRED_KEY)
-    rate_eur, change_eur, source_eur = get_country_rate("EMU", FRED_KEY)
-    rate_gbp, change_gbp, source_gbp = get_country_rate("GBR", FRED_KEY)
-    rate_jpy, change_jpy, source_jpy = get_country_rate("JPN", FRED_KEY)
-    rate_chf, change_chf, source_chf = get_country_rate("CHE", FRED_KEY)
-    
-    z_col1, z_col2, z_col3, z_col4, z_col5 = st.columns(5)
-    with z_col1:
-        render_metric_card("Fed Rates (USD)", f"{rate_usd:.2f}%", source_usd, is_live_fred)
-        st.metric("Veränderung", f"{rate_usd:.2f}%", f"{change_usd:+d} Bps", label_visibility="collapsed")
-    with z_col2:
-        render_metric_card("ECB Rates (EUR)", f"{rate_eur:.2f}%", source_eur, is_live_fred)
-        st.metric("Veränderung", f"{rate_eur:.2f}%", f"{change_eur:+d} Bps", label_visibility="collapsed")
-    with z_col3:
-        render_metric_card("BoE Rates (GBP)", f"{rate_gbp:.2f}%", source_gbp, is_live_fred)
-        st.metric("Veränderung", f"{rate_gbp:.2f}%", f"{change_gbp:+d} Bps", label_visibility="collapsed")
-    with z_col4:
-        render_metric_card("BoJ Rates (JPY)", f"{rate_jpy:.2f}%", source_jpy, is_live_fred)
-        st.metric("Veränderung", f"{rate_jpy:.2f}%", f"{change_jpy:+d} Bps", label_visibility="collapsed")
-    with z_col5:
-        render_metric_card("SNB Rates (CHF)", f"{rate_chf:.2f}%", source_chf, is_live_fred)
-        st.metric("Veränderung", f"{rate_chf:.2f}%", f"{change_chf:+d} Bps", label_visibility="collapsed")
+    # Fetch all rates
+    rates_data = {}
+    for curr, info in CURRENCIES.items():
+        r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
+        rates_data[curr] = {
+            "rate": r_val,
+            "bps_change": bps_chg,
+            "source": src
+        }
         
-    banks = ["USD (Fed)", "EUR (ECB)", "GBP (BoE)", "CHF (SNB)", "JPY (BoJ)"]
-    rates = [rate_usd, rate_eur, rate_gbp, rate_chf, rate_jpy]
+    df_rates_plot = pd.DataFrame([
+        {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
+        for curr, data in rates_data.items()
+    ])
     
-    fig_rates = go.Figure()
-    fig_rates.add_trace(go.Bar(
-        x=banks, y=rates,
-        marker_color=['#10b981', '#e2b13c', '#ffd166', '#8b949e', '#ef4444'],
-        text=[f"{r:.2f}%" for r in rates],
+    fig_rates_g8 = go.Figure()
+    fig_rates_g8.add_trace(go.Bar(
+        x=df_rates_plot["Zentralbank"],
+        y=df_rates_plot["Zinssatz"],
+        marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
+        text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
         textposition='auto',
         name="Zinssatz"
     ))
-    fig_rates.update_layout(
-        title="Aktuelle Leitzinsen im Vergleich",
+    fig_rates_g8.update_layout(
+        title="Leitzinsen der G8 im Vergleich",
         yaxis_title="Zinssatz (%)",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
@@ -1187,67 +1588,103 @@ with tab2:
         height=320,
         margin=dict(l=10, r=10, t=40, b=10)
     )
-    st.plotly_chart(fig_rates, use_container_width=True)
+    st.plotly_chart(fig_rates_g8, use_container_width=True)
     
-    st.markdown("*(Zusätzlich unterstützte Länder außerhalb der USA beziehen historische Makrodaten wie BIP & Inflation aus der World Bank API).*")
-    st.markdown("<div class='source-tag'>Quelle: FRED & World Bank</div>", unsafe_allow_html=True)
+    # Table comparing the rates + bps changes
+    rates_rows = []
+    for curr, data in rates_data.items():
+        color_class = "color:#10b981;" if data["bps_change"] > 0 else "color:#ef4444;" if data["bps_change"] < 0 else "color:#7d7d8a;"
+        rates_rows.append(f"""
+        <tr style="border-bottom:1px solid #1f2026;">
+            <td style="padding:10px 5px; font-weight:600;">{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})</td>
+            <td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:600;">{data['rate']:.2f}%</td>
+            <td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:700; {color_class}">{data['bps_change']:+d} bps</td>
+            <td style="padding:10px 5px; color:#8c8c9a; font-size:0.75rem;">{data['source']}</td>
+        </tr>
+        """)
+        
+    rates_table_html = f"""
+    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+        <thead>
+            <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700;">
+                <th style="padding:10px 5px;">Zentralbank</th>
+                <th style="padding:10px 5px;">Leitzins</th>
+                <th style="padding:10px 5px;">Änderung zum Vormonat</th>
+                <th style="padding:10px 5px;">Quelle</th>
+            </tr>
+        </thead>
+        <tbody>
+            {"".join(rates_rows)}
+        </tbody>
+    </table>
+    """
+    st.markdown(rates_table_html, unsafe_allow_html=True)
+    st.markdown("<div class='source-tag'>Quelle: FRED, ECB Portal, SNB Portal & Zins-Kontrollzentrum</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 3: ANALYSTEN-KONSENS (FMP) -----------------
-with tab3:
+# ----------------- TAB 4: ANALYSTEN-KONSENS -----------------
+with tab4:
     st.header("📊 Analysten-Konsens & Kursziele")
-    st.caption(f"Konsens-Ratings und durchschnittliche Kursziele für das Währungspaar **{selected_pair}**.")
+    st.caption(f"Konsens-Ratings und Kursziele für das Währungspaar **{selected_pair}**.")
     
-    fmp_data, t_fmp, is_live_fmp = get_fmp_data(selected_pair, FMP_KEY)
-    st.sidebar.caption(f"**FMP:** {format_freshness(t_fmp)} ({'Live' if is_live_fmp else 'Demo'})")
+    # Fetch Finnhub data
+    finnhub_data, t_finnhub, is_live_finnhub = get_finnhub_data(selected_pair, FINNHUB_KEY)
+    st.sidebar.caption(f"**Finnhub:** {format_freshness(t_finnhub)} ({'Live' if is_live_finnhub else 'Demo'})")
     
     c_col1, c_col2 = st.columns([1, 1.2])
     with c_col1:
-        st.subheader("Verteilung der Analysten-Ratings")
-        labels = ["Buy", "Hold", "Sell"]
-        counts = [fmp_data["buy"], fmp_data["hold"], fmp_data["sell"]]
+        st.subheader("Ratings-Verteilung")
+        labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
+        counts = [
+            finnhub_data.get("strongBuy", 0),
+            finnhub_data.get("buy_only", 0) or finnhub_data.get("buy", 0),
+            finnhub_data.get("hold", 0),
+            finnhub_data.get("sell_only", 0) or finnhub_data.get("sell", 0),
+            finnhub_data.get("strongSell", 0)
+        ]
         
-        fig_recs = go.Figure(data=[go.Pie(
-            labels=labels, values=counts,
-            hole=.4,
-            marker_colors=["#10b981", "#e2b13c", "#ef4444"],
-            textinfo='value+percent',
-            textfont=dict(color="#ffffff")
+        fig_finnhub = go.Figure(data=[go.Bar(
+            x=labels,
+            y=counts,
+            marker_colors=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
+            text=counts,
+            textposition='auto'
         )])
-        fig_recs.update_layout(
+        fig_finnhub.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color="#7d7d8a"),
-            legend=dict(orientation="h", yanchor="bottom", y=-0.1, xanchor="center", x=0.5),
+            font=dict(color="#7d7d8a", size=10),
+            xaxis=dict(showgrid=False, linecolor="#1f2026"),
+            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
             height=280,
             margin=dict(l=10, r=10, t=10, b=10)
         )
-        st.plotly_chart(fig_recs, use_container_width=True)
+        st.plotly_chart(fig_finnhub, use_container_width=True)
         
     with c_col2:
         st.subheader("Konsens-Kursziele")
-        avg_t = fmp_data["target_mean"]
-        high_t = fmp_data["target_high"]
-        low_t = fmp_data["target_low"]
+        avg_t = finnhub_data["target_mean"]
+        high_t = finnhub_data["target_high"]
+        low_t = finnhub_data["target_low"]
         
         t_col1, t_col2 = st.columns(2)
         with t_col1:
             st.metric("Mittleres Kursziel", f"{avg_t:.4f}" if avg_t else "N/A")
             st.metric("Höchstes Kursziel", f"{high_t:.4f}" if high_t else "N/A")
         with t_col2:
-            st.metric("Aktueller Kurs", f"{latest_close:.4f}" if latest_close else "N/A")
+            st.metric("Aktueller Kurs (iTick)", f"{latest_close:.4f}" if latest_close else "N/A")
             st.metric("Tiefstes Kursziel", f"{low_t:.4f}" if low_t else "N/A")
             
     st.subheader("Letzte Ratings-Änderungen")
-    df_ratings = pd.DataFrame(fmp_data["history"])
+    df_ratings = pd.DataFrame(finnhub_data["history"])
     if not df_ratings.empty:
         st.dataframe(df_ratings, use_container_width=True, hide_index=True)
     else:
         st.info("Keine Rating-Historie verfügbar.")
         
-    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_fmp else ''}'>Quelle: Financial Modeling Prep</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_finnhub else ''}'>Quelle: Finnhub</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 4: SENTIMENT-SCORE (StockData.org) -----------------
-with tab4:
+# ----------------- TAB 5: SENTIMENT-SCORE -----------------
+with tab5:
     st.header("🧠 Markt-Sentiment (News Tonalität)")
     st.caption(f"Berechnetes News-Sentiment (-10 bis +10) für das Paar **{selected_pair}** basierend auf künstlicher Intelligenz.")
     
@@ -1296,8 +1733,8 @@ with tab4:
         
     st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_sent else ''}'>Quelle: StockData.org</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 5: KORRELATIONSMATRIX (FCS API) -----------------
-with tab5:
+# ----------------- TAB 6: KORRELATIONSMATRIX -----------------
+with tab6:
     st.header("🧮 30-Tage Korrelationsmatrix")
     st.caption("Vergleichende Korrelations-Heatmap aller Major-Währungspaare (berechnet aus FCS API-Preishistorien).")
     
@@ -1323,12 +1760,15 @@ with tab5:
     st.info("💡 Werte nahe +1.0 bedeuten starke Gleichlauf-Korrelation. Werte nahe -1.0 bedeuten starke Gegenlauf-Korrelation.")
     st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_corr else ''}'>Quelle: FCS API</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 6: LANGFRISTIGE HISTORIE (FCS API) -----------------
-with tab6:
+# ----------------- TAB 7: LANGFRISTIGE HISTORIE -----------------
+with tab7:
     st.header("📈 Langfristige Historie & Zyklen (seit 1995)")
-    st.caption(f"Langfristiger Kursverlauf von **{selected_pair}** ab 1995 zur Analyse übergeordneter wirtschaftlicher Zyklen.")
+    st.caption(f"Langfristiger Kursverlauf ab 1995 zur Analyse übergeordneter wirtschaftlicher Zyklen.")
     
-    df_hist, t_hist, is_live_hist = get_fcs_history_data(selected_pair, FCS_KEY)
+    major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
+    hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0)
+    
+    df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
     
     if not df_hist.empty:
         fig_hist = go.Figure()
@@ -1338,7 +1778,7 @@ with tab6:
             name="Schlusskurs"
         ))
         fig_hist.update_layout(
-            title=f"Historischer Langzeit-Kurs ({selected_pair})",
+            title=f"Historischer Langzeit-Kurs ({hist_pair})",
             xaxis_title="Datum",
             yaxis_title="Kurs",
             xaxis=dict(
@@ -1361,29 +1801,24 @@ with tab6:
         
     st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_hist else ''}'>Quelle: FCS API</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 7: NEWS & RESEARCH HUB (Restored News Pages) -----------------
-with tab7:
+# ----------------- TAB 8: NEWS & RESEARCH HUB -----------------
+with tab8:
     st.header("📰 News & Research Hub")
     st.caption(f"Aktuelle fundamentale Marktnachrichten für das Paar **{selected_pair}** mit thematischer Gruppierung.")
     
-    # Pre-calculated default query
     default_q = get_default_query(base_curr, quote_curr)
-    
-    # Search input
-    search_q = st.text_input("🔍 Nachrichten durchsuchen", value=default_q, help="Nutze Stichworte wie Inflation, Leitzins, Fed, EZB etc.")
+    search_q = st.text_input("🔍 Nachrichten durchsuchen", value=default_q, help="Nutze Stichworte wie Inflation, Leitzins, Fed, EZB etc.", key="news_search_query_input")
     
     if search_q:
         with st.spinner("Suche aktuelle Nachrichten..."):
             raw_articles, news_source, is_news_live, t_news = get_news_data_search(search_q, NEWSDATA_KEY, NEWSAPI_KEY)
             st.sidebar.caption(f"**News Hub:** {format_freshness(t_news)} ({'Live' if is_news_live else 'Demo'})")
             
-            # Deduplicate articles
             news_articles = deduplicate_articles(raw_articles)
             
         if news_articles:
             st.info(f"Es wurden {len(news_articles)} relevante und einzigartige Artikel gefunden. (Aktiv: {news_source})")
             
-            # Categorize articles
             grouped_articles = {
                 "🏦 Geldpolitik & Zinsen": [],
                 "🚢 Import & Export": [],
@@ -1395,7 +1830,6 @@ with tab7:
                 cat = categorize_article(art)
                 grouped_articles[cat].append(art)
                 
-            # Create sub-tabs
             sub_tabs = st.tabs([
                 "📋 Alle News", 
                 "🏦 Geldpolitik & Zinsen", 
@@ -1405,15 +1839,15 @@ with tab7:
             ])
             
             with sub_tabs[0]:
-                render_articles_grid(news_articles)
+                render_articles_grid(news_articles[:10])
             with sub_tabs[1]:
-                render_articles_grid(grouped_articles["🏦 Geldpolitik & Zinsen"])
+                render_articles_grid(grouped_articles["🏦 Geldpolitik & Zinsen"][:10])
             with sub_tabs[2]:
-                render_articles_grid(grouped_articles["🚢 Import & Export"])
+                render_articles_grid(grouped_articles["🚢 Import & Export"][:10])
             with sub_tabs[3]:
-                render_articles_grid(grouped_articles["🌍 Länder-Analysen"])
+                render_articles_grid(grouped_articles["🌍 Länder-Analysen"][:10])
             with sub_tabs[4]:
-                render_articles_grid(grouped_articles["📊 Sonstige Makro-News"])
+                render_articles_grid(grouped_articles["📊 Sonstige Makro-News"][:10])
         else:
             st.warning("Keine aktuellen Nachrichten zu diesem Suchbegriff gefunden.")
             
