@@ -1645,7 +1645,7 @@ with tab4:
         fig_finnhub = go.Figure(data=[go.Bar(
             x=labels,
             y=counts,
-            marker_colors=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
+            marker_color=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
             text=counts,
             textposition='auto'
         )])
