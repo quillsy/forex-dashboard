@@ -1003,7 +1003,7 @@ def compute_currency_score(curr, fred_key):
         latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else 1.5
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
 
-    total_score = 0.3 * rate_score + 0.3 * cpi_score + 0.2 * unemp_score + 0.2 * gdp_score
+    total_score = 0.50 * rate_score + 0.20 * cpi_score + 0.15 * unemp_score + 0.15 * gdp_score
     return total_score
 
 
