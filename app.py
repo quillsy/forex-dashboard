@@ -188,7 +188,6 @@ ITICK_KEY = os.getenv("ITICK_API_KEY")
 FCS_KEY = os.getenv("FCS_API_KEY")
 STOCKDATA_KEY = os.getenv("STOCKDATA_API_KEY")
 TIINGO_KEY = os.getenv("TIINGO_API_KEY")
-EODHD_KEY = os.getenv("EODHD_API_KEY")
 BLS_KEY = os.getenv("BLS_API_KEY")
 
 # ----------------- Constants & Configuration -----------------
@@ -558,6 +557,9 @@ def fetch_stockdata_live(pair, key):
     return float(sum(scores) / len(scores) * 10.0)
 
 def fetch_worldbank_live(country_code, indicator):
+    # Auto-translate ZG to ZS for unemployment to get live data from World Bank
+    if indicator == "SL.UEM.TOTL.ZG":
+        indicator = "SL.UEM.TOTL.ZS"
     url = f"http://api.worldbank.org/v2/country/{country_code}/indicator/{indicator}?format=json&date=2015:2026"
     r = requests.get(url, timeout=8)
     r.raise_for_status()
@@ -711,62 +713,7 @@ def format_imf_indicator(base, quote, indicator):
     quote_str = f"{quote_val:.1f}%" if quote_val is not None else "N/A"
     return f"{base_str} / {quote_str}"
 
-@st.cache_data(ttl=86400) # 1 day
-def get_eodhd_history_prices(pair, api_key):
-    if not api_key:
-        return None
-    symbol = f"{pair.replace('/', '')}.FOREX"
-    url = f"https://eodhd.com/api/eod/{symbol}?api_token={api_key}&fmt=json&from=1995-01-01"
-    try:
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            if data and isinstance(data, list):
-                parsed = []
-                for item in data:
-                    parsed.append({
-                        "date": pd.to_datetime(item.get("date")),
-                        "close": float(item.get("close"))
-                    })
-                df = pd.DataFrame(parsed)
-                if not df.empty:
-                    return df.sort_values("date").reset_index(drop=True)
-    except Exception:
-        pass
-    return None
 
-@st.cache_data(ttl=86400)
-def get_macro_indicators_data(country, indicator, api_key=None):
-    if api_key is None:
-        api_key = EODHD_KEY
-    if not api_key:
-        return None
-    url = f"https://eodhd.com/api/macro-indicator/{country}?api_token={api_key}&indicator={indicator}&fmt=json"
-    try:
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            return response.json()
-    except Exception:
-        pass
-    return None
-
-def parse_eodhd_macro_latest(api_data):
-    if not api_data or not isinstance(api_data, list):
-        return None, None
-    valid_entries = []
-    for entry in api_data:
-        date_str = entry.get("Date")
-        val = entry.get("Value")
-        if date_str and val is not None:
-            valid_entries.append(entry)
-    if not valid_entries:
-        return None, None
-    latest_entry = max(valid_entries, key=lambda x: x["Date"])
-    year = latest_entry["Date"].split("-")[0]
-    try:
-        return float(latest_entry["Value"]), year
-    except ValueError:
-        return None, None
 
 def get_latest_worldbank_trade_balance(country_code):
     try:
@@ -963,6 +910,24 @@ def get_worldbank_data(country_code, indicator):
         return df, datetime.now(), True
     except Exception:
         return generate_mock_worldbank(country_code, indicator), datetime.now(), False
+
+def parse_worldbank_latest(wb_result):
+    try:
+        if wb_result is None:
+            return None, None
+        df, _, _ = wb_result
+        if df is None or df.empty:
+            return None, None
+        latest_row = df.iloc[-1]
+        val = latest_row["value"]
+        dt = latest_row["date"]
+        if hasattr(dt, "year"):
+            year = str(dt.year)
+        else:
+            year = str(dt).split("-")[0]
+        return val, year
+    except Exception:
+        return None, None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_ecb_rate_cached():
@@ -2023,27 +1988,13 @@ with tab7:
     
     major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
     
-    col_prov, col_pair = st.columns(2)
-    with col_prov:
-        data_source = st.radio("Historische Datenquelle", options=["FCS API (Standard)", "EODHD (Ergänzend)"], horizontal=True, key="hist_source_radio")
-    with col_pair:
-        hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0, key="hist_pair_select")
+    hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0, key="hist_pair_select")
         
     df_hist = pd.DataFrame()
     is_live_hist = False
     source_label = "FCS API"
     
-    if data_source == "FCS API (Standard)":
-        df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
-        source_label = "FCS API"
-    else:
-        # EODHD
-        if not EODHD_KEY:
-            st.warning("EODHD API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie EODHD_API_KEY.")
-        else:
-            df_hist = get_eodhd_history_prices(hist_pair, EODHD_KEY)
-            is_live_hist = True
-            source_label = "EODHD"
+    df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
             
     if df_hist is not None and not df_hist.empty:
         fig_hist = go.Figure()
@@ -2076,58 +2027,56 @@ with tab7:
         
     st.markdown(f"<div class='source-tag'>Quelle: {source_label}</div>", unsafe_allow_html=True)
     
-    # Show EODHD Macro fundamentals if source is EODHD
-    if data_source == "EODHD (Ergänzend)" and EODHD_KEY:
-        st.subheader("📊 EODHD Länder-Fundamentaldaten")
-        # Map currencies to correct ISO codes for EODHD:
-        eodhd_iso_map = {
-            "USD": "USA",
-            "EUR": "DEU",
-            "GBP": "GBR",
-            "JPY": "JPN",
-            "CHF": "CHE",
-            "CAD": "CAN",
-            "AUD": "AUS",
-            "NZD": "NZL"
-        }
-        base_iso = eodhd_iso_map.get(base_curr, "USA")
-        quote_iso = eodhd_iso_map.get(quote_curr, "USA")
+    st.subheader("📊 Länder-Fundamentaldaten (World Bank)")
+    
+    # Map currencies to correct ISO codes for World Bank:
+    wb_iso_map = {
+        "USD": "USA",
+        "EUR": "DEU",
+        "GBP": "GBR",
+        "JPY": "JPN",
+        "CHF": "CHE",
+        "CAD": "CAN",
+        "AUD": "AUS",
+        "NZD": "NZL"
+    }
+    base_iso = wb_iso_map.get(base_curr, "USA")
+    quote_iso = wb_iso_map.get(quote_curr, "USA")
+    
+    indicators_to_find = [
+        ("NY.GDP.MKTP.KD.ZG", "GDP-Wachstum (jährlich)"),
+        ("FP.CPI.TOTL.ZG", "Inflation (Verbraucherpreise, jährlich)"),
+        ("SL.UEM.TOTL.ZG", "Arbeitslosigkeit (% der Erwerbspersonen)"),
+        ("GC.DOD.TOTL.GD.ZS", "Staatsverschuldung (% des BIP)")
+    ]
+    
+    rows_macro = []
+    has_any_data = False
+    
+    for indicator_key, display_name in indicators_to_find:
+        base_res = get_worldbank_data(base_iso, indicator_key)
+        quote_res = get_worldbank_data(quote_iso, indicator_key)
         
-        indicators_to_find = [
-            ("gdp_growth_annual", "GDP-Wachstum (jährlich)"),
-            ("inflation_consumer_prices_annual", "Inflation (Verbraucherpreise, jährlich)"),
-            ("unemployment_total_percent", "Arbeitslosigkeit (% der Erwerbspersonen)"),
-            ("debt_percent_gdp", "Staatsverschuldung (% des BIP)")
-        ]
+        b_val, b_yr = parse_worldbank_latest(base_res)
+        q_val, q_yr = parse_worldbank_latest(quote_res)
         
-        rows_macro = []
-        has_any_data = False
+        if b_val is not None or q_val is not None:
+            has_any_data = True
+            
+        b_str = f"{b_val:,.1f}% ({b_yr})" if b_val is not None else "N/A"
+        q_str = f"{q_val:,.1f}% ({q_yr})" if q_val is not None else "N/A"
         
-        for indicator_key, display_name in indicators_to_find:
-            base_data = get_macro_indicators_data(base_iso, indicator_key, EODHD_KEY)
-            quote_data = get_macro_indicators_data(quote_iso, indicator_key, EODHD_KEY)
-            
-            b_val, b_yr = parse_eodhd_macro_latest(base_data)
-            q_val, q_yr = parse_eodhd_macro_latest(quote_data)
-            
-            if b_val is not None or q_val is not None:
-                has_any_data = True
-                
-            b_str = f"{b_val:,.1f}% ({b_yr})" if b_val is not None else "N/A"
-            q_str = f"{q_val:,.1f}% ({q_yr})" if q_val is not None else "N/A"
-            
-            rows_macro.append({
-                "Indikator": display_name,
-                f"{base_curr}": b_str,
-                f"{quote_curr}": q_str
-            })
-            
-        if has_any_data:
-            df_macro_eod = pd.DataFrame(rows_macro)
-            st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
-        else:
-            st.error("EODHD Macro Indicators API nicht verfügbar – bitte EODHD-Plan prüfen")
-            st.info("Hinweis: Für den Abruf von Länder-Fundamentaldaten ist der kostenpflichtige EODHD-Plan erforderlich (z.B. Fundamental Data oder ein anderes Paket mit Zugang zu makroökonomischen Indikatoren). Der kostenlose Standard-API-Schlüssel erlaubt nur EOD-Kursdaten.")
+        rows_macro.append({
+            "Indikator": display_name,
+            f"{base_curr}": b_str,
+            f"{quote_curr}": q_str
+        })
+        
+    if has_any_data:
+        df_macro_eod = pd.DataFrame(rows_macro)
+        st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
+    else:
+        st.info("Daten momentan nicht verfügbar")
 
 # ----------------- TAB 8: ROHSTOFFE & MÄRKTE -----------------
 with tab8:
