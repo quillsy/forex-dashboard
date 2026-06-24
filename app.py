@@ -1008,7 +1008,7 @@ def compute_currency_score(curr, fred_key):
 
 
 # ----------------- UI RENDERERS -----------------
-def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig, override_reason=None):
+def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
     if sig == "SB":
         bg_color = "rgba(16, 185, 129, 0.08)"
@@ -1052,9 +1052,6 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
         title = "BERECHNUNGSFEHLER"
         desc = "Unzureichende Daten zur Bestimmung des Biases."
         badge = "ERR"
-
-    if override_reason:
-        desc += f"<br><br><span style='color:#e2b13c; font-weight:600;'>⚠️ Signal-Filter:</span> {override_reason}"
 
     html_content = f"""
     <div style="
@@ -1226,24 +1223,6 @@ with st.spinner("Initialisiere globale Marktdaten..."):
         sig = "SS"
         badge = "STRONG SELL"
         
-    override_reason = None
-    if base_score > 60.0 and sig in ["MS", "SS"]:
-        sig = "NT"
-        badge = "NEUTRAL"
-        override_reason = f"Wirtschaftsscore von {base_curr} ({base_score:.1f}/100) ist stark (> 60), das negative Signal wurde auf Neutral (NT) angehoben."
-    elif base_score < 40.0 and sig in ["MB", "SB"]:
-        sig = "NT"
-        badge = "NEUTRAL"
-        override_reason = f"Wirtschaftsscore von {base_curr} ({base_score:.1f}/100) ist schwach (< 40), das positive Signal wurde auf Neutral (NT) abgesenkt."
-    elif quote_score > 60.0 and sig in ["MB", "SB"]:
-        sig = "NT"
-        badge = "NEUTRAL"
-        override_reason = f"Wirtschaftsscore von {quote_curr} ({quote_score:.1f}/100) ist stark (> 60), das positive Signal wurde auf Neutral (NT) abgesenkt."
-    elif quote_score < 40.0 and sig in ["MS", "SS"]:
-        sig = "NT"
-        badge = "NEUTRAL"
-        override_reason = f"Wirtschaftsscore von {quote_curr} ({quote_score:.1f}/100) ist schwach (< 40), das negative Signal wurde auf Neutral (NT) angehoben."
-
     # Load iTick close price
     itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
     latest_close = itick_data["close"] if itick_data else 0.0
@@ -1253,7 +1232,7 @@ st.title("⚖️ Forex Fundamental Suite")
 st.markdown(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
 
 # Always show bias banner and economy scores at the top
-render_bias_box(signal_value, base_curr, quote_curr, base_score, quote_score, sig, override_reason)
+render_bias_box(signal_value, base_curr, quote_curr, base_score, quote_score, sig)
 
 col_score_b, col_score_q = st.columns(2)
 with col_score_b:
@@ -1301,24 +1280,6 @@ def get_pair_signal_and_badge(base, quote):
         s = "SS"
         b = "STRONG SELL"
         c = "#ef4444"
-        
-    # Overrides
-    if b_score > 60.0 and s in ["MS", "SS"]:
-        b = "NEUTRAL"
-        c = "#8b949e"
-        s = "NT"
-    elif b_score < 40.0 and s in ["MB", "SB"]:
-        b = "NEUTRAL"
-        c = "#8b949e"
-        s = "NT"
-    elif q_score > 60.0 and s in ["MB", "SB"]:
-        b = "NEUTRAL"
-        c = "#8b949e"
-        s = "NT"
-    elif q_score < 40.0 and s in ["MS", "SS"]:
-        b = "NEUTRAL"
-        c = "#8b949e"
-        s = "NT"
         
     return b, c, sig_val
 
