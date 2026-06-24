@@ -735,11 +735,13 @@ def get_eodhd_history_prices(pair, api_key):
         pass
     return None
 
-@st.cache_data(ttl=86400) # 1 day
-def get_eodhd_macro_all(country_code, api_key):
+@st.cache_data(ttl=86400)
+def get_macro_indicators_data(country, indicator, api_key=None):
+    if api_key is None:
+        api_key = EODHD_KEY
     if not api_key:
         return None
-    url = f"https://eodhd.com/api/macro-indicator/{country_code}?api_token={api_key}&fmt=json"
+    url = f"https://eodhd.com/api/macro-indicator/{country}?api_token={api_key}&indicator={indicator}&fmt=json"
     try:
         response = requests.get(url, timeout=15)
         if response.status_code == 200:
@@ -748,20 +750,23 @@ def get_eodhd_macro_all(country_code, api_key):
         pass
     return None
 
-def find_eodhd_indicator_by_keyword(macro_data, keyword):
-    if not macro_data or not isinstance(macro_data, list):
-        return None, None, None
-    for entry in macro_data:
-        code = entry.get("IndicatorCode", "").lower()
-        name = entry.get("IndicatorName", "").lower()
-        if keyword in code or keyword in name:
-            data = entry.get("data", {})
-            if data:
-                years = [int(yr) for yr in data.keys() if yr.isdigit()]
-                if years:
-                    latest_year = str(max(years))
-                    return entry.get("IndicatorName"), data[latest_year], latest_year
-    return None, None, None
+def parse_eodhd_macro_latest(api_data):
+    if not api_data or not isinstance(api_data, list):
+        return None, None
+    valid_entries = []
+    for entry in api_data:
+        date_str = entry.get("Date")
+        val = entry.get("Value")
+        if date_str and val is not None:
+            valid_entries.append(entry)
+    if not valid_entries:
+        return None, None
+    latest_entry = max(valid_entries, key=lambda x: x["Date"])
+    year = latest_entry["Date"].split("-")[0]
+    try:
+        return float(latest_entry["Value"]), year
+    except ValueError:
+        return None, None
 
 def get_latest_worldbank_trade_balance(country_code):
     try:
@@ -2074,33 +2079,50 @@ with tab7:
     # Show EODHD Macro fundamentals if source is EODHD
     if data_source == "EODHD (Ergänzend)" and EODHD_KEY:
         st.subheader("📊 EODHD Länder-Fundamentaldaten")
-        base_iso = CURRENCIES[base_curr]["wb_code"]
-        quote_iso = CURRENCIES[quote_curr]["wb_code"]
+        # Map currencies to correct ISO codes for EODHD:
+        eodhd_iso_map = {
+            "USD": "USA",
+            "EUR": "DEU",
+            "GBP": "GBR",
+            "JPY": "JPN",
+            "CHF": "CHE",
+            "CAD": "CAN",
+            "AUD": "AUS",
+            "NZD": "NZL"
+        }
+        base_iso = eodhd_iso_map.get(base_curr, "USA")
+        quote_iso = eodhd_iso_map.get(quote_curr, "USA")
         
-        base_macro = get_eodhd_macro_all(base_iso, EODHD_KEY)
-        quote_macro = get_eodhd_macro_all(quote_iso, EODHD_KEY)
+        indicators_to_find = [
+            ("gdp_growth_annual", "GDP-Wachstum (jährlich)"),
+            ("inflation_consumer_prices_annual", "Inflation (Verbraucherpreise, jährlich)"),
+            ("unemployment_total_percent", "Arbeitslosigkeit (% der Erwerbspersonen)"),
+            ("debt_percent_gdp", "Staatsverschuldung (% des BIP)")
+        ]
         
-        if base_macro or quote_macro:
-            indicators_to_find = [
-                ("gdp_growth_annual", "GDP-Wachstum (jährlich)"),
-                ("inflation_consumer_prices_annual", "Inflation (Verbraucherpreise, jährlich)"),
-                ("unemployment", "Arbeitslosigkeit (% der Erwerbspersonen)"),
-                ("population_total", "Bevölkerung gesamt")
-            ]
+        rows_macro = []
+        has_any_data = False
+        
+        for indicator_key, display_name in indicators_to_find:
+            base_data = get_macro_indicators_data(base_iso, indicator_key, EODHD_KEY)
+            quote_data = get_macro_indicators_data(quote_iso, indicator_key, EODHD_KEY)
             
-            rows_macro = []
-            for keyword, display_name in indicators_to_find:
-                _, b_val, b_yr = find_eodhd_indicator_by_keyword(base_macro, keyword)
-                _, q_val, q_yr = find_eodhd_indicator_by_keyword(quote_macro, keyword)
+            b_val, b_yr = parse_eodhd_macro_latest(base_data)
+            q_val, q_yr = parse_eodhd_macro_latest(quote_data)
+            
+            if b_val is not None or q_val is not None:
+                has_any_data = True
                 
-                b_str = f"{b_val:,.1f}% ({b_yr})" if b_val is not None and "population" not in keyword else (f"{b_val:,.0f} ({b_yr})" if b_val is not None else "N/A")
-                q_str = f"{q_val:,.1f}% ({q_yr})" if q_val is not None and "population" not in keyword else (f"{q_val:,.0f} ({q_yr})" if q_val is not None else "N/A")
-                
-                rows_macro.append({
-                    "Indikator": display_name,
-                    f"{base_curr}": b_str,
-                    f"{quote_curr}": q_str
-                })
+            b_str = f"{b_val:,.1f}% ({b_yr})" if b_val is not None else "N/A"
+            q_str = f"{q_val:,.1f}% ({q_yr})" if q_val is not None else "N/A"
+            
+            rows_macro.append({
+                "Indikator": display_name,
+                f"{base_curr}": b_str,
+                f"{quote_curr}": q_str
+            })
+            
+        if has_any_data:
             df_macro_eod = pd.DataFrame(rows_macro)
             st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
         else:
