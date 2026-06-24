@@ -1210,16 +1210,16 @@ with st.spinner("Initialisiere globale Marktdaten..."):
     signal_value = max(-50.0, min(50.0, signal_value))
     
     # Calculate filtered trading signal based on new boundaries
-    if signal_value >= 35.0:
+    if signal_value >= 25.0:
         sig = "SB"
         badge = "STRONG BUY"
-    elif 15.0 <= signal_value < 35.0:
+    elif 10.0 <= signal_value < 25.0:
         sig = "MB"
         badge = "MID BUY"
-    elif -15.0 < signal_value < 15.0:
+    elif -10.0 < signal_value < 10.0:
         sig = "NT"
         badge = "NEUTRAL"
-    elif -35.0 < signal_value <= -15.0:
+    elif -25.0 < signal_value <= -10.0:
         sig = "MS"
         badge = "MID SELL"
     else:
@@ -1281,19 +1281,19 @@ def get_pair_signal_and_badge(base, quote):
     sig_val = r_diff / 2.0
     sig_val = max(-50.0, min(50.0, sig_val))
     
-    if sig_val >= 35.0:
+    if sig_val >= 25.0:
         s = "SB"
         b = "STRONG BUY"
         c = "#10b981"
-    elif 15.0 <= sig_val < 35.0:
+    elif 10.0 <= sig_val < 25.0:
         s = "MB"
         b = "MID BUY"
         c = "#34d399"
-    elif -15.0 < sig_val < 15.0:
+    elif -10.0 < sig_val < 10.0:
         s = "NT"
         b = "NEUTRAL"
         c = "#8b949e"
-    elif -35.0 < sig_val <= -15.0:
+    elif -25.0 < sig_val <= -10.0:
         s = "MS"
         b = "MID SELL"
         c = "#f87171"
