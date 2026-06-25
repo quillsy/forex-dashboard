@@ -1403,6 +1403,9 @@ if base_curr == quote_curr:
     st.sidebar.error("Basis- und Quote-Währung dürfen nicht identisch sein.")
     st.stop()
 
+# Checkbox for displaying all pairs in checklist (including neutral)
+show_all_pairs = st.sidebar.checkbox("Alle Paare anzeigen (inkl. Neutral)", value=False, key="show_all_pairs_chk")
+
 # Manual cache clear
 st.sidebar.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
 
@@ -1612,21 +1615,18 @@ with tab1:
 </thead>
 <tbody>"""
     
-    G8_PAIRS = [
-        ("USD", "EUR"),
-        ("USD", "GBP"),
-        ("USD", "CHF"),
-        ("USD", "CAD"),
-        ("USD", "AUD"),
-        ("USD", "NZD"),
-        ("USD", "JPY"),
-        ("EUR", "GBP")
-    ]
+    import itertools
+    currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+    G8_PAIRS = list(itertools.permutations(currencies_list, 2))
     
     rows = []
     for base, quote in G8_PAIRS:
         p_name = f"{base}/{quote}"
         badge_name, badge_color, sig_val = get_pair_signal_and_badge(base, quote)
+        
+        # Filter out neutral signals if the option is not checked
+        if badge_name == "NEUTRAL" and not show_all_pairs:
+            continue
         
         base_rate, _, _ = get_country_rate(CURRENCIES[base]["wb_code"], FRED_KEY)
         quote_rate, _, _ = get_country_rate(CURRENCIES[quote]["wb_code"], FRED_KEY)
