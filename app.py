@@ -31,6 +31,8 @@ if "manual_rate_CAD" not in st.session_state:
     st.session_state["manual_rate_CAD"] = 2.25
 if "manual_rate_NZD" not in st.session_state:
     st.session_state["manual_rate_NZD"] = 2.25
+if "manual_rate_CHF" not in st.session_state:
+    st.session_state["manual_rate_CHF"] = 1.25
 
 # ----------------- Obsidian Dark Theme CSS -----------------
 st.markdown("""
@@ -1142,7 +1144,8 @@ def get_country_rate(country_code, fred_key):
         "JPN": st.session_state.get("manual_rate_JPY", 1.00),
         "AUD": st.session_state.get("manual_rate_AUD", 4.35),
         "CAD": st.session_state.get("manual_rate_CAD", 2.25),
-        "NZD": st.session_state.get("manual_rate_NZD", 2.25)
+        "NZD": st.session_state.get("manual_rate_NZD", 2.25),
+        "CHF": st.session_state.get("manual_rate_CHF", 1.25)
     }
     
     fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 3.75, "JPN": 1.00, "CHE": 1.25, "AUS": 4.35, "CAN": 2.25, "NZL": 2.25}
@@ -1168,7 +1171,8 @@ def get_country_rate(country_code, fred_key):
             val, bps_change = get_snb_rate_cached()
             return val, bps_change, "SNB Portal"
         except Exception:
-            return 0.0, 0, "SNB (Fallback)"
+            val = st.session_state.get("manual_rate_CHF", 1.25)
+            return val, 0, "SNB (Fallback)"
             
     map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
     key = map_code.get(country_code, country_code)
@@ -1428,6 +1432,9 @@ st.sidebar.number_input(
 )
 st.sidebar.number_input(
     "Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05
+)
+st.sidebar.number_input(
+    "Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05
 )
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
