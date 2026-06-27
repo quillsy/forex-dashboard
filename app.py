@@ -981,7 +981,6 @@ def get_snb_rate_cached():
 
 
 # ----------------- NEWS LOADER & FALLBACKS -----------------
-# ----------------- NEWS LOADER & FALLBACKS -----------------
 @st.cache_data(ttl=60, show_spinner=False)
 def get_news_data_search(query, newsdata_key, newsapi_key):
     debug_logs = []
@@ -1028,13 +1027,8 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                                     "api": "NewsData.io"
                                 })
                             debug_logs.append(f"NewsData.io: Suche erfolgreich, {len(articles)} Artikel gefunden.")
-                            if len(articles) >= 10:
-                                debug_logs.append(f"Zusammenfassung: NewsData.io erfolgreich verwendet, {len(articles)} Artikel gefunden.")
-                                return articles[:25], "NewsData.io", True, datetime.now(), debug_logs
-                            else:
-                                success = True
-                                source = "NewsData.io"
-                                debug_logs.append(f"NewsData.io lieferte nur {len(articles)} Artikel. Versuche Fallback für mehr Daten...")
+                            success = True
+                            source = "NewsData.io"
                         else:
                             debug_logs.append("NewsData.io: Keine passenden Artikel für diese Suchanfrage gefunden.")
                     else:
@@ -1048,33 +1042,30 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
     else:
         debug_logs.append("NewsData.io: API-Key fehlt in .env.")
 
-    if not success:
-        debug_logs.append("NewsData.io liefert keine Daten – prüfe Key und Limit.")
-
     time.sleep(0.5)
 
     # 2. Try NewsAPI.org
     if newsapi_key:
         debug_logs.append("NewsAPI.org: API-Key vorhanden. Starte Suche...")
-        try:
+        
+        def query_newsapi(q_term):
             url = "https://newsapi.org/v2/everything"
             params = {
-                "q": query,
+                "q": q_term,
                 "apiKey": newsapi_key,
                 "sortBy": "publishedAt",
                 "pageSize": 25,
                 "language": "de,en"
             }
             r = requests.get(url, params=params, timeout=10)
-            debug_logs.append(f"NewsAPI.org Suche: HTTP Status {r.status_code}")
-            
+            debug_logs.append(f"NewsAPI.org Suche ({q_term[:30]}...): HTTP Status {r.status_code}")
             if r.status_code == 200:
                 res = r.json()
                 if res.get("status") == "ok" and res.get("articles"):
-                    news_api_articles = []
+                    parsed_articles = []
                     for a in res["articles"]:
                         if a.get("title") and a.get("title") != "[Removed]":
-                            news_api_articles.append({
+                            parsed_articles.append({
                                 "title": a.get("title"),
                                 "description": a.get("description") or "",
                                 "url": a.get("url") or "#",
@@ -1083,48 +1074,55 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                                 "urlToImage": a.get("urlToImage"),
                                 "api": "NewsAPI.org"
                             })
-                    debug_logs.append(f"NewsAPI.org: Suche erfolgreich, {len(news_api_articles)} Artikel gefunden.")
-                    if news_api_articles:
-                        if not articles:
-                            articles = news_api_articles
-                            source = "NewsAPI.org (Fallback)"
-                        else:
-                            existing_titles = {art["title"].lower()[:50] for art in articles}
-                            for a in news_api_articles:
-                                title_prefix = a["title"].lower()[:50]
-                                if title_prefix not in existing_titles:
-                                    articles.append(a)
-                            source = "Combined (NewsData & NewsAPI)"
-                        success = True
+                    return parsed_articles
                 else:
-                    debug_logs.append("NewsAPI.org: Antwort enthielt keine Artikel oder Status war fehlerhaft.")
+                    debug_logs.append(f"NewsAPI.org ({q_term[:30]}...): Antwort enthielt keine Artikel.")
             else:
-                debug_logs.append(f"NewsAPI.org fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
-        except Exception as e:
-            debug_logs.append(f"NewsAPI.org: Netzwerkfehler: {str(e)}")
+                debug_logs.append(f"NewsAPI.org fehlgeschlagen ({q_term[:30]}...): HTTP {r.status_code}. Antwort: {r.text[:100]}")
+            return []
+
+        na_articles = query_newsapi(query)
+        if not na_articles:
+            words = query.split()
+            base_q = words[0] if len(words) >= 1 else "EUR"
+            quote_q = words[1] if len(words) >= 2 else "USD"
+            simple_q = f"{base_q} {quote_q} forex"
+            debug_logs.append(f"NewsAPI.org: Erster Versuch leer. Weiche auf einfacheren Suchbegriff '{simple_q}' aus...")
+            na_articles = query_newsapi(simple_q)
+            
+        if na_articles:
+            debug_logs.append(f"NewsAPI.org: Suche erfolgreich, {len(na_articles)} Artikel gefunden.")
+            if not articles:
+                articles = na_articles
+                source = "NewsAPI.org (Fallback)"
+            else:
+                existing_titles = {art["title"].lower()[:50] for art in articles}
+                for a in na_articles:
+                    title_prefix = a["title"].lower()[:50]
+                    if title_prefix not in existing_titles:
+                        articles.append(a)
+                source = "Combined (NewsData & NewsAPI)"
+            success = True
+        else:
+            debug_logs.append("NewsAPI.org: Beide Suchversuche lieferten keine Artikel.")
     else:
         debug_logs.append("NewsAPI.org: API-Key fehlt in .env.")
 
     if success and articles:
-        if len(articles) < 10:
-            debug_logs.append("Gefundene Artikelanzahl < 10. Fülle mit Mock-News auf...")
-            mock_pool = generate_mock_news()
-            for m in mock_pool:
-                m_copy = m.copy()
-                m_copy["title"] = f"[{query}] " + m_copy["title"]
-                m_copy["urlToImage"] = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
-                m_copy["api"] = "MOCK-News Engine"
-                
-                title_prefix = m_copy["title"].lower()[:50]
-                if title_prefix not in {art["title"].lower()[:50] for art in articles}:
-                    articles.append(m_copy)
-                if len(articles) >= 10:
-                    break
         debug_logs.append(f"Zusammenfassung: API {source} verwendet, insgesamt {len(articles)} Artikel geladen.")
         return articles[:25], source, True, datetime.now(), debug_logs
 
-    debug_logs.append("Zusammenfassung: Keine API lieferte Ergebnisse. News-APIs momentan nicht verfügbar.")
-    return [], "News-APIs momentan nicht verfügbar", False, datetime.now(), debug_logs
+    # Both failed completely
+    debug_logs.append("Zusammenfassung: Keine API lieferte Ergebnisse. News-APIs momentan nicht verfügbar. Weiche auf Mock-News aus.")
+    mock_articles = []
+    base_mock = generate_mock_news()
+    for m in base_mock:
+        m_copy = m.copy()
+        m_copy["title"] = f"[{query}] " + m_copy["title"]
+        m_copy["urlToImage"] = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
+        m_copy["api"] = "MOCK-News Engine"
+        mock_articles.append(m_copy)
+    return mock_articles, "News-APIs momentan nicht verfügbar (Demo-Modus)", False, datetime.now(), debug_logs
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -1137,7 +1135,6 @@ def get_roro_index(fred_key, tiingo_key):
     else:
         debug_logs.append("FRED: API-Key fehlt in .env.")
         
-    # Helper function for inline FRED calls
     def query_fred(series_id, key):
         url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_start=2015-01-01"
         return requests.get(url, timeout=8)
@@ -1185,7 +1182,33 @@ def get_roro_index(fred_key, tiingo_key):
         except Exception as e:
             debug_logs.append(f"FRED (KCRORO): Netzwerkfehler: {str(e)}")
 
-    # 4. Option B: 10Y-2Y Spread over FRED
+    # 4. Swap: Option A: VIX via Tiingo (VIXY) immediately after FRED KCRORO
+    if tiingo_key:
+        debug_logs.append("Weiche auf Option A aus: Tiingo VIXY Index...")
+        try:
+            url = "https://api.tiingo.com/tiingo/daily/VIXY/prices"
+            headers = {"Authorization": f"Token {tiingo_key}"}
+            r = requests.get(url, headers=headers, timeout=10)
+            debug_logs.append(f"Tiingo (VIXY) Abfrage: HTTP Status {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                if data and isinstance(data, list):
+                    latest_vix = data[-1]
+                    val = float(latest_vix["close"])
+                    dt_str = latest_vix.get("date", "")
+                    dt = pd.to_datetime(dt_str) if dt_str else datetime.now()
+                    debug_logs.append(f"Tiingo (VIXY): Erfolgreich geladen (Schlusskurs: {val:.2f}).")
+                    return val, dt, "Tiingo VIXY Volatilitätsindex", debug_logs
+                else:
+                    debug_logs.append("Tiingo (VIXY): Antwort war leer oder ungültig.")
+            else:
+                debug_logs.append(f"Tiingo (VIXY) fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"Tiingo (VIXY): Netzwerkfehler: {str(e)}")
+    else:
+        debug_logs.append("Tiingo: API-Key (TIINGO_API_KEY) fehlt in .env. Option A (VIX) übersprungen.")
+
+    # 5. Option B: 10Y-2Y Spread over FRED
     if fred_works:
         debug_logs.append("Weiche auf Option B aus: FRED 10Y-2Y Spread (DGS10 - DGS2)...")
         try:
@@ -1212,32 +1235,6 @@ def get_roro_index(fred_key, tiingo_key):
                 debug_logs.append("FRED (10Y-2Y): Fehlerhafte Statuscodes bei DGS10 oder DGS2.")
         except Exception as e:
             debug_logs.append(f"FRED (10Y-2Y): Netzwerkfehler: {str(e)}")
-
-    # 5. Option A: VIX via Tiingo (VIXY)
-    if tiingo_key:
-        debug_logs.append("Weiche auf Option A aus: Tiingo VIXY Index...")
-        try:
-            url = "https://api.tiingo.com/tiingo/daily/VIXY/prices"
-            headers = {"Authorization": f"Token {tiingo_key}"}
-            r = requests.get(url, headers=headers, timeout=10)
-            debug_logs.append(f"Tiingo (VIXY) Abfrage: HTTP Status {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                if data and isinstance(data, list):
-                    latest_vix = data[-1]
-                    val = float(latest_vix["close"])
-                    dt_str = latest_vix.get("date", "")
-                    dt = pd.to_datetime(dt_str) if dt_str else datetime.now()
-                    debug_logs.append(f"Tiingo (VIXY): Erfolgreich geladen (Schlusskurs: {val:.2f}).")
-                    return val, dt, "Tiingo VIXY Volatilitätsindex", debug_logs
-                else:
-                    debug_logs.append("Tiingo (VIXY): Antwort war leer oder ungültig.")
-            else:
-                debug_logs.append(f"Tiingo (VIXY) fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
-        except Exception as e:
-            debug_logs.append(f"Tiingo (VIXY): Netzwerkfehler: {str(e)}")
-    else:
-        debug_logs.append("Tiingo: API-Key (TIINGO_API_KEY) fehlt in .env. Option A übersprungen.")
 
     # 6. Option C: USD/JPY Daily Change Proxy
     debug_logs.append("Weiche auf Option C aus: USD/JPY Exchange Rate Proxy...")
@@ -1509,19 +1506,7 @@ def format_freshness(timestamp):
     return f"vor {mins}m {secs % 60}s"
 
 def get_default_query(base, quote):
-    cb_names = {
-        'USD': 'Fed OR FOMC OR "Federal Reserve" OR Powell',
-        'EUR': 'ECB OR EZB OR Lagarde OR Eurozone',
-        'GBP': 'BoE OR "Bank of England" OR Bailey',
-        'CHF': 'SNB OR "Swiss National Bank" OR Jordan',
-        'CAD': 'BoC OR "Bank of Canada" OR Macklem',
-        'AUD': 'RBA OR "Reserve Bank of Australia" OR Bullock',
-        'NZD': 'RBNZ OR "Reserve Bank of New Zealand" OR Orr',
-        'JPY': 'BoJ OR "Bank of Japan" OR Ueda'
-    }
-    base_term = cb_names.get(base, base)
-    quote_term = cb_names.get(quote, quote)
-    return f"({base} OR {quote} OR {base_term} OR {quote_term}) AND (inflation OR interest OR GDP OR Leitzins)"
+    return f"{base} {quote} forex OR central bank OR interest OR inflation OR GDP"
 
 def deduplicate_articles(articles):
     seen_urls = set()
@@ -1871,6 +1856,13 @@ st.sidebar.number_input(
 )
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔑 API Key Status")
+st.sidebar.caption("Geladene Schlüssel aus der .env:")
+st.sidebar.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
+st.sidebar.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
+st.sidebar.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
 
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 with st.spinner("Initialisiere globale Marktdaten..."):
@@ -2796,8 +2788,8 @@ with tab11:
                 else:
                     st.info(log)
             
-        if news_source == "News-APIs momentan nicht verfügbar":
-            st.error("News-APIs momentan nicht verfügbar")
+        if not is_news_live:
+            st.warning(f"News-APIs momentan nicht verfügbar ({news_source}) – zeige Demo-Daten.")
         elif news_articles:
             st.info(f"Es wurden {len(news_articles)} relevante und einzigartige Artikel gefunden. (Aktiv: {news_source})")
             
