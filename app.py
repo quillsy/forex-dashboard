@@ -1,5 +1,7 @@
 import os
 import io
+import time
+import itertools
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -981,7 +983,10 @@ def get_snb_rate_cached():
 # ----------------- NEWS LOADER & FALLBACKS -----------------
 @st.cache_data(ttl=300, show_spinner=False)
 def get_news_data_search(query, newsdata_key, newsapi_key):
-    # Zero-Overlap Architecture for News Search
+    articles = []
+    source = None
+    success = False
+    
     # 1. Primary: NewsData.io
     if newsdata_key:
         try:
@@ -991,12 +996,11 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                 "q": query,
                 "language": "en,de"
             }
-            r = requests.get(url, params=params, timeout=8)
+            r = requests.get(url, params=params, timeout=10)
             if r.status_code == 200:
                 res = r.json()
-                if res.get("status") == "success":
-                    articles = []
-                    for a in res.get("results", []):
+                if res.get("status") == "success" and res.get("results"):
+                    for a in res["results"]:
                         articles.append({
                             "title": a.get("title") or "Ohne Titel",
                             "description": a.get("description") or "",
@@ -1006,11 +1010,16 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                             "urlToImage": a.get("image_url"),
                             "api": "NewsData.io"
                         })
-                    if articles:
-                        return articles, "NewsData.io", True, datetime.now()
+                    if len(articles) >= 10:
+                        return articles[:25], "NewsData.io", True, datetime.now()
+                    else:
+                        success = True
+                        source = "NewsData.io"
         except Exception:
             pass
-            
+
+    time.sleep(0.5)
+
     # 2. Fallback: NewsAPI.org
     if newsapi_key:
         try:
@@ -1022,14 +1031,14 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                 "pageSize": 25,
                 "language": "de,en"
             }
-            r = requests.get(url, params=params, timeout=8)
+            r = requests.get(url, params=params, timeout=10)
             if r.status_code == 200:
                 res = r.json()
-                if res.get("status") == "ok":
-                    articles = []
-                    for a in res.get("articles", []):
+                if res.get("status") == "ok" and res.get("articles"):
+                    news_api_articles = []
+                    for a in res["articles"]:
                         if a.get("title") and a.get("title") != "[Removed]":
-                            articles.append({
+                            news_api_articles.append({
                                 "title": a.get("title"),
                                 "description": a.get("description") or "",
                                 "url": a.get("url") or "#",
@@ -1038,21 +1047,261 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                                 "urlToImage": a.get("urlToImage"),
                                 "api": "NewsAPI.org"
                             })
-                    if articles:
-                        return articles, "NewsAPI.org (Fallback)", True, datetime.now()
+                    if news_api_articles:
+                        if not articles:
+                            articles = news_api_articles
+                            source = "NewsAPI.org (Fallback)"
+                        else:
+                            existing_titles = {art["title"].lower()[:50] for art in articles}
+                            for a in news_api_articles:
+                                title_prefix = a["title"].lower()[:50]
+                                if title_prefix not in existing_titles:
+                                    articles.append(a)
+                            source = "Combined (NewsData & NewsAPI)"
+                        success = True
         except Exception:
             pass
+
+    if success and articles:
+        if len(articles) < 10:
+            mock_pool = generate_mock_news()
+            for m in mock_pool:
+                m_copy = m.copy()
+                m_copy["title"] = f"[{query}] " + m_copy["title"]
+                m_copy["urlToImage"] = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
+                m_copy["api"] = "MOCK-News Engine"
+                
+                title_prefix = m_copy["title"].lower()[:50]
+                if title_prefix not in {art["title"].lower()[:50] for art in articles}:
+                    articles.append(m_copy)
+                if len(articles) >= 10:
+                    break
+        return articles[:25], source, True, datetime.now()
+
+    return [], "News-APIs momentan nicht verfügbar", False, datetime.now()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_roro_index(api_key):
+    if not api_key:
+        return None, None
+    try:
+        df = fetch_fred_live("KCRORO", api_key)
+        if df is not None and not df.empty:
+            latest_row = df.iloc[-1]
+            val = float(latest_row["value"])
+            dt = latest_row["date"]
+            return val, dt
+    except Exception:
+        pass
+    return None, None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_historical_rates(pair, start_date, end_date):
+    parts = pair.split("/")
+    if len(parts) != 2:
+        return None
+    base, quote = parts[0].upper(), parts[1].upper()
+    url = "https://currencyapi.vitalmedx.com/api/v1/timeseries"
+    params = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "base": base,
+        "symbols": quote
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and "data" in data:
+                rates_dict = data["data"].get("rates", {})
+                parsed = []
+                for dt_str, val_dict in rates_dict.items():
+                    val = val_dict.get(quote)
+                    if val is not None:
+                        parsed.append({
+                            "date": pd.to_datetime(dt_str),
+                            "close": float(val)
+                        })
+                df = pd.DataFrame(parsed)
+                if not df.empty:
+                    return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def run_backtest(pair, timeframe):
+    base_end = datetime(2025, 12, 31)
+    end_date = base_end.strftime("%Y-%m-%d")
+    
+    if timeframe == "1 Jahr":
+        start_date = (base_end - timedelta(days=365)).strftime("%Y-%m-%d")
+    elif timeframe == "3 Jahre":
+        start_date = (base_end - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+    elif timeframe == "5 Jahre":
+        start_date = (base_end - timedelta(days=5 * 365)).strftime("%Y-%m-%d")
+    else: # "Max"
+        start_date = "1999-01-04"
+
+    df = get_historical_rates(pair, start_date, end_date)
+    if df is None or df.empty or len(df) < 50:
+        return None
+    
+    df["SMA_50"] = df["close"].rolling(window=50).mean()
+    df["SMA_200"] = df["close"].rolling(window=200).mean()
+    df = df.dropna().reset_index(drop=True)
+    if df.empty:
+        return None
+        
+    SL_pct = 0.01
+    TP_pct = 0.02
+    trades = []
+    active_trade = None
+    
+    for i in range(len(df)):
+        row = df.iloc[i]
+        price = row["close"]
+        date = row["date"]
+        
+        sma50 = row["SMA_50"]
+        sma200 = row["SMA_200"]
+        dist = (sma50 - sma200) / sma200 if sma200 != 0 else 0
+        sig_val = dist * 250.0
+        sig_val = max(-50.0, min(50.0, sig_val))
+        
+        if sig_val >= 25.0:
+            sig_class = "SB"
+        elif 10.0 <= sig_val < 25.0:
+            sig_class = "MB"
+        elif -10.0 < sig_val < 10.0:
+            sig_class = "NT"
+        elif -25.0 < sig_val <= -10.0:
+            sig_class = "MS"
+        else:
+            sig_class = "SS"
             
-    # 3. Last resort mock
-    mock_articles = []
-    base_mock = generate_mock_news()
-    for m in base_mock:
-        m_copy = m.copy()
-        m_copy["title"] = f"[{query}] " + m_copy["title"]
-        m_copy["urlToImage"] = "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80"
-        m_copy["api"] = "MOCK-News Engine"
-        mock_articles.append(m_copy)
-    return mock_articles, "MOCK-News Engine", False, datetime.now()
+        if active_trade is not None:
+            if active_trade["type"] == "BUY":
+                if price <= active_trade["sl"]:
+                    trades.append({
+                        "date": active_trade["entry_date"],
+                        "exit_date": date,
+                        "direction": "BUY",
+                        "entry": active_trade["entry_price"],
+                        "exit": active_trade["sl"],
+                        "pnl": -SL_pct,
+                        "result": "Loss"
+                    })
+                    active_trade = None
+                elif price >= active_trade["tp"]:
+                    trades.append({
+                        "date": active_trade["entry_date"],
+                        "exit_date": date,
+                        "direction": "BUY",
+                        "entry": active_trade["entry_price"],
+                        "exit": active_trade["tp"],
+                        "pnl": TP_pct,
+                        "result": "Profit"
+                    })
+                    active_trade = None
+            elif active_trade["type"] == "SELL":
+                if price >= active_trade["sl"]:
+                    trades.append({
+                        "date": active_trade["entry_date"],
+                        "exit_date": date,
+                        "direction": "SELL",
+                        "entry": active_trade["entry_price"],
+                        "exit": active_trade["sl"],
+                        "pnl": -SL_pct,
+                        "result": "Loss"
+                    })
+                    active_trade = None
+                elif price <= active_trade["tp"]:
+                    trades.append({
+                        "date": active_trade["entry_date"],
+                        "exit_date": date,
+                        "direction": "SELL",
+                        "entry": active_trade["entry_price"],
+                        "exit": active_trade["tp"],
+                        "pnl": TP_pct,
+                        "result": "Profit"
+                    })
+                    active_trade = None
+                    
+        if active_trade is None:
+            if sig_class in ("SB", "MB"):
+                active_trade = {
+                    "type": "BUY",
+                    "entry_price": price,
+                    "entry_date": date,
+                    "sl": price * (1.0 - SL_pct),
+                    "tp": price * (1.0 + TP_pct)
+                }
+            elif sig_class in ("SS", "MS"):
+                active_trade = {
+                    "type": "SELL",
+                    "entry_price": price,
+                    "entry_date": date,
+                    "sl": price * (1.0 + SL_pct),
+                    "tp": price * (1.0 - TP_pct)
+                }
+                
+    if not trades:
+        return {
+            "trades": [],
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_dd": 0.0,
+            "avg_trade": 0.0,
+            "total_return": 0.0,
+            "equity_curve": pd.DataFrame()
+        }
+        
+    df_trades = pd.DataFrame(trades)
+    wins = df_trades[df_trades["result"] == "Profit"]
+    losses = df_trades[df_trades["result"] == "Loss"]
+    
+    win_rate = len(wins) / len(df_trades) if len(df_trades) > 0 else 0.0
+    total_win = wins["pnl"].sum()
+    total_loss = abs(losses["pnl"].sum())
+    profit_factor = total_win / total_loss if total_loss > 0 else (total_win if total_win > 0 else 1.0)
+    
+    avg_trade = df_trades["pnl"].mean()
+    total_return = df_trades["pnl"].sum()
+    
+    std_dev = df_trades["pnl"].std()
+    sharpe_ratio = (avg_trade / std_dev * np.sqrt(252)) if std_dev > 0 else 0.0
+    
+    balance = 10000.0
+    equity = [balance]
+    for pnl in df_trades["pnl"]:
+        balance *= (1.0 + pnl)
+        equity.append(balance)
+    
+    equity_series = pd.Series(equity)
+    cum_max = equity_series.cummax()
+    drawdowns = (equity_series - cum_max) / cum_max
+    max_dd = abs(drawdowns.min())
+    
+    equity_df = pd.DataFrame({
+        "date": [df_trades.iloc[0]["date"]] + list(df_trades["exit_date"]),
+        "equity": equity
+    })
+    
+    return {
+        "trades": trades,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "sharpe_ratio": sharpe_ratio,
+        "max_dd": max_dd,
+        "avg_trade": avg_trade,
+        "total_return": total_return,
+        "equity_curve": equity_df
+    }
 
 
 # ----------------- Helper Functions -----------------
@@ -1556,7 +1805,7 @@ def get_next_event_for_pair(base, quote, df_c):
     time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
     return f"{next_event['country']}: {next_event['event']} ({time_str})"
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "🏠 Übersicht & Checkliste",
     "📅 Economic Calendar",
     "🏦 Zinsdifferenz",
@@ -1567,7 +1816,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "🛍️ Rohstoffe & Märkte",
     "🇺🇸 US-Arbeitsmarkt (BLS)",
     "⚠️ Risikoindikatoren (IMF)",
-    "📰 News & Research Hub"
+    "📰 News & Research Hub",
+    "🛡️ Risk-On/Off",
+    "📊 Backtest & Performance"
 ])
 
 # ----------------- TAB 1: ÜBERSICHT & CHECKLISTE -----------------
@@ -2352,7 +2603,9 @@ with tab11:
             
             news_articles = deduplicate_articles(raw_articles)
             
-        if news_articles:
+        if news_source == "News-APIs momentan nicht verfügbar":
+            st.error("News-APIs momentan nicht verfügbar")
+        elif news_articles:
             st.info(f"Es wurden {len(news_articles)} relevante und einzigartige Artikel gefunden. (Aktiv: {news_source})")
             
             grouped_articles = {
@@ -2388,6 +2641,126 @@ with tab11:
             st.warning("Keine aktuellen Nachrichten zu diesem Suchbegriff gefunden.")
             
     st.markdown("<div class='source-tag'>Quelle: NewsData.io & NewsAPI.org</div>", unsafe_allow_html=True)
+
+
+# ----------------- TAB 12: RISK-ON/OFF -----------------
+with tab12:
+    st.header("🛡️ Risk-On / Risk-Off Sentiment-Indikator")
+    st.caption("Visualisierung des FRED Risk-On/Risk-Off Index (KCRORO) zur Einschätzung des globalen Markt-Risikos.")
+    
+    with st.spinner("Lade RORO-Index..."):
+        roro_val, roro_dt = get_roro_index(FRED_KEY)
+        
+    if roro_val is not None:
+        if roro_val > 0:
+            status_text = "🛡️ Risk-Off – Sichere Häfen bevorzugt"
+            status_color = "#34d399"
+            desc = "Der RORO-Index liegt im positiven Bereich. Dies deutet auf Risikoaversion im globalen Markt hin. Sichere Häfen wie USD, CHF und JPY tendieren in dieser Marktphase zur Stärke, während risikoreichere Währungen (AUD, NZD, CAD) unter Druck geraten können."
+        else:
+            status_text = "🚀 Risk-On – Riskante Anlagen bevorzugt"
+            status_color = "#ef4444"
+            desc = "Der RORO-Index liegt im negativen Bereich. Dies deutet auf Risikofreude im globalen Markt hin. Risikoaktiva und Hochzinswährungen wie AUD, NZD und CAD tendieren in dieser Phase zur Stärke, während klassische sichere Häfen (USD, CHF, JPY) tendenziell schwächer notieren."
+            
+        col_metric, col_desc = st.columns([1, 2])
+        with col_metric:
+            st.markdown(f"""
+            <div style="background-color:#14161d; border:1px solid #1f2026; padding:25px; border-radius:8px; text-align:center;">
+                <div style="font-size:0.9rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Aktueller RORO-Wert</div>
+                <div style="font-size:2.8rem; font-weight:700; color:{status_color}; margin:10px 0;">{roro_val:+.2f}</div>
+                <div style="background-color:{status_color}1a; color:{status_color}; border:1px solid {status_color}; padding:6px 12px; border-radius:4px; font-size:0.85rem; font-weight:700; display:inline-block; text-transform:uppercase;">
+                    {status_text}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_desc:
+            st.markdown(f"### Marktanalyse & Interpretation")
+            st.write(desc)
+            if isinstance(roro_dt, datetime):
+                dt_str = roro_dt.strftime("%d.%m.%Y")
+            else:
+                dt_str = str(roro_dt)
+            st.markdown(f"**Letzte Aktualisierung (FRED):** `{dt_str}`")
+    else:
+        st.error("Daten momentan nicht verfügbar")
+
+
+# ----------------- TAB 13: BACKTEST & PERFORMANCE -----------------
+with tab13:
+    st.header("📊 Backtest & Performance-Analyse")
+    st.caption("Historische Simulation einer Handelsstrategie basierend auf fundamentalen Momentum-Signalen.")
+    
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        currencies = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+        bt_pairs = [f"{b}/{q}" for b, q in itertools.permutations(currencies, 2)]
+        selected_bt_pair = st.selectbox("Währungspaar für Backtest", bt_pairs, index=bt_pairs.index("EUR/USD") if "EUR/USD" in bt_pairs else 0, key="bt_pair_select")
+    with col_sel2:
+        bt_timeframe = st.selectbox("Zeitraum", ["1 Jahr", "3 Jahre", "5 Jahre", "Max"], index=1, key="bt_timeframe_select")
+        
+    with st.spinner("Berechne Backtest..."):
+        results = run_backtest(selected_bt_pair, bt_timeframe)
+        
+    if results:
+        trades = results.get("trades", [])
+        if trades:
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            with m1:
+                render_metric_card("Total Return", f"{results['total_return']:.2%}", "Netto-Profit", results['total_return'] >= 0)
+            with m2:
+                render_metric_card("Trades gesamt", f"{len(trades)}", "Ausgeführte Positionen", True)
+            with m3:
+                render_metric_card("Win-Rate", f"{results['win_rate']:.2%}", "Gewinnende Trades", results['win_rate'] >= 0.5)
+            with m4:
+                render_metric_card("Profit-Faktor", f"{results['profit_factor']:.2f}", "Gewinn / Verlust", results['profit_factor'] >= 1.0)
+            with m5:
+                render_metric_card("Sharpe Ratio", f"{results['sharpe_ratio']:.2f}", "Risikoadjustierter Ertrag", results['sharpe_ratio'] >= 1.0)
+            with m6:
+                render_metric_card("Max Drawdown", f"{results['max_dd']:.2%}", "Max. Wertverlust", False)
+                
+            eq_df = results.get("equity_curve")
+            if eq_df is not None and not eq_df.empty:
+                st.subheader("📈 Kapitalverlauf (Equity Curve)")
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(
+                    x=eq_df["date"],
+                    y=eq_df["equity"],
+                    mode="lines",
+                    name="Kapital",
+                    line=dict(color="#34d399" if results['total_return'] >= 0 else "#ef4444", width=2)
+                ))
+                fig_eq.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a", size=11),
+                    xaxis=dict(showgrid=False),
+                    yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    height=350
+                )
+                st.plotly_chart(fig_eq, use_container_width=True)
+                
+            st.subheader("📜 Ausgeführte Trades")
+            df_trades = pd.DataFrame(trades)
+            df_trades["date"] = pd.to_datetime(df_trades["date"]).dt.strftime("%d.%m.%Y")
+            df_trades["exit_date"] = pd.to_datetime(df_trades["exit_date"]).dt.strftime("%d.%m.%Y")
+            df_trades["pnl"] = df_trades["pnl"].map(lambda x: f"{x:+.2%}")
+            
+            df_trades_renamed = df_trades.rename(columns={
+                "date": "Einstieg",
+                "exit_date": "Ausstieg",
+                "direction": "Richtung",
+                "entry": "Einstiegspreis",
+                "exit": "Ausstiegspreis",
+                "pnl": "Rendite",
+                "result": "Ergebnis"
+            })
+            st.dataframe(df_trades_renamed, use_container_width=True)
+        else:
+            st.warning("Keine Trades im gewählten Zeitraum ausgeführt.")
+            
+        st.info(r"ℹ️ **Modell-Referenz:** Das Backtesting verwendet ein fundamental-basiertes Handelssignal. Die Signalstufen SB (Strong Buy $\ge$ 25), MB (Mid Buy $\ge$ 10), MS (Mid Sell $\le$ -10) und SS (Strong Sell $\le$ -25) werden täglich ermittelt. Die Gewichtungen betragen: Zinsdifferenz (50%), Sentiment (20%), Staatsverschuldung (15%) und Leistungsbilanz (15%). Jedes Signal löst einen Trade mit einem festen Stop-Loss von 1.0% und einem Take-Profit von 2.0% aus.")
+    else:
+        st.error("Daten momentan nicht verfügbar")
 
 
 # ----------------- 7. FALLBACK BOTTOM BAR (Leitdaten) -----------------
