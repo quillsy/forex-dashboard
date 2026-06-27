@@ -981,47 +981,81 @@ def get_snb_rate_cached():
 
 
 # ----------------- NEWS LOADER & FALLBACKS -----------------
-@st.cache_data(ttl=300, show_spinner=False)
+# ----------------- NEWS LOADER & FALLBACKS -----------------
+@st.cache_data(ttl=60, show_spinner=False)
 def get_news_data_search(query, newsdata_key, newsapi_key):
+    debug_logs = []
     articles = []
     source = None
     success = False
-    
-    # 1. Primary: NewsData.io
+
+    # 1. Test NewsData.io Key first with a simple check if present
     if newsdata_key:
+        debug_logs.append("NewsData.io: API-Key vorhanden. Starte Verbindungstest...")
         try:
             url = "https://newsdata.io/api/1/latest"
             params = {
                 "apikey": newsdata_key,
-                "q": query,
-                "language": "en,de"
+                "q": "forex",
+                "size": 1
             }
             r = requests.get(url, params=params, timeout=10)
+            debug_logs.append(f"NewsData.io Test: HTTP Status {r.status_code}")
+            
             if r.status_code == 200:
                 res = r.json()
-                if res.get("status") == "success" and res.get("results"):
-                    for a in res["results"]:
-                        articles.append({
-                            "title": a.get("title") or "Ohne Titel",
-                            "description": a.get("description") or "",
-                            "url": a.get("link") or "#",
-                            "source": a.get("source_id") or "NewsData",
-                            "publishedAt": a.get("pubDate") or "",
-                            "urlToImage": a.get("image_url"),
-                            "api": "NewsData.io"
-                        })
-                    if len(articles) >= 10:
-                        return articles[:25], "NewsData.io", True, datetime.now()
+                if res.get("status") == "success":
+                    debug_logs.append("NewsData.io: Verbindungstest erfolgreich.")
+                    debug_logs.append(f"NewsData.io: Führe Suche für '{query}' aus...")
+                    params_actual = {
+                        "apikey": newsdata_key,
+                        "q": query,
+                        "language": "en,de"
+                    }
+                    r_actual = requests.get(url, params=params_actual, timeout=10)
+                    debug_logs.append(f"NewsData.io Suche: HTTP Status {r_actual.status_code}")
+                    if r_actual.status_code == 200:
+                        res_actual = r_actual.json()
+                        if res_actual.get("status") == "success" and res_actual.get("results"):
+                            for a in res_actual["results"]:
+                                articles.append({
+                                    "title": a.get("title") or "Ohne Titel",
+                                    "description": a.get("description") or "",
+                                    "url": a.get("link") or "#",
+                                    "source": a.get("source_id") or "NewsData",
+                                    "publishedAt": a.get("pubDate") or "",
+                                    "urlToImage": a.get("image_url"),
+                                    "api": "NewsData.io"
+                                })
+                            debug_logs.append(f"NewsData.io: Suche erfolgreich, {len(articles)} Artikel gefunden.")
+                            if len(articles) >= 10:
+                                debug_logs.append(f"Zusammenfassung: NewsData.io erfolgreich verwendet, {len(articles)} Artikel gefunden.")
+                                return articles[:25], "NewsData.io", True, datetime.now(), debug_logs
+                            else:
+                                success = True
+                                source = "NewsData.io"
+                                debug_logs.append(f"NewsData.io lieferte nur {len(articles)} Artikel. Versuche Fallback für mehr Daten...")
+                        else:
+                            debug_logs.append("NewsData.io: Keine passenden Artikel für diese Suchanfrage gefunden.")
                     else:
-                        success = True
-                        source = "NewsData.io"
-        except Exception:
-            pass
+                        debug_logs.append(f"NewsData.io Suche fehlgeschlagen: HTTP {r_actual.status_code}. Antwort: {r_actual.text[:150]}")
+                else:
+                    debug_logs.append(f"NewsData.io Verbindungstest meldete Fehler: {res.get('results') or res.get('error')}")
+            else:
+                debug_logs.append(f"NewsData.io Verbindungstest fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"NewsData.io: Netzwerkfehler: {str(e)}")
+    else:
+        debug_logs.append("NewsData.io: API-Key fehlt in .env.")
+
+    if not success:
+        debug_logs.append("NewsData.io liefert keine Daten – prüfe Key und Limit.")
 
     time.sleep(0.5)
 
-    # 2. Fallback: NewsAPI.org
+    # 2. Try NewsAPI.org
     if newsapi_key:
+        debug_logs.append("NewsAPI.org: API-Key vorhanden. Starte Suche...")
         try:
             url = "https://newsapi.org/v2/everything"
             params = {
@@ -1032,6 +1066,8 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                 "language": "de,en"
             }
             r = requests.get(url, params=params, timeout=10)
+            debug_logs.append(f"NewsAPI.org Suche: HTTP Status {r.status_code}")
+            
             if r.status_code == 200:
                 res = r.json()
                 if res.get("status") == "ok" and res.get("articles"):
@@ -1047,6 +1083,7 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                                 "urlToImage": a.get("urlToImage"),
                                 "api": "NewsAPI.org"
                             })
+                    debug_logs.append(f"NewsAPI.org: Suche erfolgreich, {len(news_api_articles)} Artikel gefunden.")
                     if news_api_articles:
                         if not articles:
                             articles = news_api_articles
@@ -1059,11 +1096,18 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                                     articles.append(a)
                             source = "Combined (NewsData & NewsAPI)"
                         success = True
-        except Exception:
-            pass
+                else:
+                    debug_logs.append("NewsAPI.org: Antwort enthielt keine Artikel oder Status war fehlerhaft.")
+            else:
+                debug_logs.append(f"NewsAPI.org fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"NewsAPI.org: Netzwerkfehler: {str(e)}")
+    else:
+        debug_logs.append("NewsAPI.org: API-Key fehlt in .env.")
 
     if success and articles:
         if len(articles) < 10:
+            debug_logs.append("Gefundene Artikelanzahl < 10. Fülle mit Mock-News auf...")
             mock_pool = generate_mock_news()
             for m in mock_pool:
                 m_copy = m.copy()
@@ -1076,25 +1120,165 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
                     articles.append(m_copy)
                 if len(articles) >= 10:
                     break
-        return articles[:25], source, True, datetime.now()
+        debug_logs.append(f"Zusammenfassung: API {source} verwendet, insgesamt {len(articles)} Artikel geladen.")
+        return articles[:25], source, True, datetime.now(), debug_logs
 
-    return [], "News-APIs momentan nicht verfügbar", False, datetime.now()
+    debug_logs.append("Zusammenfassung: Keine API lieferte Ergebnisse. News-APIs momentan nicht verfügbar.")
+    return [], "News-APIs momentan nicht verfügbar", False, datetime.now(), debug_logs
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_roro_index(api_key):
-    if not api_key:
-        return None, None
+@st.cache_data(ttl=60, show_spinner=False)
+def get_roro_index(fred_key, tiingo_key):
+    debug_logs = []
+    
+    # 1. Check FRED API Key presence
+    if fred_key:
+        debug_logs.append("FRED: API-Key in .env vorhanden.")
+    else:
+        debug_logs.append("FRED: API-Key fehlt in .env.")
+        
+    # Helper function for inline FRED calls
+    def query_fred(series_id, key):
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_start=2015-01-01"
+        return requests.get(url, timeout=8)
+
+    # 2. Test general FRED key validity with FEDFUNDS
+    fred_works = False
+    if fred_key:
+        debug_logs.append("FRED: Teste API-Verbindung mit Indikator 'FEDFUNDS'...")
+        try:
+            r = query_fred("FEDFUNDS", fred_key)
+            debug_logs.append(f"FRED (FEDFUNDS) Test: HTTP Status {r.status_code}")
+            if r.status_code == 200:
+                obs = r.json().get("observations", [])
+                if obs:
+                    fred_works = True
+                    debug_logs.append("FRED: Verbindungstest erfolgreich. FEDFUNDS geladen.")
+                else:
+                    debug_logs.append("FRED: Antwort für FEDFUNDS war leer (keine observations).")
+            else:
+                debug_logs.append(f"FRED: Verbindungstest fehlgeschlagen mit HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"FRED: Netzwerkfehler bei Verbindungstest: {str(e)}")
+
+    # 3. Attempt KCRORO
+    if fred_works:
+        debug_logs.append("FRED: Versuche primären RORO-Indikator 'KCRORO' zu laden...")
+        try:
+            r = query_fred("KCRORO", fred_key)
+            debug_logs.append(f"FRED (KCRORO) Abfrage: HTTP Status {r.status_code}")
+            if r.status_code == 200:
+                obs = r.json().get("observations", [])
+                parsed = []
+                for o in obs:
+                    if o["value"] != ".":
+                        parsed.append({"date": o["date"], "value": float(o["value"])})
+                if parsed:
+                    val = float(parsed[-1]["value"])
+                    dt = pd.to_datetime(parsed[-1]["date"])
+                    debug_logs.append("FRED (KCRORO) erfolgreich geladen.")
+                    return val, dt, "FRED Risk-On/Risk-Off (KCRORO)", debug_logs
+                else:
+                    debug_logs.append("FRED (KCRORO): Observations waren leer oder ungültig.")
+            else:
+                debug_logs.append(f"FRED (KCRORO) fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"FRED (KCRORO): Netzwerkfehler: {str(e)}")
+
+    # 4. Option B: 10Y-2Y Spread over FRED
+    if fred_works:
+        debug_logs.append("Weiche auf Option B aus: FRED 10Y-2Y Spread (DGS10 - DGS2)...")
+        try:
+            r_10y = query_fred("DGS10", fred_key)
+            r_2y = query_fred("DGS2", fred_key)
+            debug_logs.append(f"FRED DGS10 Abfrage: HTTP Status {r_10y.status_code}")
+            debug_logs.append(f"FRED DGS2 Abfrage: HTTP Status {r_2y.status_code}")
+            if r_10y.status_code == 200 and r_2y.status_code == 200:
+                obs_10y = r_10y.json().get("observations", [])
+                obs_2y = r_2y.json().get("observations", [])
+                parsed_10y = {o["date"]: float(o["value"]) for o in obs_10y if o["value"] != "."}
+                parsed_2y = {o["date"]: float(o["value"]) for o in obs_2y if o["value"] != "."}
+                
+                common_dates = sorted(list(set(parsed_10y.keys()).intersection(set(parsed_2y.keys()))))
+                if common_dates:
+                    latest_date = common_dates[-1]
+                    val = parsed_10y[latest_date] - parsed_2y[latest_date]
+                    dt = pd.to_datetime(latest_date)
+                    debug_logs.append(f"FRED (10Y-2Y): Spread erfolgreich berechnet ({val:+.4f}%).")
+                    return val, dt, "FRED 10Y-2Y Spread (DGS10 - DGS2)", debug_logs
+                else:
+                    debug_logs.append("FRED (10Y-2Y): Keine gemeinsamen Datumsangaben gefunden.")
+            else:
+                debug_logs.append("FRED (10Y-2Y): Fehlerhafte Statuscodes bei DGS10 oder DGS2.")
+        except Exception as e:
+            debug_logs.append(f"FRED (10Y-2Y): Netzwerkfehler: {str(e)}")
+
+    # 5. Option A: VIX via Tiingo (VIXY)
+    if tiingo_key:
+        debug_logs.append("Weiche auf Option A aus: Tiingo VIXY Index...")
+        try:
+            url = "https://api.tiingo.com/tiingo/daily/VIXY/prices"
+            headers = {"Authorization": f"Token {tiingo_key}"}
+            r = requests.get(url, headers=headers, timeout=10)
+            debug_logs.append(f"Tiingo (VIXY) Abfrage: HTTP Status {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                if data and isinstance(data, list):
+                    latest_vix = data[-1]
+                    val = float(latest_vix["close"])
+                    dt_str = latest_vix.get("date", "")
+                    dt = pd.to_datetime(dt_str) if dt_str else datetime.now()
+                    debug_logs.append(f"Tiingo (VIXY): Erfolgreich geladen (Schlusskurs: {val:.2f}).")
+                    return val, dt, "Tiingo VIXY Volatilitätsindex", debug_logs
+                else:
+                    debug_logs.append("Tiingo (VIXY): Antwort war leer oder ungültig.")
+            else:
+                debug_logs.append(f"Tiingo (VIXY) fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"Tiingo (VIXY): Netzwerkfehler: {str(e)}")
+    else:
+        debug_logs.append("Tiingo: API-Key (TIINGO_API_KEY) fehlt in .env. Option A übersprungen.")
+
+    # 6. Option C: USD/JPY Daily Change Proxy
+    debug_logs.append("Weiche auf Option C aus: USD/JPY Exchange Rate Proxy...")
     try:
-        df = fetch_fred_live("KCRORO", api_key)
-        if df is not None and not df.empty:
-            latest_row = df.iloc[-1]
-            val = float(latest_row["value"])
-            dt = latest_row["date"]
-            return val, dt
-    except Exception:
-        pass
-    return None, None
+        url = "https://currencyapi.vitalmedx.com/api/v1/timeseries"
+        params = {
+            "start_date": "2025-12-20",
+            "end_date": "2025-12-31",
+            "base": "USD",
+            "symbols": "JPY"
+        }
+        r = requests.get(url, params=params, timeout=10)
+        debug_logs.append(f"CurrencyArchiveAPI USD/JPY: HTTP Status {r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and "data" in data:
+                rates_dict = data["data"].get("rates", {})
+                sorted_dates = sorted(rates_dict.keys())
+                parsed = []
+                for d in sorted_dates:
+                    val = rates_dict[d].get("JPY")
+                    if val is not None:
+                        parsed.append((d, float(val)))
+                if len(parsed) >= 2:
+                    latest_close = parsed[-1][1]
+                    prev_close = parsed[-2][1]
+                    change = (latest_close - prev_close) / prev_close
+                    dt = pd.to_datetime(parsed[-1][0])
+                    debug_logs.append(f"CurrencyArchiveAPI (USD/JPY): Erfolgreich geladen (Änderung: {change:+.2%}).")
+                    return change, dt, "USD/JPY Proxy (Tagesänderung)", debug_logs
+                else:
+                    debug_logs.append("CurrencyArchiveAPI USD/JPY: Weniger als 2 Kurse im Zeitraum gefunden.")
+            else:
+                debug_logs.append("CurrencyArchiveAPI USD/JPY: Fehlermeldung in JSON-Antwort.")
+        else:
+            debug_logs.append(f"CurrencyArchiveAPI USD/JPY fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+    except Exception as e:
+        debug_logs.append(f"CurrencyArchiveAPI USD/JPY: Netzwerkfehler: {str(e)}")
+
+    debug_logs.append("FRED: Alle Indikatoren und alternative Fallbacks fehlgeschlagen.")
+    return None, None, None, debug_logs
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -2598,10 +2782,19 @@ with tab11:
     
     if search_q:
         with st.spinner("Suche aktuelle Nachrichten..."):
-            raw_articles, news_source, is_news_live, t_news = get_news_data_search(search_q, NEWSDATA_KEY, NEWSAPI_KEY)
+            raw_articles, news_source, is_news_live, t_news, news_debug_logs = get_news_data_search(search_q, NEWSDATA_KEY, NEWSAPI_KEY)
             st.sidebar.caption(f"**News Hub:** {format_freshness(t_news)} ({'Live' if is_news_live else 'Demo'})")
             
             news_articles = deduplicate_articles(raw_articles)
+            
+        with st.expander("🛠️ API-Verbindungsdetails & Debug-Logs", expanded=True):
+            for log in news_debug_logs:
+                if "erfolgreich" in log or "geladen" in log or "Zusammenfassung" in log or "vorhanden" in log:
+                    st.success(log)
+                elif "Fehler" in log or "fehlgeschlagen" in log or "fehlt" in log or "keine Daten" in log:
+                    st.error(log)
+                else:
+                    st.info(log)
             
         if news_source == "News-APIs momentan nicht verfügbar":
             st.error("News-APIs momentan nicht verfügbar")
@@ -2649,24 +2842,52 @@ with tab12:
     st.caption("Visualisierung des FRED Risk-On/Risk-Off Index (KCRORO) zur Einschätzung des globalen Markt-Risikos.")
     
     with st.spinner("Lade RORO-Index..."):
-        roro_val, roro_dt = get_roro_index(FRED_KEY)
+        roro_val, roro_dt, active_ind, debug_logs = get_roro_index(FRED_KEY, TIINGO_KEY)
         
+    with st.expander("🛠️ API-Verbindungsdetails & Debug-Logs", expanded=True):
+        for log in debug_logs:
+            if "erfolgreich" in log or "geladen" in log or "vorhanden" in log:
+                st.success(log)
+            elif "Fehler" in log or "fehlgeschlagen" in log or "fehlt" in log or "nicht" in log:
+                st.error(log)
+            else:
+                st.info(log)
+                
     if roro_val is not None:
-        if roro_val > 0:
+        is_risk_off = False
+        if active_ind == "FRED Risk-On/Risk-Off (KCRORO)":
+            is_risk_off = (roro_val > 0.0)
+        elif active_ind == "FRED 10Y-2Y Spread (DGS10 - DGS2)":
+            is_risk_off = (roro_val < 0.0)
+        elif active_ind == "Tiingo VIXY Volatilitätsindex":
+            is_risk_off = (roro_val > 20.0)
+        elif active_ind == "USD/JPY Proxy (Tagesänderung)":
+            is_risk_off = (roro_val <= 0.0)
+            
+        if is_risk_off:
             status_text = "🛡️ Risk-Off – Sichere Häfen bevorzugt"
             status_color = "#34d399"
-            desc = "Der RORO-Index liegt im positiven Bereich. Dies deutet auf Risikoaversion im globalen Markt hin. Sichere Häfen wie USD, CHF und JPY tendieren in dieser Marktphase zur Stärke, während risikoreichere Währungen (AUD, NZD, CAD) unter Druck geraten können."
+            desc = f"Der Risikoindikator ({active_ind}) deutet auf Risikoaversion im globalen Markt hin. Sichere Häfen wie USD, CHF und JPY tendieren in dieser Marktphase zur Stärke, während risikoreichere Währungen (AUD, NZD, CAD) unter Druck geraten können."
         else:
             status_text = "🚀 Risk-On – Riskante Anlagen bevorzugt"
             status_color = "#ef4444"
-            desc = "Der RORO-Index liegt im negativen Bereich. Dies deutet auf Risikofreude im globalen Markt hin. Risikoaktiva und Hochzinswährungen wie AUD, NZD und CAD tendieren in dieser Phase zur Stärke, während klassische sichere Häfen (USD, CHF, JPY) tendenziell schwächer notieren."
+            desc = f"Der Risikoindikator ({active_ind}) deutet auf Risikofreude im globalen Markt hin. Risikoaktiva und Hochzinswährungen wie AUD, NZD und CAD tendieren in dieser Phase zur Stärke, während klassische sichere Häfen (USD, CHF, JPY) tendenziell schwächer notieren."
             
+        if "Proxy" in active_ind:
+            val_str = f"{roro_val:+.2%}"
+        elif "Spread" in active_ind:
+            val_str = f"{roro_val:+.2f}%"
+        elif "VIX" in active_ind:
+            val_str = f"{roro_val:.2f}"
+        else:
+            val_str = f"{roro_val:+.2f}"
+
         col_metric, col_desc = st.columns([1, 2])
         with col_metric:
             st.markdown(f"""
             <div style="background-color:#14161d; border:1px solid #1f2026; padding:25px; border-radius:8px; text-align:center;">
-                <div style="font-size:0.9rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Aktueller RORO-Wert</div>
-                <div style="font-size:2.8rem; font-weight:700; color:{status_color}; margin:10px 0;">{roro_val:+.2f}</div>
+                <div style="font-size:0.9rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Wert ({active_ind})</div>
+                <div style="font-size:2.8rem; font-weight:700; color:{status_color}; margin:10px 0;">{val_str}</div>
                 <div style="background-color:{status_color}1a; color:{status_color}; border:1px solid {status_color}; padding:6px 12px; border-radius:4px; font-size:0.85rem; font-weight:700; display:inline-block; text-transform:uppercase;">
                     {status_text}
                 </div>
@@ -2679,7 +2900,7 @@ with tab12:
                 dt_str = roro_dt.strftime("%d.%m.%Y")
             else:
                 dt_str = str(roro_dt)
-            st.markdown(f"**Letzte Aktualisierung (FRED):** `{dt_str}`")
+            st.markdown(f"**Indikator:** `{active_ind}` | **Letzte Aktualisierung:** `{dt_str}`")
     else:
         st.error("Daten momentan nicht verfügbar")
 
