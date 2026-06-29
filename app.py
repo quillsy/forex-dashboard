@@ -1139,14 +1139,48 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
 
 # ----------------- HISTORICAL BACKTEST DATA HELPERS -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_fred_data_historical(series_id, target_date, fred_key):
-    df, _, is_live = get_fred_data(series_id, fred_key)
-    if df is not None and not df.empty:
-        target_dt = pd.to_datetime(target_date)
-        df_filtered = df[df["date"] <= target_dt]
-        if not df_filtered.empty:
-            latest_row = df_filtered.iloc[-1]
-            return float(latest_row["value"]), latest_row["date"], is_live
+def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
+    if not fred_key:
+        df_mock = generate_mock_fred(series_id)
+        if df_mock is not None and not df_mock.empty:
+            target_dt = pd.to_datetime(target_date)
+            df_filtered = df_mock[df_mock["date"] <= target_dt]
+            if not df_filtered.empty:
+                latest_row = df_filtered.iloc[-1]
+                return float(latest_row["value"]), latest_row["date"], False
+        return None, None, False
+
+    try:
+        url = "https://api.stlouisfed.org/fred/series/observations"
+        params = {
+            "series_id": series_id,
+            "api_key": fred_key,
+            "file_type": "json",
+            "observation_end": str(target_date),
+            "sort_order": "desc",
+            "limit": 1
+        }
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code == 200:
+            obs = r.json().get("observations", [])
+            if obs and obs[0]["value"] != ".":
+                val = float(obs[0]["value"])
+                dt = pd.to_datetime(obs[0]["date"])
+                return val, dt, True
+    except Exception:
+        pass
+
+    try:
+        df, _, is_live = get_fred_data(series_id, fred_key)
+        if df is not None and not df.empty:
+            target_dt = pd.to_datetime(target_date)
+            df_filtered = df[df["date"] <= target_dt]
+            if not df_filtered.empty:
+                latest_row = df_filtered.iloc[-1]
+                return float(latest_row["value"]), latest_row["date"], is_live
+    except Exception:
+        pass
+
     return None, None, False
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1476,42 +1510,55 @@ def get_historical_correlation_matrix(target_date):
         pass
     return generate_mock_fcs_correlation(), False
 
-def get_historical_country_rate(curr, target_date, fred_key, manual_rates):
-    if curr == "USD":
-        val, _, _ = get_fred_data_historical("FEDFUNDS", target_date, fred_key)
+def get_country_rate_historical(country_code, target_date):
+    # Retrieve G8 manual rates overrides from session state or config
+    manual_rates = {
+        "GBR": st.session_state.get("hist_rate_GBP", st.session_state.get("manual_rate_GBP", 5.25)),
+        "JPN": st.session_state.get("hist_rate_JPY", st.session_state.get("manual_rate_JPY", 0.10)),
+        "AUD": st.session_state.get("hist_rate_AUD", st.session_state.get("manual_rate_AUD", 4.35)),
+        "CAD": st.session_state.get("hist_rate_CAD", st.session_state.get("manual_rate_CAD", 5.00)),
+        "NZD": st.session_state.get("hist_rate_NZD", st.session_state.get("manual_rate_NZD", 5.50))
+    }
+    
+    fallback_rates = {"GBR": 5.25, "JPN": 0.10, "AUS": 4.35, "CAD": 5.00, "NZD": 5.50}
+    
+    if country_code == "USA":
+        val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
         if val is not None:
             return val, "FRED (FEDFUNDS)"
-        return 5.25, "FRED (FEDFUNDS - Fallback)"
-    elif curr == "EUR":
+        return 5.25, "FRED (Fallback)"
+        
+    elif country_code == "EMU":
+        if "hist_rate_EUR" in st.session_state:
+            return st.session_state.hist_rate_EUR, "Manuell (EUR Override)"
         val, _ = get_ecb_rate_historical(target_date)
         if val is not None:
             return val, "ECB Portal"
-        if "EUR" in manual_rates:
-            return manual_rates["EUR"], "Manuell (Override)"
         return 2.25, "ECB (Fallback)"
-    elif curr == "CHF":
+        
+    elif country_code == "CHE":
+        if "hist_rate_CHF" in st.session_state:
+            return st.session_state.hist_rate_CHF, "Manuell (CHF Override)"
         val, _ = get_snb_rate_historical(target_date)
         if val is not None:
             return val, "SNB Portal"
-        if "CHF" in manual_rates:
-            return manual_rates["CHF"], "Manuell (Override)"
-        return 0.00, "SNB (Fallback)"
-    else:
-        val = manual_rates.get(curr)
-        if val is not None:
-            return val, "Zins-Kontrollzentrum (Manuell)"
-        fallback_val = st.session_state.get(f"manual_rate_{curr}")
-        if fallback_val is not None:
-            return fallback_val, "Zins-Kontrollzentrum (Session State Fallback)"
-        return 0.0, "Unbekannt (Fallback)"
+        val_manual = st.session_state.get("manual_rate_CHF", 0.00)
+        return val_manual, "SNB (Fallback)"
+        
+    map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
+    key = map_code.get(country_code, country_code)
+    
+    val = manual_rates.get(key, fallback_rates.get(country_code, 2.0))
+    return val, "Zins-Kontrollzentrum (Manuell)"
 
-def compute_currency_score_historical(curr, target_date, fred_key, manual_rates):
+def compute_currency_score_historical(curr, target_date):
+    fred_key = FRED_KEY
     if curr == "USD":
-        rate_val, _, _ = get_fred_data_historical("FEDFUNDS", target_date, fred_key)
+        rate_val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
         rate_val = rate_val if rate_val is not None else 5.25
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
-        unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date, fred_key)
+        unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date)
         unemp_val = unemp_val if unemp_val is not None else 3.8
         unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
         
@@ -1547,7 +1594,7 @@ def compute_currency_score_historical(curr, target_date, fred_key, manual_rates)
         cpi_val = cpi_val if cpi_val is not None else 2.5
         cpi_score = np.clip((cpi_val / 5.0) * 100, 0, 100)
         
-        rate_val, _ = get_historical_country_rate(curr, target_date, fred_key, manual_rates)
+        rate_val, _ = get_country_rate_historical(code, target_date)
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
         unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
@@ -3500,8 +3547,8 @@ with tab14:
         st.subheader(f"📊 Analyseergebnisse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
         
         with st.spinner("Berechne fundamentales Signal..."):
-            base_score_h = compute_currency_score_historical(base_c, target_date_str, FRED_KEY, hist_rates)
-            quote_score_h = compute_currency_score_historical(quote_c, target_date_str, FRED_KEY, hist_rates)
+            base_score_h = compute_currency_score_historical(base_c, target_date_str)
+            quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
             
             raw_diff_h = quote_score_h - base_score_h
             signal_value_h = raw_diff_h / 2.0
@@ -3582,8 +3629,8 @@ with tab14:
                 
         with hist_sub_tabs[1]:
             st.markdown("#### 🏦 Historischer Leitzins-Vergleich")
-            base_rate_h, base_src_h = get_historical_country_rate(base_c, target_date_str, FRED_KEY, hist_rates)
-            quote_rate_h, quote_src_h = get_historical_country_rate(quote_c, target_date_str, FRED_KEY, hist_rates)
+            base_rate_h, base_src_h = get_country_rate_historical(base_c, target_date_str)
+            quote_rate_h, quote_src_h = get_country_rate_historical(quote_c, target_date_str)
             diff_bps_h = int((base_rate_h - quote_rate_h) * 100)
             
             rate_data = [
@@ -3658,8 +3705,11 @@ with tab14:
             base_debt_h, base_debt_dt, _ = get_worldbank_data_historical(base_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
             quote_debt_h, quote_debt_dt, _ = get_worldbank_data_historical(quote_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
             
-            base_cli_h = get_historical_oecd_cli(base_c, target_date_str)
-            quote_cli_h = get_historical_oecd_cli(quote_c, target_date_str)
+            base_cli_res = get_historical_oecd_cli(base_c, target_date_str)
+            quote_cli_res = get_historical_oecd_cli(quote_c, target_date_str)
+            
+            base_cli_h = base_cli_res[0] if base_cli_res is not None else None
+            quote_cli_h = quote_cli_res[0] if quote_cli_res is not None else None
             
             debt_col1, debt_col2 = st.columns(2)
             with debt_col1:
@@ -3671,10 +3721,24 @@ with tab14:
                 
             with debt_col2:
                 st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
-                b_cli_str = f"{base_cli_h:.2f}" if base_cli_h is not None else "Daten nicht verfügbar"
-                q_cli_str = f"{quote_cli_h:.2f}" if quote_cli_h is not None else "Daten nicht verfügbar"
-                st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {'>100 (Wachstum)' if base_cli_h and base_cli_h > 100.0 else '<100' if base_cli_h else 'N/A'})")
-                st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {'>100 (Wachstum)' if quote_cli_h and quote_cli_h > 100.0 else '<100' if quote_cli_h else 'N/A'})")
+                if base_cli_h is not None:
+                    try:
+                        b_cli_str = f"{float(base_cli_h):.2f}"
+                    except (ValueError, TypeError):
+                        b_cli_str = "Daten nicht verfügbar"
+                else:
+                    b_cli_str = "Daten nicht verfügbar"
+                    
+                if quote_cli_h is not None:
+                    try:
+                        q_cli_str = f"{float(quote_cli_h):.2f}"
+                    except (ValueError, TypeError):
+                        q_cli_str = "Daten nicht verfügbar"
+                else:
+                    q_cli_str = "Daten nicht verfügbar"
+                    
+                st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {'>100 (Wachstum)' if base_cli_h and float(base_cli_h) > 100.0 else '<100 (Verlangsamung)' if base_cli_h else 'N/A'})")
+                st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {'>100 (Wachstum)' if quote_cli_h and float(quote_cli_h) > 100.0 else '<100 (Verlangsamung)' if quote_cli_h else 'N/A'})")
                 
         with hist_sub_tabs[5]:
             st.markdown("#### 🧮 30-Tage Historische Pearson-Korrelation")
