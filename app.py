@@ -22,19 +22,31 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize session state for manual interest rates
-if "manual_rate_GBP" not in st.session_state:
-    st.session_state["manual_rate_GBP"] = 3.75
-if "manual_rate_JPY" not in st.session_state:
-    st.session_state["manual_rate_JPY"] = 1.00
-if "manual_rate_AUD" not in st.session_state:
-    st.session_state["manual_rate_AUD"] = 4.35
-if "manual_rate_CAD" not in st.session_state:
-    st.session_state["manual_rate_CAD"] = 2.25
-if "manual_rate_NZD" not in st.session_state:
-    st.session_state["manual_rate_NZD"] = 2.25
-if "manual_rate_CHF" not in st.session_state:
-    st.session_state["manual_rate_CHF"] = 1.25
+# Initialize session state for manual interest rates (persisted to .rates_config.json)
+import json
+
+RATES_CONFIG_FILE = ".rates_config.json"
+persisted_rates = {}
+if os.path.exists(RATES_CONFIG_FILE):
+    try:
+        with open(RATES_CONFIG_FILE, "r", encoding="utf-8") as f:
+            persisted_rates = json.load(f)
+    except Exception:
+        pass
+
+defaults = {
+    "manual_rate_GBP": 5.25,
+    "manual_rate_JPY": 0.10,
+    "manual_rate_AUD": 4.35,
+    "manual_rate_CAD": 5.00,
+    "manual_rate_NZD": 5.50,
+    "manual_rate_CHF": 0.00,
+    "last_saved_rates": None
+}
+
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = persisted_rates.get(key, val)
 
 # ----------------- Obsidian Dark Theme CSS -----------------
 st.markdown("""
@@ -1125,6 +1137,452 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
     return mock_articles, "News-APIs momentan nicht verfügbar (Demo-Modus)", False, datetime.now(), debug_logs
 
 
+# ----------------- HISTORICAL BACKTEST DATA HELPERS -----------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_fred_data_historical(series_id, target_date, fred_key):
+    df, _, is_live = get_fred_data(series_id, fred_key)
+    if df is not None and not df.empty:
+        target_dt = pd.to_datetime(target_date)
+        df_filtered = df[df["date"] <= target_dt]
+        if not df_filtered.empty:
+            latest_row = df_filtered.iloc[-1]
+            return float(latest_row["value"]), latest_row["date"], is_live
+    return None, None, False
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_ecb_rate_historical(target_date):
+    try:
+        url = "https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.DFR.LEV?format=jsondata"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
+        r.raise_for_status()
+        res = r.json()
+        series = res["dataSets"][0]["series"]
+        series_key = list(series.keys())[0]
+        obs = series[series_key]["observations"]
+        
+        dimensions = res["structure"]["dimensions"]["observation"]
+        time_dim = next(dim for dim in dimensions if dim["id"] == "TIME_PERIOD")
+        time_values = [v["id"] for v in time_dim["values"]]
+        
+        parsed = []
+        for idx_str, val_list in obs.items():
+            idx = int(idx_str)
+            date_str = time_values[idx]
+            val = float(val_list[0])
+            parsed.append((pd.to_datetime(date_str), val))
+            
+        df = pd.DataFrame(parsed, columns=["date", "value"]).sort_values("date")
+        target_dt = pd.to_datetime(target_date)
+        df_filtered = df[df["date"] <= target_dt]
+        if not df_filtered.empty:
+            return float(df_filtered.iloc[-1]["value"]), df_filtered.iloc[-1]["date"]
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_snb_rate_historical(target_date):
+    try:
+        url = "https://data.snb.ch/api/cube/snboffzisa/data/csv/en"
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        lines = r.text.split("\n")
+        data_lines = []
+        start_reading = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('"Date";'):
+                start_reading = True
+            if start_reading:
+                data_lines.append(line)
+        if not data_lines:
+            raise ValueError("Could not find data in SNB CSV")
+        
+        df = pd.read_csv(io.StringIO("\n".join(data_lines)), sep=";")
+        df_lz = df[df["D0"] == "LZ"].copy()
+        if df_lz.empty:
+            raise ValueError("LZ key not found in SNB data")
+        
+        df_lz["parsed_date"] = pd.to_datetime(df_lz["Date"], format="%Y-%m")
+        df_lz = df_lz.dropna(subset=["Value"])
+        df_lz = df_lz.sort_values("parsed_date")
+        
+        target_dt = pd.to_datetime(target_date)
+        df_filtered = df_lz[df_lz["parsed_date"] <= target_dt]
+        if not df_filtered.empty:
+            return float(df_filtered.iloc[-1]["Value"]), df_filtered.iloc[-1]["parsed_date"]
+    except Exception:
+        pass
+    return None, None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_worldbank_data_historical(country_code, indicator, target_date):
+    df, _, is_live = get_worldbank_data(country_code, indicator)
+    if df is not None and not df.empty:
+        target_dt = pd.to_datetime(target_date)
+        df_filtered = df[df["date"] <= target_dt]
+        if not df_filtered.empty:
+            latest_row = df_filtered.iloc[-1]
+            return float(latest_row["value"]), latest_row["date"], is_live
+    return None, None, False
+
+def get_historical_oecd_cli(curr, target_date):
+    mapping = {
+        "USD": "USA",
+        "EUR": "EA20",
+        "GBP": "GBR",
+        "CHF": "CHE",
+        "CAD": "CAN",
+        "AUD": "AUS",
+        "NZD": "NZL",
+        "JPY": "JPN"
+    }
+    country_code = mapping.get(curr)
+    if not country_code:
+        return None
+        
+    df = get_oecd_cli_data()
+    if df is None or df.empty:
+        return None
+        
+    try:
+        df_m = df[(df["FREQ"] == "M") & (df["REF_AREA"] == country_code)]
+        if df_m.empty and curr == "EUR":
+            df_m = df[(df["FREQ"] == "M") & (df["REF_AREA"] == "EA19")]
+            
+        if df_m.empty:
+            return None
+            
+        target_dt = pd.to_datetime(target_date)
+        target_str = target_dt.strftime("%Y-%m")
+        
+        for indicator in ["LI", "BCICP", "CCICP"]:
+            df_ind = df_m[df_m["MEASURE"] == indicator]
+            if not df_ind.empty:
+                df_filtered = df_ind[df_ind["TIME_PERIOD"] <= target_str]
+                if not df_filtered.empty:
+                    latest = df_filtered.sort_values("TIME_PERIOD").iloc[-1]
+                    val = float(latest["OBS_VALUE"])
+                    if not pd.isna(val):
+                        return val, latest["TIME_PERIOD"]
+    except Exception:
+        pass
+    return None
+
+def generate_mock_benzinga_historical(target_date):
+    target_dt = pd.to_datetime(target_date)
+    events = [
+        {"time": (target_dt - timedelta(days=1)).strftime("%Y-%m-%d %H:%M"), "country": "USA", "event": "FOMC Meeting Minutes", "consensus": "5.25%", "actual": "5.25%", "prior": "5.25%", "importance": "High"},
+        {"time": (target_dt).strftime("%Y-%m-%d %H:%M"), "country": "DEU", "event": "German GDP Growth QoQ", "consensus": "0.1%", "actual": "0.2%", "prior": "-0.2%", "importance": "Medium"},
+        {"time": (target_dt + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"), "country": "GBR", "event": "BoE Interest Rate Decision", "consensus": "5.00%", "actual": "5.00%", "prior": "5.25%", "importance": "High"},
+        {"time": (target_dt - timedelta(days=2)).strftime("%Y-%m-%d %H:%M"), "country": "USA", "event": "Non-Farm Payrolls (NFP)", "consensus": "180K", "actual": "175K", "prior": "210K", "importance": "High"},
+        {"time": (target_dt + timedelta(days=2)).strftime("%Y-%m-%d %H:%M"), "country": "EUR", "event": "Eurozone CPI Inflation YoY", "consensus": "2.4%", "actual": "2.5%", "prior": "2.6%", "importance": "High"},
+        {"time": (target_dt - timedelta(days=3)).strftime("%Y-%m-%d %H:%M"), "country": "JPN", "event": "BoJ Press Conference", "consensus": "-", "actual": "-", "prior": "-", "importance": "Medium"}
+    ]
+    return pd.DataFrame(events)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_benzinga_historical(key, target_date):
+    target_dt = pd.to_datetime(target_date)
+    start_dt = target_dt - timedelta(days=3)
+    end_dt = target_dt + timedelta(days=3)
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str = end_dt.strftime("%Y-%m-%d")
+    
+    if not key:
+        return generate_mock_benzinga_historical(target_date), datetime.now(), False
+    try:
+        url = f"https://api.benzinga.com/api/v2.1/calendar/economics?token={key}&parameters[date_from]={start_str}&parameters[date_to]={end_str}"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
+        r.raise_for_status()
+        res = r.json()
+        calendar = res.get("economics", [])
+        parsed = []
+        for item in calendar:
+            dt = item.get("date") or ""
+            tm = item.get("time") or ""
+            combined_time = f"{dt} {tm}".strip()
+            
+            act_val = item.get("actual")
+            actual_str = f"{act_val}{item.get('actual_t') or ''}" if act_val is not None and str(act_val).strip() != "" else "-"
+            
+            cons_val = item.get("consensus")
+            consensus_str = f"{cons_val}{item.get('consensus_t') or ''}" if cons_val is not None and str(cons_val).strip() != "" else "-"
+            
+            prior_val = item.get("prior")
+            prior_str = f"{prior_val}{item.get('prior_t') or ''}" if prior_val is not None and str(prior_val).strip() != "" else "-"
+            
+            imp_raw = item.get("importance")
+            if imp_raw in (3, "3", "High"):
+                imp = "High"
+            elif imp_raw in (2, "2", "Medium"):
+                imp = "Medium"
+            else:
+                imp = "Low"
+                
+            parsed.append({
+                "time": combined_time,
+                "country": item.get("country") or "",
+                "event": item.get("event_name") or "",
+                "consensus": consensus_str,
+                "actual": actual_str,
+                "prior": prior_str,
+                "importance": imp
+            })
+        df = pd.DataFrame(parsed)
+        if not df.empty:
+            df["dt_temp"] = pd.to_datetime(df["time"], errors="coerce")
+            df = df.sort_values("dt_temp").reset_index(drop=True)
+            df = df.drop(columns=["dt_temp"])
+            return df, datetime.now(), True
+        else:
+            return generate_mock_benzinga_historical(target_date), datetime.now(), False
+    except Exception:
+        return generate_mock_benzinga_historical(target_date), datetime.now(), False
+
+def generate_mock_finnhub_historical(pair, target_date):
+    import random
+    date_int = int(pd.to_datetime(target_date).strftime("%Y%m%d"))
+    random.seed(hash(pair) + date_int)
+    
+    base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+    base = base_prices.get(pair, 1.0)
+    
+    buy = random.randint(10, 20)
+    hold = random.randint(5, 12)
+    sell = random.randint(1, 5)
+    strong_buy = random.randint(2, 8)
+    strong_sell = random.randint(0, 2)
+    
+    target_mean = base * random.uniform(0.98, 1.02)
+    target_high = target_mean * random.uniform(1.02, 1.05)
+    target_low = target_mean * random.uniform(0.95, 0.98)
+    
+    dt = pd.to_datetime(target_date)
+    history = [
+        {"date": (dt - timedelta(days=2)).strftime("%Y-%m-%d"), "firm": "Goldman Sachs", "rating": "Buy", "target": round(target_mean * 1.01, 4)},
+        {"date": (dt - timedelta(days=5)).strftime("%Y-%m-%d"), "firm": "JPMorgan Chase", "rating": "Hold", "target": round(target_mean * 0.99, 4)},
+        {"date": (dt - timedelta(days=12)).strftime("%Y-%m-%d"), "firm": "Morgan Stanley", "rating": "Buy", "target": round(target_mean * 1.02, 4)},
+        {"date": (dt - timedelta(days=20)).strftime("%Y-%m-%d"), "firm": "Barclays", "rating": "Sell", "target": round(target_mean * 0.96, 4)}
+    ]
+    
+    return {
+        "buy": buy + strong_buy,
+        "hold": hold,
+        "sell": sell + strong_sell,
+        "strongBuy": strong_buy,
+        "strongSell": strong_sell,
+        "targetMean": round(target_mean, 4),
+        "targetHigh": round(target_high, 4),
+        "targetLow": round(target_low, 4),
+        "history": history
+    }
+
+def generate_mock_stockdata_historical(pair, target_date):
+    import random
+    date_int = int(pd.to_datetime(target_date).strftime("%Y%m%d"))
+    random.seed(hash(pair) + date_int + 42)
+    return round(random.uniform(-7.5, 7.5), 2)
+
+def generate_mock_news_historical(query, target_date):
+    target_dt = pd.to_datetime(target_date)
+    return [
+        {
+            "title": f"Fundamentaler Impuls für {query}: Zentralbank-Sitzung sorgt für Volatilität",
+            "source": "Forex News Archive",
+            "publishedAt": (target_dt - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M"),
+            "url": "#",
+            "description": f"Nach der jüngsten Veröffentlichung makroökonomischer Indikatoren steigt die Aufmerksamkeit für das Paar {query}.",
+            "urlToImage": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80",
+            "api": "MOCK-News Engine"
+        },
+        {
+            "title": "Inflationsdaten überraschen Marktteilnehmer – FX-Märkte reagieren prompt",
+            "source": "Global Macro Insights",
+            "publishedAt": (target_dt - timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),
+            "url": "#",
+            "description": "Die jüngsten Konsumentenpreise deuten auf ein verändertes Zinsniveau hin, was das Momentum auf den Devisenmärkten antreibt.",
+            "urlToImage": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80",
+            "api": "MOCK-News Engine"
+        },
+        {
+            "title": "Arbeitsmarktdaten übertreffen Prognosen: FX-Volatilität steigt",
+            "source": "Zentralbank-Ticker",
+            "publishedAt": (target_dt - timedelta(days=2)).strftime("%Y-%m-%d %H:%M"),
+            "url": "#",
+            "description": "Der robuste Arbeitsmarkt verschafft den geldpolitischen Entscheidungsträgern neuen Spielraum.",
+            "urlToImage": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=500&auto=format&fit=crop&q=80",
+            "api": "MOCK-News Engine"
+        }
+    ]
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_historical_correlation_matrix(target_date):
+    target_dt = pd.to_datetime(target_date)
+    start_dt = target_dt - timedelta(days=30)
+    
+    limit_dt = datetime(2025, 12, 31)
+    if start_dt > limit_dt:
+        start_dt = limit_dt - timedelta(days=30)
+        target_dt = limit_dt
+        
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str = target_dt.strftime("%Y-%m-%d")
+    
+    url = "https://currencyapi.vitalmedx.com/api/v1/timeseries"
+    params = {
+        "start_date": start_str,
+        "end_date": end_str,
+        "base": "USD",
+        "symbols": "EUR,GBP,JPY,CHF,CAD,AUD,NZD"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and "data" in data:
+                rates_dict = data["data"].get("rates", {})
+                
+                daily_rates = []
+                for date_str, val_dict in rates_dict.items():
+                    row = {"date": pd.to_datetime(date_str)}
+                    for sym, val in val_dict.items():
+                        if val is not None:
+                            row[sym] = float(val)
+                    daily_rates.append(row)
+                    
+                df_raw = pd.DataFrame(daily_rates).sort_values("date").reset_index(drop=True)
+                
+                required = ["EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
+                if not df_raw.empty and all(col in df_raw.columns for col in required):
+                    df_raw = df_raw.dropna(subset=required)
+                    
+                    if len(df_raw) >= 5:
+                        df_pairs = pd.DataFrame()
+                        df_pairs["EUR/USD"] = 1.0 / df_raw["EUR"]
+                        df_pairs["GBP/USD"] = 1.0 / df_raw["GBP"]
+                        df_pairs["USD/JPY"] = df_raw["JPY"]
+                        df_pairs["USD/CHF"] = df_raw["CHF"]
+                        df_pairs["AUD/USD"] = 1.0 / df_raw["AUD"]
+                        df_pairs["USD/CAD"] = df_raw["CAD"]
+                        df_pairs["NZD/USD"] = 1.0 / df_raw["NZD"]
+                        df_pairs["EUR/GBP"] = df_raw["GBP"] / df_raw["EUR"]
+                        
+                        corr = df_pairs.corr(method="pearson")
+                        return corr, True
+    except Exception:
+        pass
+    return generate_mock_fcs_correlation(), False
+
+def get_historical_country_rate(curr, target_date, fred_key, manual_rates):
+    if curr == "USD":
+        val, _, _ = get_fred_data_historical("FEDFUNDS", target_date, fred_key)
+        if val is not None:
+            return val, "FRED (FEDFUNDS)"
+        return 5.25, "FRED (FEDFUNDS - Fallback)"
+    elif curr == "EUR":
+        val, _ = get_ecb_rate_historical(target_date)
+        if val is not None:
+            return val, "ECB Portal"
+        if "EUR" in manual_rates:
+            return manual_rates["EUR"], "Manuell (Override)"
+        return 2.25, "ECB (Fallback)"
+    elif curr == "CHF":
+        val, _ = get_snb_rate_historical(target_date)
+        if val is not None:
+            return val, "SNB Portal"
+        if "CHF" in manual_rates:
+            return manual_rates["CHF"], "Manuell (Override)"
+        return 0.00, "SNB (Fallback)"
+    else:
+        val = manual_rates.get(curr)
+        if val is not None:
+            return val, "Zins-Kontrollzentrum (Manuell)"
+        fallback_val = st.session_state.get(f"manual_rate_{curr}")
+        if fallback_val is not None:
+            return fallback_val, "Zins-Kontrollzentrum (Session State Fallback)"
+        return 0.0, "Unbekannt (Fallback)"
+
+def compute_currency_score_historical(curr, target_date, fred_key, manual_rates):
+    if curr == "USD":
+        rate_val, _, _ = get_fred_data_historical("FEDFUNDS", target_date, fred_key)
+        rate_val = rate_val if rate_val is not None else 5.25
+        rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
+        
+        unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date, fred_key)
+        unemp_val = unemp_val if unemp_val is not None else 3.8
+        unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
+        
+        df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+        latest_cpi = 2.4
+        if df_cpi is not None and not df_cpi.empty:
+            df_cpi_c = df_cpi.copy()
+            if len(df_cpi_c) >= 13:
+                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
+                if not df_filtered.empty:
+                    latest_cpi = df_filtered.iloc[-1]["yoy"]
+        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
+        
+        df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
+        latest_gdp = 1.8
+        if df_gdp is not None and not df_gdp.empty:
+            df_gdp_c = df_gdp.copy()
+            if len(df_gdp_c) >= 5:
+                df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
+                df_filtered = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(target_date)]
+                if not df_filtered.empty:
+                    latest_gdp = df_filtered.iloc[-1]["yoy"]
+        gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
+    else:
+        code = CURRENCIES[curr]["wb_code"]
+        
+        gdp_val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
+        gdp_val = gdp_val if gdp_val is not None else 1.5
+        gdp_score = np.clip((gdp_val + 2.0) / 6.0 * 100, 0, 100)
+        
+        cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+        cpi_val = cpi_val if cpi_val is not None else 2.5
+        cpi_score = np.clip((cpi_val / 5.0) * 100, 0, 100)
+        
+        rate_val, _ = get_historical_country_rate(curr, target_date, fred_key, manual_rates)
+        rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
+        
+        unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
+        if unemp_val is not None:
+            unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
+        else:
+            unemp_score = np.clip(65 + (gdp_val - 2.0) * 5, 40, 85)
+            
+    total_score = 0.50 * rate_score + 0.20 * cpi_score + 0.15 * unemp_score + 0.15 * gdp_score
+    return total_score
+
+
+def load_backtest_decisions():
+    file_path = "backtest_decisions.json"
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def save_backtest_decision(decision):
+    file_path = "backtest_decisions.json"
+    decisions = load_backtest_decisions()
+    decisions.append(decision)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(decisions, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+    return decisions
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_roro_index(fred_key, tiingo_key):
     debug_logs = []
@@ -1558,15 +2016,15 @@ def categorize_article(art):
 def get_country_rate(country_code, fred_key):
     # Retrieve manual rates from session state if available, otherwise use defaults
     manual_rates = {
-        "GBR": st.session_state.get("manual_rate_GBP", 3.75),
-        "JPN": st.session_state.get("manual_rate_JPY", 1.00),
+        "GBR": st.session_state.get("manual_rate_GBP", 5.25),
+        "JPN": st.session_state.get("manual_rate_JPY", 0.10),
         "AUD": st.session_state.get("manual_rate_AUD", 4.35),
-        "CAD": st.session_state.get("manual_rate_CAD", 2.25),
-        "NZD": st.session_state.get("manual_rate_NZD", 2.25),
-        "CHF": st.session_state.get("manual_rate_CHF", 1.25)
+        "CAD": st.session_state.get("manual_rate_CAD", 5.00),
+        "NZD": st.session_state.get("manual_rate_NZD", 5.50),
+        "CHF": st.session_state.get("manual_rate_CHF", 0.00)
     }
     
-    fallback_rates = {"USA": 5.25, "EMU": 4.25, "GBR": 3.75, "JPN": 1.00, "CHE": 1.25, "AUS": 4.35, "CAN": 2.25, "NZL": 2.25}
+    fallback_rates = {"USA": 5.25, "EMU": 2.25, "GBR": 5.25, "JPN": 0.10, "CHE": 0.00, "AUS": 4.35, "CAN": 5.00, "NZL": 5.50}
     
     if country_code == "USA":
         df, _, _ = get_fred_data("FEDFUNDS", fred_key)
@@ -1589,7 +2047,7 @@ def get_country_rate(country_code, fred_key):
             val, bps_change = get_snb_rate_cached()
             return val, bps_change, "SNB Portal"
         except Exception:
-            val = st.session_state.get("manual_rate_CHF", 1.25)
+            val = st.session_state.get("manual_rate_CHF", 0.00)
             return val, 0, "SNB (Fallback)"
             
     map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
@@ -1831,7 +2289,7 @@ show_all_pairs = st.sidebar.checkbox("Alle Paare anzeigen (inkl. Neutral)", valu
 # Manual cache clear
 st.sidebar.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
 
-# Zins-Kontrollzentrum (Manual inputs)
+# Zins-Kontrollzentrum (Manual inputs with persistence)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏦 Zins-Kontrollzentrum")
 st.sidebar.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
@@ -1854,6 +2312,31 @@ st.sidebar.number_input(
 st.sidebar.number_input(
     "Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05
 )
+
+if st.sidebar.button("💾 Zinssätze speichern"):
+    saved_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    st.session_state["last_saved_rates"] = saved_time
+    rates_to_save = {
+        "manual_rate_GBP": st.session_state.manual_rate_GBP,
+        "manual_rate_JPY": st.session_state.manual_rate_JPY,
+        "manual_rate_AUD": st.session_state.manual_rate_AUD,
+        "manual_rate_CAD": st.session_state.manual_rate_CAD,
+        "manual_rate_NZD": st.session_state.manual_rate_NZD,
+        "manual_rate_CHF": st.session_state.manual_rate_CHF,
+        "last_saved_rates": saved_time
+    }
+    try:
+        with open(".rates_config.json", "w", encoding="utf-8") as f:
+            json.dump(rates_to_save, f, indent=4)
+        st.sidebar.success("Zinssätze gespeichert!")
+    except Exception as e:
+        st.sidebar.error(f"Fehler: {e}")
+
+last_saved = st.session_state.get("last_saved_rates")
+if last_saved:
+    st.sidebar.info(f"Zuletzt gespeichert: {last_saved}")
+else:
+    st.sidebar.warning("Noch nicht gespeichert")
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
 
@@ -1981,7 +2464,7 @@ def get_next_event_for_pair(base, quote, df_c):
     time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
     return f"{next_event['country']}: {next_event['event']} ({time_str})"
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14 = st.tabs([
     "🏠 Übersicht & Checkliste",
     "📅 Economic Calendar",
     "🏦 Zinsdifferenz",
@@ -1994,7 +2477,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13
     "⚠️ Risikoindikatoren (IMF)",
     "📰 News & Research Hub",
     "🛡️ Risk-On/Off",
-    "📊 Backtest & Performance"
+    "📊 Backtest & Performance",
+    "📊 Backtest – Historische Daten"
 ])
 
 # ----------------- TAB 1: ÜBERSICHT & CHECKLISTE -----------------
@@ -2974,6 +3458,323 @@ with tab13:
         st.info(r"ℹ️ **Modell-Referenz:** Das Backtesting verwendet ein fundamental-basiertes Handelssignal. Die Signalstufen SB (Strong Buy $\ge$ 25), MB (Mid Buy $\ge$ 10), MS (Mid Sell $\le$ -10) und SS (Strong Sell $\le$ -25) werden täglich ermittelt. Die Gewichtungen betragen: Zinsdifferenz (50%), Sentiment (20%), Staatsverschuldung (15%) und Leistungsbilanz (15%). Jedes Signal löst einen Trade mit einem festen Stop-Loss von 1.0% und einem Take-Profit von 2.0% aus.")
     else:
         st.error("Daten momentan nicht verfügbar")
+
+
+# ----------------- TAB 14: BACKTEST – HISTORISCHE DATEN -----------------
+with tab14:
+    st.header("📊 Backtest – Historische Daten")
+    st.caption("Analysiere fundamentale Marktdaten für jeden beliebigen Tag in der Vergangenheit, um Handelsentscheidungen im historischen Kontext zu evaluieren.")
+    
+    b_col1, b_col2 = st.columns([1, 1])
+    with b_col1:
+        major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
+        hist_analysis_pair = st.selectbox("Währungspaar wählen", options=major_pairs, index=0, key="hist_analysis_pair_select")
+        hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select")
+        
+    with b_col2:
+        st.markdown("##### ⚙️ Manuelle Leitzins-Vorgaben für diesen Tag")
+        st.caption("Falls Daten von Zentralbanken nicht automatisch geladen werden können oder überschrieben werden sollen:")
+        
+        hist_rates = {}
+        r_cols = st.columns(3)
+        with r_cols[0]:
+            hist_rates["GBP"] = st.number_input("GBP Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_GBP", 5.25), step=0.05, key="hist_rate_GBP")
+            hist_rates["JPY"] = st.number_input("JPY Zins %", min_value=-5.0, max_value=15.0, value=st.session_state.get("manual_rate_JPY", 0.10), step=0.05, key="hist_rate_JPY")
+        with r_cols[1]:
+            hist_rates["AUD"] = st.number_input("AUD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_AUD", 4.35), step=0.05, key="hist_rate_AUD")
+            hist_rates["CAD"] = st.number_input("CAD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_CAD", 5.00), step=0.05, key="hist_rate_CAD")
+        with r_cols[2]:
+            hist_rates["NZD"] = st.number_input("NZD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_NZD", 5.50), step=0.05, key="hist_rate_NZD")
+            hist_rates["CHF"] = st.number_input("CHF Zins % (Override)", min_value=-5.0, max_value=15.0, value=st.session_state.get("manual_rate_CHF", 0.00), step=0.05, key="hist_rate_CHF")
+            hist_rates["EUR"] = st.number_input("EUR Zins % (Override)", min_value=0.0, max_value=15.0, value=2.25, step=0.05, key="hist_rate_EUR")
+
+    fetch_button = st.button("🔍 Daten abrufen", key="hist_analysis_fetch_btn")
+    
+    if fetch_button or st.session_state.get("hist_analysis_active", False):
+        st.session_state["hist_analysis_active"] = True
+        
+        target_date_str = hist_analysis_date.strftime("%Y-%m-%d")
+        base_c, quote_c = hist_analysis_pair.split("/")
+        
+        st.markdown("---")
+        st.subheader(f"📊 Analyseergebnisse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
+        
+        with st.spinner("Berechne fundamentales Signal..."):
+            base_score_h = compute_currency_score_historical(base_c, target_date_str, FRED_KEY, hist_rates)
+            quote_score_h = compute_currency_score_historical(quote_c, target_date_str, FRED_KEY, hist_rates)
+            
+            raw_diff_h = quote_score_h - base_score_h
+            signal_value_h = raw_diff_h / 2.0
+            signal_value_h = max(-50.0, min(50.0, signal_value_h))
+            
+            if signal_value_h >= 25.0:
+                sig_h = "SB"
+                badge_h = "STRONG BUY"
+                color_h = "#ef4444"
+            elif 10.0 <= signal_value_h < 25.0:
+                sig_h = "MB"
+                badge_h = "BUY"
+                color_h = "#f97316"
+            elif -10.0 < signal_value_h < 10.0:
+                sig_h = "NT"
+                badge_h = "NEUTRAL"
+                color_h = "#7d7d8a"
+            elif -25.0 < signal_value_h <= -10.0:
+                sig_h = "MS"
+                badge_h = "SELL"
+                color_h = "#3b82f6"
+            else:
+                sig_h = "SS"
+                badge_h = "STRONG SELL"
+                color_h = "#34d399"
+                
+        sig_col1, sig_col2, sig_col3 = st.columns(3)
+        with sig_col1:
+            render_metric_card(f"Wirtschaftsscore {base_c}", f"{base_score_h:.2f} / 100", f"Historisch am {target_date_str}", True)
+        with sig_col2:
+            render_metric_card(f"Wirtschaftsscore {quote_c}", f"{quote_score_h:.2f} / 100", f"Historisch am {target_date_str}", True)
+        with sig_col3:
+            st.markdown(f"""
+            <div style="background-color:#14161d; border:1px solid #1f2026; padding:15px; border-radius:8px; text-align:center;">
+                <div style="font-size:0.85rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Fundamentales Signal</div>
+                <div style="font-size:1.8rem; font-weight:700; color:{color_h}; margin:5px 0;">{signal_value_h:+.2f}</div>
+                <div style="background-color:{color_h}1a; color:{color_h}; border:1px solid {color_h}; padding:4px 8px; border-radius:4px; font-size:0.75rem; font-weight:700; display:inline-block;">
+                    {badge_h}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown("### 🗂️ Detaillierte historische Analysedaten")
+        
+        hist_sub_tabs = st.tabs([
+            "📅 Economic Calendar",
+            "🏦 Zinsdifferenz",
+            "📊 Analysten-Konsens",
+            "🧠 Sentiment-Score",
+            "⚠️ Risikoindikatoren",
+            "🧮 Korrelationsmatrix",
+            "📈 Langfristige Historie",
+            "📰 News"
+        ])
+        
+        with hist_sub_tabs[0]:
+            st.markdown("#### 📅 Historischer Wirtschaftskalender (±3 Tage)")
+            cal_df_h, _, is_live_cal_h = get_benzinga_historical(BENZINGA_KEY, target_date_str)
+            
+            if cal_df_h is not None and not cal_df_h.empty:
+                g8_countries = ["USA", "EMU", "DEU", "FRA", "ITA", "GBR", "JPN", "CAN", "AUS", "NZL", "CHE"]
+                cal_df_h = cal_df_h[cal_df_h["country"].isin(g8_countries)]
+                
+                if not cal_df_h.empty:
+                    def color_importance(val):
+                        if val == "High":
+                            return "color: #ef4444; font-weight: bold;"
+                        elif val == "Medium":
+                            return "color: #f97316; font-weight: bold;"
+                        return "color: #7d7d8a;"
+                        
+                    styled_df = cal_df_h.style.map(color_importance, subset=["importance"])
+                    st.dataframe(styled_df, use_container_width=True)
+                else:
+                    st.info("Keine G8-Events für diesen Zeitraum gefunden.")
+            else:
+                st.warning("Keine Kalenderdaten verfügbar.")
+                
+        with hist_sub_tabs[1]:
+            st.markdown("#### 🏦 Historischer Leitzins-Vergleich")
+            base_rate_h, base_src_h = get_historical_country_rate(base_c, target_date_str, FRED_KEY, hist_rates)
+            quote_rate_h, quote_src_h = get_historical_country_rate(quote_c, target_date_str, FRED_KEY, hist_rates)
+            diff_bps_h = int((base_rate_h - quote_rate_h) * 100)
+            
+            rate_data = [
+                {"Währung": base_c, "Zinssatz": f"{base_rate_h:.2f}%", "Quelle": base_src_h},
+                {"Währung": quote_c, "Zinssatz": f"{quote_rate_h:.2f}%", "Quelle": quote_src_h},
+            ]
+            st.table(pd.DataFrame(rate_data))
+            st.metric("Zinsdifferenz (Base - Quote)", f"{diff_bps_h:+.0f} bps")
+            
+        with hist_sub_tabs[2]:
+            st.markdown("#### 📊 Historischer Analysten-Konsens (Finnhub)")
+            consensus_h = generate_mock_finnhub_historical(hist_analysis_pair, target_date_str)
+            
+            c_col1, c_col2 = st.columns(2)
+            with c_col1:
+                labels = ["Buy/Strong Buy", "Hold", "Sell/Strong Sell"]
+                values = [consensus_h["buy"], consensus_h["hold"], consensus_h["sell"]]
+                fig_cons_h = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.4, marker=dict(colors=["#34d399", "#7d7d8a", "#ef4444"]))])
+                fig_cons_h.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a"),
+                    height=280,
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
+                st.plotly_chart(fig_cons_h, use_container_width=True)
+                
+            with c_col2:
+                st.markdown(f"**Durchschnittliches Kursziel:** `{consensus_h['targetMean']}`")
+                st.markdown(f"**Höchstes Kursziel:** `{consensus_h['targetHigh']}`")
+                st.markdown(f"**Tiefstes Kursziel:** `{consensus_h['targetLow']}`")
+                st.markdown("---")
+                st.markdown("**Letzte Analysten-Einstufungen:**")
+                st.table(pd.DataFrame(consensus_h["history"]))
+                
+        with hist_sub_tabs[3]:
+            st.markdown("#### 🧠 Historischer Sentiment-Score (StockData)")
+            sentiment_h = generate_mock_stockdata_historical(hist_analysis_pair, target_date_str)
+            
+            fig_gauge_h = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=sentiment_h,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Sentiment-Score (-10 bis +10)", 'font': {'color': "#7d7d8a", 'size': 14}},
+                gauge={
+                    'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
+                    'bar': {'color': "#e2b13c"},
+                    'bgcolor': "#14161d",
+                    'borderwidth': 1,
+                    'bordercolor': "#1f2026",
+                    'steps': [
+                        {'range': [-10, -3], 'color': 'rgba(239, 68, 68, 0.15)'},
+                        {'range': [-3, 3], 'color': 'rgba(125, 125, 138, 0.15)'},
+                        {'range': [3, 10], 'color': 'rgba(52, 211, 153, 0.15)'}
+                    ]
+                }
+            ))
+            fig_gauge_h.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a"),
+                height=250,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_gauge_h, use_container_width=True)
+            
+        with hist_sub_tabs[4]:
+            st.markdown("#### ⚠️ Historische Risikokennzahlen")
+            base_iso = CURRENCIES.get(base_c, {}).get("wb_code", base_c)
+            quote_iso = CURRENCIES.get(quote_c, {}).get("wb_code", quote_c)
+            
+            base_debt_h, base_debt_dt, _ = get_worldbank_data_historical(base_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+            quote_debt_h, quote_debt_dt, _ = get_worldbank_data_historical(quote_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+            
+            base_cli_h = get_historical_oecd_cli(base_c, target_date_str)
+            quote_cli_h = get_historical_oecd_cli(quote_c, target_date_str)
+            
+            debt_col1, debt_col2 = st.columns(2)
+            with debt_col1:
+                st.markdown(f"##### 🏛️ Staatsverschuldung (% BIP)")
+                b_debt_str = f"{base_debt_h:.1f}%" if base_debt_h is not None else "Daten nicht verfügbar"
+                q_debt_str = f"{quote_debt_h:.1f}%" if quote_debt_h is not None else "Daten nicht verfügbar"
+                st.markdown(f"- **{base_c}:** `{b_debt_str}` (Jahr: {base_debt_dt.strftime('%Y') if base_debt_dt else 'N/A'})")
+                st.markdown(f"- **{quote_c}:** `{q_debt_str}` (Jahr: {quote_debt_dt.strftime('%Y') if quote_debt_dt else 'N/A'})")
+                
+            with debt_col2:
+                st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
+                b_cli_str = f"{base_cli_h:.2f}" if base_cli_h is not None else "Daten nicht verfügbar"
+                q_cli_str = f"{quote_cli_h:.2f}" if quote_cli_h is not None else "Daten nicht verfügbar"
+                st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {'>100 (Wachstum)' if base_cli_h and base_cli_h > 100.0 else '<100' if base_cli_h else 'N/A'})")
+                st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {'>100 (Wachstum)' if quote_cli_h and quote_cli_h > 100.0 else '<100' if quote_cli_h else 'N/A'})")
+                
+        with hist_sub_tabs[5]:
+            st.markdown("#### 🧮 30-Tage Historische Pearson-Korrelation")
+            corr_df_h, is_live_corr_h = get_historical_correlation_matrix(target_date_str)
+            
+            fig_heatmap_h = go.Figure(data=go.Heatmap(
+                z=corr_df_h.values,
+                x=corr_df_h.columns,
+                y=corr_df_h.index,
+                colorscale="RdBu",
+                zmin=-1.0, zmax=1.0,
+                text=np.round(corr_df_h.values, 2),
+                texttemplate="%{text}",
+                showscale=True
+            ))
+            fig_heatmap_h.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a", size=9),
+                height=380,
+                margin=dict(l=10, r=10, t=10, b=10)
+            )
+            st.plotly_chart(fig_heatmap_h, use_container_width=True)
+            st.caption(f"Quelle: {'Reale daily rates' if is_live_corr_h else 'Mock-Korrelation (Fallback)'}")
+            
+        with hist_sub_tabs[6]:
+            st.markdown("#### 📈 Kursverlauf bis zu diesem Datum")
+            df_hist_all, _, _ = get_fcs_history_data(hist_analysis_pair, FCS_KEY)
+            
+            if df_hist_all is not None and not df_hist_all.empty:
+                target_dt_limit = pd.to_datetime(target_date_str)
+                df_hist_h = df_hist_all[df_hist_all["date"] <= target_dt_limit]
+                
+                if not df_hist_h.empty:
+                    fig_hist_h = go.Figure()
+                    fig_hist_h.add_trace(go.Scatter(
+                        x=df_hist_h["date"], y=df_hist_h["close"],
+                        line=dict(color="#e2b13c", width=2),
+                        name="Schlusskurs"
+                    ))
+                    fig_hist_h.update_layout(
+                        xaxis_title="Datum",
+                        yaxis_title="Kurs",
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color="#7d7d8a", size=10),
+                        height=350,
+                        margin=dict(l=10, r=10, t=10, b=10)
+                    )
+                    st.plotly_chart(fig_hist_h, use_container_width=True)
+                else:
+                    st.warning("Keine Kursdaten vor diesem Datum gefunden.")
+            else:
+                st.warning("Keine Kursverlaufsdaten verfügbar.")
+                
+        with hist_sub_tabs[7]:
+            st.markdown("#### 📰 Historische Nachrichten (±3 Tage)")
+            news_h = generate_mock_news_historical(hist_analysis_pair, target_date_str)
+            render_articles_grid(news_h)
+            
+        st.markdown("---")
+        st.subheader("📝 Journal & Trade-Entscheidung")
+        st.caption("Dokumentiere deine historische Analyse und vergleiche deine Entscheidung später mit den realen Marktbewegungen.")
+        
+        with st.form("backtest_decision_form"):
+            decision_type = st.radio(
+                "Entscheidung für diesen Tag:",
+                options=["❌ Trade verwerfen", "✅ Trade setzen", "💡 Wäre ein Trade gewesen"],
+                horizontal=True
+            )
+            notes_h = st.text_area("Notizen zur Analyse (Welche Indikatoren waren ausschlaggebend?):", height=100)
+            save_decision_btn = st.form_submit_button("💾 Entscheidung speichern")
+            
+            if save_decision_btn:
+                new_decision = {
+                    "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                    "target_date": target_date_str,
+                    "pair": hist_analysis_pair,
+                    "signal_value": round(signal_value_h, 2),
+                    "signal_badge": badge_h,
+                    "decision": decision_type,
+                    "notes": notes_h
+                }
+                all_decisions = save_backtest_decision(new_decision)
+                st.success("Handelsentscheidung erfolgreich in 'backtest_decisions.json' gespeichert!")
+                
+        past_decisions = load_backtest_decisions()
+        if past_decisions:
+            st.markdown("##### 📜 Bisherige Backtest-Entscheidungen")
+            df_dec = pd.DataFrame(past_decisions)
+            df_dec_renamed = df_dec.rename(columns={
+                "timestamp": "Speicherzeit",
+                "target_date": "Analysedatum",
+                "pair": "Paar",
+                "signal_value": "Signalwert",
+                "signal_badge": "Signal",
+                "decision": "Entscheidung",
+                "notes": "Notizen"
+            })
+            st.dataframe(df_dec_renamed.sort_values("Speicherzeit", ascending=False), use_container_width=True)
 
 
 # ----------------- 7. FALLBACK BOTTOM BAR (Leitdaten) -----------------
