@@ -1187,7 +1187,11 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
 def get_ecb_rate_historical(target_date):
     try:
         url = "https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.DFR.LEV?format=jsondata"
-        r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=8)
         r.raise_for_status()
         res = r.json()
         series = res["dataSets"][0]["series"]
@@ -1218,7 +1222,10 @@ def get_ecb_rate_historical(target_date):
 def get_snb_rate_historical(target_date):
     try:
         url = "https://data.snb.ch/api/cube/snboffzisa/data/csv/en"
-        r = requests.get(url, timeout=8)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=8)
         r.raise_for_status()
         lines = r.text.split("\n")
         data_lines = []
@@ -1227,7 +1234,7 @@ def get_snb_rate_historical(target_date):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith('"Date";'):
+            if line.lower().startswith('"date";') or line.lower().startswith('date;'):
                 start_reading = True
             if start_reading:
                 data_lines.append(line)
@@ -1511,6 +1518,28 @@ def get_historical_correlation_matrix(target_date):
     return generate_mock_fcs_correlation(), False
 
 HISTORICAL_RATES = {
+    "USD": {
+        "2015-01-01": 0.25, "2015-12-17": 0.50, "2016-12-15": 0.75, "2017-03-16": 1.00,
+        "2017-06-15": 1.25, "2017-12-14": 1.50, "2018-03-22": 1.75, "2018-06-14": 2.00,
+        "2018-09-27": 2.25, "2018-12-20": 2.50, "2019-08-01": 2.25, "2019-09-19": 2.00,
+        "2019-10-31": 1.75, "2020-03-03": 1.25, "2020-03-16": 0.25, "2022-03-17": 0.50,
+        "2022-05-05": 1.00, "2022-06-16": 1.75, "2022-07-28": 2.50, "2022-09-22": 3.25,
+        "2022-11-03": 4.00, "2022-12-15": 4.50, "2023-02-02": 4.75, "2023-03-23": 5.00,
+        "2023-05-04": 5.25, "2023-07-27": 5.50, "2024-09-18": 5.00, "2024-11-07": 4.75,
+        "2024-12-18": 4.50
+    },
+    "EUR": {
+        "2015-01-01": -0.20, "2015-12-09": -0.30, "2016-03-16": -0.40, "2019-09-18": -0.50,
+        "2022-07-27": 0.00, "2022-09-14": 0.75, "2022-11-02": 1.50, "2022-12-21": 2.00,
+        "2023-02-08": 2.50, "2023-03-22": 3.00, "2023-05-10": 3.25, "2023-06-21": 3.50,
+        "2023-08-02": 3.75, "2023-09-20": 4.00, "2024-06-12": 3.75, "2024-09-18": 3.50,
+        "2024-10-23": 3.25, "2024-12-18": 3.00
+    },
+    "CHF": {
+        "2015-01-01": -0.75, "2022-06-16": -0.25, "2022-09-22": 0.50, "2022-12-15": 1.00,
+        "2023-03-23": 1.50, "2023-06-22": 1.75, "2024-03-21": 1.50, "2024-06-20": 1.25,
+        "2024-09-26": 1.00, "2024-12-12": 0.75
+    },
     "GBP": {
         "2015-01-01": 0.50, "2016-08-04": 0.25, "2017-11-02": 0.50, "2018-08-02": 0.75,
         "2020-03-11": 0.25, "2020-03-19": 0.10, "2021-12-16": 0.25, "2022-02-03": 0.50,
@@ -1549,32 +1578,21 @@ HISTORICAL_RATES = {
     }
 }
 
-def get_country_rate_historical(country_code, target_date):
-    if country_code == "USA":
-        val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
-        if val is not None:
-            return val, "FRED (FEDFUNDS)"
-        return 5.25, "FRED (Fallback)"
-        
-    elif country_code == "EMU":
-        val, _ = get_ecb_rate_historical(target_date)
-        if val is not None:
-            return val, "ECB Portal"
-        return 2.25, "ECB (Fallback)"
-        
-    elif country_code == "CHE":
-        val, _ = get_snb_rate_historical(target_date)
-        if val is not None:
-            return val, "SNB Portal"
-        return 0.00, "SNB (Fallback)"
-        
-    map_code = {"GBR": "GBP", "JPN": "JPY", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD", "GBP": "GBP", "JPY": "JPY", "AUD": "AUD", "CAD": "CAD", "NZD": "NZD"}
+def get_rate_from_historical_table(country_code, target_date):
+    map_code = {
+        "USA": "USD", "USD": "USD",
+        "EMU": "EUR", "EUR": "EUR",
+        "CHE": "CHF", "CHF": "CHF",
+        "GBR": "GBP", "GBP": "GBP",
+        "JPN": "JPY", "JPY": "JPY",
+        "AUS": "AUD", "AUD": "AUD",
+        "CAN": "CAD", "CAD": "CAD",
+        "NZL": "NZD", "NZD": "NZD"
+    }
     curr = map_code.get(country_code, country_code)
-    
     table = HISTORICAL_RATES.get(curr, {})
     if not table:
-        return 2.0, "Historische Zinstabelle (Fallback)"
-        
+        return None
     target_dt = pd.to_datetime(target_date)
     valid_dates = []
     for d_str, v in table.items():
@@ -1584,13 +1602,44 @@ def get_country_rate_historical(country_code, target_date):
             
     if valid_dates:
         valid_dates.sort(key=lambda x: x[0])
-        val = valid_dates[-1][1]
-        return val, "Historische Zinstabelle"
+        return valid_dates[-1][1]
         
-    # Fallback to the earliest available rate
     sorted_all = sorted([(pd.to_datetime(k), v) for k, v in table.items()], key=lambda x: x[0])
-    val = sorted_all[0][1]
-    return val, "Historische Zinstabelle (Frühester Wert)"
+    return sorted_all[0][1]
+
+def get_country_rate_historical(country_code, target_date):
+    if country_code in ["USA", "USD"]:
+        val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
+        if val is not None:
+            return val, "FRED (FEDFUNDS)"
+        val_table = get_rate_from_historical_table("USD", target_date)
+        if val_table is not None:
+            return val_table, "Historische Zinstabelle"
+        return 5.25, "FRED (Fallback)"
+        
+    elif country_code in ["EMU", "EUR"]:
+        val, _ = get_ecb_rate_historical(target_date)
+        if val is not None:
+            return val, "ECB Portal"
+        val_table = get_rate_from_historical_table("EUR", target_date)
+        if val_table is not None:
+            return val_table, "Historische Zinstabelle"
+        return 2.25, "ECB (Fallback)"
+        
+    elif country_code in ["CHE", "CHF"]:
+        val, _ = get_snb_rate_historical(target_date)
+        if val is not None:
+            return val, "SNB Portal"
+        val_table = get_rate_from_historical_table("CHF", target_date)
+        if val_table is not None:
+            return val_table, "Historische Zinstabelle"
+        return 0.00, "SNB (Fallback)"
+        
+    val_table = get_rate_from_historical_table(country_code, target_date)
+    if val_table is not None:
+        return val_table, "Historische Zinstabelle"
+        
+    return 2.0, "Historische Zinstabelle (Fallback)"
 
 def compute_currency_score_historical(curr, target_date):
     fred_key = FRED_KEY
