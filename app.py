@@ -3553,12 +3553,19 @@ with tab14:
     st.header("📊 Backtest – Historische Daten")
     st.caption("Analysiere fundamentale Marktdaten für jeden beliebigen Tag in der Vergangenheit, um Handelsentscheidungen im historischen Kontext zu evaluieren.")
     
-    b_col1, b_col2 = st.columns(2)
+    b_col1, b_col2, b_col3 = st.columns(3)
+    g8_list = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
     with b_col1:
-        major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
-        hist_analysis_pair = st.selectbox("Währungspaar wählen", options=major_pairs, index=0, key="hist_analysis_pair_select")
+        hist_base = st.selectbox("Basiswährung (Base)", options=g8_list, index=0, key="hist_base_select")
     with b_col2:
+        hist_quote = st.selectbox("Quote-Währung (Quote)", options=g8_list, index=1, key="hist_quote_select")
+    with b_col3:
         hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select")
+
+    hist_analysis_pair = f"{hist_base}/{hist_quote}"
+    
+    if hist_base == hist_quote:
+        st.warning("⚠️ Basis- und Quote-Währung sind identisch.")
 
     fetch_button = st.button("🔍 Daten abrufen", key="hist_analysis_fetch_btn")
     
@@ -3566,7 +3573,8 @@ with tab14:
         st.session_state["hist_analysis_active"] = True
         
         target_date_str = hist_analysis_date.strftime("%Y-%m-%d")
-        base_c, quote_c = hist_analysis_pair.split("/")
+        base_c = hist_base
+        quote_c = hist_quote
         
         st.markdown("---")
         st.subheader(f"📊 Analyseergebnisse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
