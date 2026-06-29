@@ -1510,18 +1510,46 @@ def get_historical_correlation_matrix(target_date):
         pass
     return generate_mock_fcs_correlation(), False
 
-def get_country_rate_historical(country_code, target_date):
-    # Retrieve G8 manual rates overrides from session state or config
-    manual_rates = {
-        "GBR": st.session_state.get("hist_rate_GBP", st.session_state.get("manual_rate_GBP", 5.25)),
-        "JPN": st.session_state.get("hist_rate_JPY", st.session_state.get("manual_rate_JPY", 0.10)),
-        "AUD": st.session_state.get("hist_rate_AUD", st.session_state.get("manual_rate_AUD", 4.35)),
-        "CAD": st.session_state.get("hist_rate_CAD", st.session_state.get("manual_rate_CAD", 5.00)),
-        "NZD": st.session_state.get("hist_rate_NZD", st.session_state.get("manual_rate_NZD", 5.50))
+HISTORICAL_RATES = {
+    "GBP": {
+        "2015-01-01": 0.50, "2016-08-04": 0.25, "2017-11-02": 0.50, "2018-08-02": 0.75,
+        "2020-03-11": 0.25, "2020-03-19": 0.10, "2021-12-16": 0.25, "2022-02-03": 0.50,
+        "2022-03-17": 0.75, "2022-05-05": 1.00, "2022-06-16": 1.25, "2022-08-04": 1.75,
+        "2022-09-22": 2.25, "2022-11-03": 3.00, "2022-12-15": 3.50, "2023-02-02": 4.00,
+        "2023-03-23": 4.25, "2023-05-11": 4.50, "2023-06-22": 5.00, "2023-08-03": 5.25,
+        "2024-08-01": 5.00, "2024-11-07": 4.75
+    },
+    "JPY": {
+        "2015-01-01": 0.10, "2016-01-29": -0.10, "2024-03-19": 0.10, "2024-07-31": 0.25
+    },
+    "AUD": {
+        "2015-01-01": 2.50, "2015-02-03": 2.25, "2015-05-05": 2.00, "2016-05-03": 1.75,
+        "2016-08-02": 1.50, "2019-06-04": 1.25, "2019-07-02": 1.00, "2019-10-01": 0.75,
+        "2020-03-03": 0.50, "2020-03-19": 0.25, "2020-11-03": 0.10, "2022-05-03": 0.35,
+        "2022-06-07": 0.85, "2022-07-05": 1.35, "2022-08-02": 1.85, "2022-09-06": 2.35,
+        "2022-10-04": 2.60, "2022-11-01": 2.85, "2022-12-06": 3.10, "2023-02-07": 3.35,
+        "2023-03-07": 3.60, "2023-05-02": 3.85, "2023-06-06": 4.10, "2023-11-07": 4.35
+    },
+    "CAD": {
+        "2015-01-01": 1.00, "2015-01-21": 0.75, "2015-07-15": 0.50, "2017-07-12": 0.75,
+        "2017-09-06": 1.00, "2018-01-17": 1.25, "2018-07-11": 1.50, "2018-10-24": 1.75,
+        "2020-03-04": 1.25, "2020-03-13": 0.75, "2020-03-27": 0.25, "2022-03-02": 0.50,
+        "2022-04-13": 1.00, "2022-06-01": 1.50, "2022-07-13": 2.50, "2022-09-07": 3.25,
+        "2022-10-26": 3.75, "2022-12-07": 4.25, "2023-01-25": 4.50, "2023-06-07": 4.75,
+        "2023-07-12": 5.00, "2024-06-05": 4.75, "2024-07-24": 4.50, "2024-09-04": 4.25,
+        "2024-10-23": 3.75, "2024-12-11": 3.25
+    },
+    "NZD": {
+        "2015-01-01": 3.50, "2015-06-11": 3.25, "2015-07-23": 3.00, "2015-09-10": 2.75,
+        "2015-12-10": 2.50, "2016-03-10": 2.25, "2016-11-10": 1.75, "2019-05-08": 1.50,
+        "2019-08-07": 1.00, "2020-03-16": 0.25, "2021-10-06": 0.50, "2021-11-24": 0.75,
+        "2022-02-23": 1.00, "2022-04-13": 1.50, "2022-05-25": 2.00, "2022-07-13": 2.50,
+        "2022-08-17": 3.00, "2022-10-05": 3.50, "2022-11-23": 4.25, "2023-02-22": 4.75,
+        "2023-04-05": 5.25, "2023-05-24": 5.50, "2024-10-09": 4.75, "2024-11-27": 4.25
     }
-    
-    fallback_rates = {"GBR": 5.25, "JPN": 0.10, "AUS": 4.35, "CAD": 5.00, "NZD": 5.50}
-    
+}
+
+def get_country_rate_historical(country_code, target_date):
     if country_code == "USA":
         val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
         if val is not None:
@@ -1529,27 +1557,40 @@ def get_country_rate_historical(country_code, target_date):
         return 5.25, "FRED (Fallback)"
         
     elif country_code == "EMU":
-        if "hist_rate_EUR" in st.session_state:
-            return st.session_state.hist_rate_EUR, "Manuell (EUR Override)"
         val, _ = get_ecb_rate_historical(target_date)
         if val is not None:
             return val, "ECB Portal"
         return 2.25, "ECB (Fallback)"
         
     elif country_code == "CHE":
-        if "hist_rate_CHF" in st.session_state:
-            return st.session_state.hist_rate_CHF, "Manuell (CHF Override)"
         val, _ = get_snb_rate_historical(target_date)
         if val is not None:
             return val, "SNB Portal"
-        val_manual = st.session_state.get("manual_rate_CHF", 0.00)
-        return val_manual, "SNB (Fallback)"
+        return 0.00, "SNB (Fallback)"
         
-    map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
-    key = map_code.get(country_code, country_code)
+    map_code = {"GBR": "GBP", "JPN": "JPY", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD", "GBP": "GBP", "JPY": "JPY", "AUD": "AUD", "CAD": "CAD", "NZD": "NZD"}
+    curr = map_code.get(country_code, country_code)
     
-    val = manual_rates.get(key, fallback_rates.get(country_code, 2.0))
-    return val, "Zins-Kontrollzentrum (Manuell)"
+    table = HISTORICAL_RATES.get(curr, {})
+    if not table:
+        return 2.0, "Historische Zinstabelle (Fallback)"
+        
+    target_dt = pd.to_datetime(target_date)
+    valid_dates = []
+    for d_str, v in table.items():
+        d_dt = pd.to_datetime(d_str)
+        if d_dt <= target_dt:
+            valid_dates.append((d_dt, v))
+            
+    if valid_dates:
+        valid_dates.sort(key=lambda x: x[0])
+        val = valid_dates[-1][1]
+        return val, "Historische Zinstabelle"
+        
+    # Fallback to the earliest available rate
+    sorted_all = sorted([(pd.to_datetime(k), v) for k, v in table.items()], key=lambda x: x[0])
+    val = sorted_all[0][1]
+    return val, "Historische Zinstabelle (Frühester Wert)"
 
 def compute_currency_score_historical(curr, target_date):
     fred_key = FRED_KEY
@@ -3512,28 +3553,12 @@ with tab14:
     st.header("📊 Backtest – Historische Daten")
     st.caption("Analysiere fundamentale Marktdaten für jeden beliebigen Tag in der Vergangenheit, um Handelsentscheidungen im historischen Kontext zu evaluieren.")
     
-    b_col1, b_col2 = st.columns([1, 1])
+    b_col1, b_col2 = st.columns(2)
     with b_col1:
         major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
         hist_analysis_pair = st.selectbox("Währungspaar wählen", options=major_pairs, index=0, key="hist_analysis_pair_select")
-        hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select")
-        
     with b_col2:
-        st.markdown("##### ⚙️ Manuelle Leitzins-Vorgaben für diesen Tag")
-        st.caption("Falls Daten von Zentralbanken nicht automatisch geladen werden können oder überschrieben werden sollen:")
-        
-        hist_rates = {}
-        r_cols = st.columns(3)
-        with r_cols[0]:
-            hist_rates["GBP"] = st.number_input("GBP Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_GBP", 5.25), step=0.05, key="hist_rate_GBP")
-            hist_rates["JPY"] = st.number_input("JPY Zins %", min_value=-5.0, max_value=15.0, value=st.session_state.get("manual_rate_JPY", 0.10), step=0.05, key="hist_rate_JPY")
-        with r_cols[1]:
-            hist_rates["AUD"] = st.number_input("AUD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_AUD", 4.35), step=0.05, key="hist_rate_AUD")
-            hist_rates["CAD"] = st.number_input("CAD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_CAD", 5.00), step=0.05, key="hist_rate_CAD")
-        with r_cols[2]:
-            hist_rates["NZD"] = st.number_input("NZD Zins %", min_value=0.0, max_value=15.0, value=st.session_state.get("manual_rate_NZD", 5.50), step=0.05, key="hist_rate_NZD")
-            hist_rates["CHF"] = st.number_input("CHF Zins % (Override)", min_value=-5.0, max_value=15.0, value=st.session_state.get("manual_rate_CHF", 0.00), step=0.05, key="hist_rate_CHF")
-            hist_rates["EUR"] = st.number_input("EUR Zins % (Override)", min_value=0.0, max_value=15.0, value=2.25, step=0.05, key="hist_rate_EUR")
+        hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select")
 
     fetch_button = st.button("🔍 Daten abrufen", key="hist_analysis_fetch_btn")
     
