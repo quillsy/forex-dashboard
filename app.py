@@ -205,6 +205,7 @@ FCS_KEY = os.getenv("FCS_API_KEY")
 STOCKDATA_KEY = os.getenv("STOCKDATA_API_KEY")
 TIINGO_KEY = os.getenv("TIINGO_API_KEY")
 BLS_KEY = os.getenv("BLS_API_KEY")
+APIFREAKS_KEY = os.getenv("APIFREAKS_API_KEY")
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
@@ -610,6 +611,26 @@ def get_tiingo_prices(ticker, api_key):
             if data and isinstance(data, list):
                 # Ascending order: data[-1] is the most recent
                 return data[-1]
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=3600)
+def get_apifreaks_prices(api_key):
+    if not api_key:
+        return None
+    url = "https://api.apifreaks.com/v1.0/commodity/rates/latest"
+    params = {
+        "apiKey": api_key,
+        "symbols": "XAU,XAG,WTIOIL-SPOT,BRENTOIL-SPOT,VIX",
+        "updates": "1m"
+    }
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data and data.get("success") and "rates" in data:
+                return data
     except Exception:
         pass
     return None
@@ -1721,15 +1742,20 @@ def save_backtest_decision(decision):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_roro_index(fred_key, tiingo_key):
+def get_roro_index(fred_key, tiingo_key, apifreaks_key=None):
     debug_logs = []
     
-    # 1. Check FRED API Key presence
+    # 1. Check API Key presence
     if fred_key:
         debug_logs.append("FRED: API-Key in .env vorhanden.")
     else:
         debug_logs.append("FRED: API-Key fehlt in .env.")
         
+    if apifreaks_key:
+        debug_logs.append("APIFreaks: API-Key in .env vorhanden.")
+    else:
+        debug_logs.append("APIFreaks: API-Key fehlt in .env.")
+
     def query_fred(series_id, key):
         url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_start=2015-01-01"
         return requests.get(url, timeout=8)
@@ -1777,9 +1803,43 @@ def get_roro_index(fred_key, tiingo_key):
         except Exception as e:
             debug_logs.append(f"FRED (KCRORO): Netzwerkfehler: {str(e)}")
 
-    # 4. Swap: Option A: VIX via Tiingo (VIXY) immediately after FRED KCRORO
+    # 4. Swap: Option A1: VIX via APIFreaks immediately after FRED KCRORO
+    if apifreaks_key:
+        debug_logs.append("Weiche auf Option A1 aus: APIFreaks VIX Index...")
+        try:
+            url = "https://api.apifreaks.com/v1.0/commodity/rates/latest"
+            params = {
+                "apiKey": apifreaks_key,
+                "symbols": "VIX",
+                "updates": "1m"
+            }
+            r = requests.get(url, params=params, timeout=10)
+            debug_logs.append(f"APIFreaks (VIX) Abfrage: HTTP Status {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                if data and data.get("success") and "rates" in data:
+                    rates = data["rates"]
+                    vix_val = rates.get("VIX")
+                    if vix_val is not None:
+                        val = float(vix_val)
+                        dt_str = data.get("date", "")
+                        dt = pd.to_datetime(dt_str) if dt_str else datetime.now()
+                        debug_logs.append(f"APIFreaks (VIX): Erfolgreich geladen (Wert: {val:.2f}).")
+                        return val, dt, "APIFreaks VIX Volatilitätsindex", debug_logs
+                    else:
+                        debug_logs.append("APIFreaks (VIX): VIX-Wert nicht in Antwort gefunden.")
+                else:
+                    debug_logs.append("APIFreaks (VIX): Antwort war leer oder ungültig.")
+            else:
+                debug_logs.append(f"APIFreaks (VIX) fehlgeschlagen: HTTP {r.status_code}. Antwort: {r.text[:150]}")
+        except Exception as e:
+            debug_logs.append(f"APIFreaks (VIX): Netzwerkfehler: {str(e)}")
+    else:
+        debug_logs.append("APIFreaks: API-Key (APIFREAKS_API_KEY) fehlt in .env. Option A1 (VIX) übersprungen.")
+
+    # 5. Swap: Option A2: VIX via Tiingo (VIXY)
     if tiingo_key:
-        debug_logs.append("Weiche auf Option A aus: Tiingo VIXY Index...")
+        debug_logs.append("Weiche auf Option A2 aus: Tiingo VIXY Index...")
         try:
             url = "https://api.tiingo.com/tiingo/daily/VIXY/prices"
             headers = {"Authorization": f"Token {tiingo_key}"}
@@ -1801,7 +1861,7 @@ def get_roro_index(fred_key, tiingo_key):
         except Exception as e:
             debug_logs.append(f"Tiingo (VIXY): Netzwerkfehler: {str(e)}")
     else:
-        debug_logs.append("Tiingo: API-Key (TIINGO_API_KEY) fehlt in .env. Option A (VIX) übersprungen.")
+        debug_logs.append("Tiingo: API-Key (TIINGO_API_KEY) fehlt in .env. Option A2 (VIX) übersprungen.")
 
     # 5. Option B: 10Y-2Y Spread over FRED
     if fred_works:
@@ -3136,17 +3196,52 @@ with tab7:
 # ----------------- TAB 8: ROHSTOFFE & MÄRKTE -----------------
 with tab8:
     st.header("🛍️ Rohstoffe & Märkte")
-    st.caption("Aktuelle Rohstoffpreise und Marktvolatilität (VIX) geladen über Tiingo.")
+    st.caption("Aktuelle Rohstoffpreise und Volatilität (VIX) geladen über APIFreaks (primär) oder Tiingo (Fallback).")
     
-    if not TIINGO_KEY:
-        st.warning("Tiingo API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie TIINGO_API_KEY.")
+    if not APIFREAKS_KEY and not TIINGO_KEY:
+        st.warning("Bitte konfigurieren Sie APIFREAKS_API_KEY oder TIINGO_API_KEY in der .env-Datei.")
     else:
-        gld_data = get_tiingo_prices("GLD", TIINGO_KEY)
-        slv_data = get_tiingo_prices("SLV", TIINGO_KEY)
-        uso_data = get_tiingo_prices("USO", TIINGO_KEY)
-        bno_data = get_tiingo_prices("BNO", TIINGO_KEY)
-        vix_data = get_tiingo_prices("VIXY", TIINGO_KEY)
+        # 1. Fetch APIFreaks data
+        apifreaks_data = get_apifreaks_prices(APIFREAKS_KEY)
         
+        # 2. Extract or fall back for each commodity
+        def resolve_commodity(ticker_apifreaks, ticker_tiingo):
+            if apifreaks_data:
+                rates = apifreaks_data.get("rates", {})
+                rate_val = rates.get(ticker_apifreaks)
+                if rate_val is not None:
+                    try:
+                        val = float(rate_val)
+                        return {
+                            "close": val,
+                            "high": val,
+                            "low": val,
+                            "date": apifreaks_data.get("date", "") or datetime.now().strftime("%Y-%m-%d"),
+                            "source": "APIFreaks",
+                            "is_etf": False
+                        }
+                    except (ValueError, TypeError):
+                        pass
+            
+            if TIINGO_KEY:
+                tiingo_res = get_tiingo_prices(ticker_tiingo, TIINGO_KEY)
+                if tiingo_res:
+                    return {
+                        "close": tiingo_res.get("close"),
+                        "high": tiingo_res.get("high"),
+                        "low": tiingo_res.get("low"),
+                        "date": tiingo_res.get("date", ""),
+                        "source": "Tiingo",
+                        "is_etf": True
+                    }
+            return None
+
+        gld_data = resolve_commodity("XAU", "GLD")
+        slv_data = resolve_commodity("XAG", "SLV")
+        uso_data = resolve_commodity("WTIOIL-SPOT", "USO")
+        bno_data = resolve_commodity("BRENTOIL-SPOT", "BNO")
+        vix_data = resolve_commodity("VIX", "VIXY")
+
         col1, col2, col3, col4, col5 = st.columns(5)
         
         def display_commodity_card(col, name, data, flag):
@@ -3156,15 +3251,23 @@ with tab8:
                     high = data.get("high")
                     low = data.get("low")
                     date_str = data.get("date", "")[:10]
+                    src = data.get("source", "Tiingo")
+                    suffix = " (ETF)" if data.get("is_etf", False) else " (Spot)"
+                    
+                    # Formatting values safely
+                    close_str = f"${close:.2f}" if close is not None else "Daten momentan nicht verfügbar"
+                    high_str = f"${high:.2f}" if high is not None else "N/A"
+                    low_str = f"${low:.2f}" if low is not None else "N/A"
+                    
                     st.markdown(f"""
                     <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                        <span class="metric-label">{flag} {name} (ETF)</span>
-                        <div class="metric-value">${close:.2f}</div>
+                        <span class="metric-label">{flag} {name}{suffix}</span>
+                        <div class="metric-value">{close_str}</div>
                         <div style="font-size:0.8rem; color:#7d7d8a; margin-top:5px;">
-                            High: ${high:.2f} | Low: ${low:.2f}<br>
+                            High: {high_str} | Low: {low_str}<br>
                             Datum: {date_str}
                         </div>
-                        <div class="source-tag">Quelle: Tiingo</div>
+                        <div class="source-tag">Quelle: {src}</div>
                     </div>
                     """, unsafe_allow_html=True)
                 else:
@@ -3172,7 +3275,7 @@ with tab8:
                     <div class="metric-card-custom" style="border-left: 4px solid #ef4444;">
                         <span class="metric-label">{flag} {name}</span>
                         <div class="metric-value" style="font-size: 0.95rem; color:#7d7d8a;">Daten momentan nicht verfügbar</div>
-                        <div class="source-tag">Quelle: Tiingo</div>
+                        <div class="source-tag">Quelle: APIFreaks / Tiingo</div>
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -3455,7 +3558,7 @@ with tab12:
     st.caption("Visualisierung des FRED Risk-On/Risk-Off Index (KCRORO) zur Einschätzung des globalen Markt-Risikos.")
     
     with st.spinner("Lade RORO-Index..."):
-        roro_val, roro_dt, active_ind, debug_logs = get_roro_index(FRED_KEY, TIINGO_KEY)
+        roro_val, roro_dt, active_ind, debug_logs = get_roro_index(FRED_KEY, TIINGO_KEY, APIFREAKS_KEY)
         
     with st.expander("🛠️ API-Verbindungsdetails & Debug-Logs", expanded=True):
         for log in debug_logs:
@@ -3472,7 +3575,7 @@ with tab12:
             is_risk_off = (roro_val > 0.0)
         elif active_ind == "FRED 10Y-2Y Spread (DGS10 - DGS2)":
             is_risk_off = (roro_val < 0.0)
-        elif active_ind == "Tiingo VIXY Volatilitätsindex":
+        elif "VIX" in active_ind:
             is_risk_off = (roro_val > 20.0)
         elif active_ind == "USD/JPY Proxy (Tagesänderung)":
             is_risk_off = (roro_val <= 0.0)
