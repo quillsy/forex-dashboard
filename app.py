@@ -206,6 +206,11 @@ STOCKDATA_KEY = os.getenv("STOCKDATA_API_KEY")
 TIINGO_KEY = os.getenv("TIINGO_API_KEY")
 BLS_KEY = os.getenv("BLS_API_KEY")
 APIFREAKS_KEY = os.getenv("APIFREAKS_API_KEY")
+if not APIFREAKS_KEY:
+    try:
+        APIFREAKS_KEY = st.secrets.get("APIFREAKS_API_KEY") or st.secrets.get("apifreaks_api_key")
+    except Exception:
+        pass
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
@@ -2539,10 +2544,21 @@ st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔑 API Key Status")
-st.sidebar.caption("Geladene Schlüssel aus der .env:")
+st.sidebar.caption("Geladene Schlüssel (Env / Secrets):")
 st.sidebar.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
 st.sidebar.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
 st.sidebar.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
+st.sidebar.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
+
+with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
+    st.markdown("""
+    Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
+    ```toml
+    APIFREAKS_API_KEY = "IhrKey"
+    FRED_API_KEY = "IhrKey"
+    # ...
+    ```
+    """)
 
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 with st.spinner("Initialisiere globale Marktdaten..."):
@@ -3199,8 +3215,10 @@ with tab8:
     st.caption("Aktuelle Rohstoffpreise und Volatilität (VIX) geladen über APIFreaks (primär) oder Tiingo (Fallback).")
     
     if not APIFREAKS_KEY and not TIINGO_KEY:
-        st.warning("Bitte konfigurieren Sie APIFREAKS_API_KEY oder TIINGO_API_KEY in der .env-Datei.")
+        st.warning("Bitte konfigurieren Sie APIFREAKS_API_KEY oder TIINGO_API_KEY in den Streamlit Secrets oder der .env-Datei.")
     else:
+        if not APIFREAKS_KEY:
+            st.warning("⚠️ **APIFreaks API-Key fehlt:** Fügen Sie `APIFREAKS_API_KEY` in den Streamlit Cloud Secrets hinzu, um Spot-Preise zu nutzen. Aktuell wird Tiingo (ETF-Preise) als Fallback genutzt.")
         # 1. Fetch APIFreaks data
         apifreaks_data = get_apifreaks_prices(APIFREAKS_KEY)
         
@@ -3556,6 +3574,21 @@ with tab11:
 with tab12:
     st.header("🛡️ Risk-On / Risk-Off Sentiment-Indikator")
     st.caption("Visualisierung des FRED Risk-On/Risk-Off Index (KCRORO) zur Einschätzung des globalen Markt-Risikos.")
+    
+    if not APIFREAKS_KEY:
+        st.warning("""
+        ⚠️ **APIFreaks API-Key fehlt:**
+        Für Echtzeit-Volatilitätsdaten (VIX) wird der APIFreaks-Key benötigt.
+        Tragen Sie den Key in Ihren **Streamlit Secrets** ein:
+        1. Gehen Sie im Streamlit Cloud Dashboard zu **Settings** -> **Secrets**.
+        2. Fügen Sie folgende Zeile hinzu:
+           ```toml
+           APIFREAKS_API_KEY = "Ihr_APIFreaks_Key"
+           ```
+        3. Klicken Sie auf **Save**.
+        
+        *Die App weicht aktuell automatisch auf Tiingo (VIXY) aus.*
+        """)
     
     with st.spinner("Lade RORO-Index..."):
         roro_val, roro_dt, active_ind, debug_logs = get_roro_index(FRED_KEY, TIINGO_KEY, APIFREAKS_KEY)
