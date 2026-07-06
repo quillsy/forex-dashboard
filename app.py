@@ -2824,152 +2824,93 @@ with tab2:
         pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
         
     if pmi_data:
-        # Precompute change averages and handle missing values
+        code_to_name = {
+            "USD": "🇺🇸 USA",
+            "EUR": "🇪🇺 Euro",
+            "GBP": "🇬🇧 UK",
+            "CHF": "🇨🇭 Schweiz",
+            "CAD": "🇨🇦 Kanada",
+            "AUD": "🇦🇺 Australien",
+            "NZD": "🇳🇿 Neuseeland",
+            "JPY": "🇯🇵 Japan"
+        }
+        
+        rows = []
         for code, data in pmi_data.items():
             m_val = data["m_last"]
             m_prev = data["m_prev"]
             s_val = data["s_last"]
             s_prev = data["s_prev"]
             
-            # calculate changes
             m_chg = m_val - m_prev if (m_val is not None and m_prev is not None) else None
             s_chg = s_val - s_prev if (s_val is not None and s_prev is not None) else None
             
+            # Manufacturing cell string
+            if m_val is not None:
+                m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
+                m_arrow = "▲" if (m_chg is not None and m_chg > 0) else "▼" if (m_chg is not None and m_chg < 0) else "▬"
+                m_str = f"{m_val:.1f} {m_arrow} {m_status}"
+            else:
+                m_str = "N/A"
+                
+            # Services cell string
+            if s_val is not None:
+                s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
+                s_arrow = "▲" if (s_chg is not None and s_chg > 0) else "▼" if (s_chg is not None and s_chg < 0) else "▬"
+                s_str = f"{s_val:.1f} {s_arrow} {s_status}"
+            else:
+                s_str = "N/A"
+                
+            # MoM Change
             changes = []
             if m_chg is not None:
                 changes.append(m_chg)
             if s_chg is not None:
                 changes.append(s_chg)
-            data["change"] = sum(changes) / len(changes) if changes else 0.0
-            
-            # calculate average for standard sorting
-            vals = []
-            if m_val is not None:
-                vals.append(m_val)
-            if s_val is not None:
-                vals.append(s_val)
-            data["avg"] = sum(vals) / len(vals) if vals else 0.0
-
-        # Sort option selector
-        col_sort, col_spacer = st.columns([1.5, 2.5])
-        with col_sort:
-            sort_option = st.selectbox(
-                "Tabelle sortieren nach:",
-                options=[
-                    "Manufacturing PMI (höchster zuerst)",
-                    "Manufacturing PMI (niedrigster zuerst)",
-                    "Services PMI (höchster zuerst)",
-                    "Services PMI (niedrigster zuerst)",
-                    "Veränderung zum Vormonat (größter Anstieg)",
-                    "Veränderung zum Vormonat (größter Rückgang)",
-                    "Land (A-Z)"
-                ],
-                index=0,
-                key="pmi_sort_select_new"
-            )
-
-        # Sort the G8 data
-        if sort_option == "Manufacturing PMI (höchster zuerst)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["m_last"] if x[1]["m_last"] is not None else -999, reverse=True)
-        elif sort_option == "Manufacturing PMI (niedrigster zuerst)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["m_last"] if x[1]["m_last"] is not None else 999)
-        elif sort_option == "Services PMI (höchster zuerst)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["s_last"] if x[1]["s_last"] is not None else -999, reverse=True)
-        elif sort_option == "Services PMI (niedrigster zuerst)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["s_last"] if x[1]["s_last"] is not None else 999)
-        elif sort_option == "Veränderung zum Vormonat (größter Anstieg)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["change"] if x[1]["change"] is not None else -999, reverse=True)
-        elif sort_option == "Veränderung zum Vormonat (größter Rückgang)":
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["change"] if x[1]["change"] is not None else 999)
-        else: # Land (A-Z)
-            sorted_pmi = sorted(pmi_data.items(), key=lambda x: CURRENCIES[x[0]]["country"])
-
-        # Render HTML Table
-        html_table = """
-        <div style="overflow-x:auto; margin-top:15px; border-radius:8px; border:1px solid #1f2026; background-color:#0d1117;">
-            <table style="width:100%; border-collapse: collapse; font-family: 'Inter', sans-serif; font-size: 0.9rem;">
-                <thead>
-                    <tr style="background-color:#161b22; border-bottom: 2px solid #1f2026; color:#8b949e;">
-                        <th style="padding:14px 16px; text-align:left; font-weight:600;">Land</th>
-                        <th style="padding:14px 16px; text-align:left; font-weight:600;">Manufacturing PMI</th>
-                        <th style="padding:14px 16px; text-align:left; font-weight:600;">Services PMI</th>
-                        <th style="padding:14px 16px; text-align:left; font-weight:600;">Veränderung zum Vormonat</th>
-                        <th style="padding:14px 16px; text-align:left; font-weight:600;">Letzte Aktualisierung</th>
-                    </tr>
-                </thead>
-                <tbody>
-        """
-        
-        for code, data in sorted_pmi:
-            flag = CURRENCIES[code]["flag"]
-            country_name = CURRENCIES[code]["country"]
-            
-            m_val = data["m_last"]
-            m_prev = data["m_prev"]
+                
+            if changes:
+                avg_chg = sum(changes) / len(changes)
+                c_arrow = "▲" if avg_chg > 0 else "▼" if avg_chg < 0 else "▬"
+                c_str = f"{c_arrow} {avg_chg:+.1f}"
+            else:
+                c_str = "N/A"
+                
+            # Reference date
             m_ref = data["m_ref"] or "N/A"
-            m_src = data["m_src"]
-            
-            s_val = data["s_last"]
-            s_prev = data["s_prev"]
             s_ref = data["s_ref"] or "N/A"
-            s_src = data["s_src"]
-            
-            m_chg = m_val - m_prev if (m_val is not None and m_prev is not None) else None
-            s_chg = s_val - s_prev if (s_val is not None and s_prev is not None) else None
-            
-            # Manufacturing Cell
-            if m_val is not None:
-                m_color = "#10b981" if m_val >= 50.0 else "#ef4444"
-                m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
-                m_arrow = ""
-                if m_chg is not None:
-                    m_arrow = f'<span style="color:{"#10b981" if m_chg > 0 else "#ef4444" if m_chg < 0 else "#8b949e"}; margin-left:4px;">{"▲" if m_chg > 0 else "▼" if m_chg < 0 else "▬"}</span>'
-                m_badge = f'<span style="background-color:{m_color}14; color:{m_color}; border:1px solid {m_color}33; padding:2px 6px; border-radius:4px; font-size:0.75rem; font-weight:700; text-transform:uppercase; margin-left:8px;">{m_status}</span>'
-                m_cell = f'<strong style="color:#f0f0f5; font-size:1rem;">{m_val:.1f}</strong>{m_arrow}{m_badge}'
-            else:
-                m_cell = '<span style="color:#8b949e;">N/A</span>'
-                
-            # Services Cell
-            if s_val is not None:
-                s_color = "#10b981" if s_val >= 50.0 else "#ef4444"
-                s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
-                s_arrow = ""
-                if s_chg is not None:
-                    s_arrow = f'<span style="color:{"#10b981" if s_chg > 0 else "#ef4444" if s_chg < 0 else "#8b949e"}; margin-left:4px;">{"▲" if s_chg > 0 else "▼" if s_chg < 0 else "▬"}</span>'
-                s_badge = f'<span style="background-color:{s_color}14; color:{s_color}; border:1px solid {s_color}33; padding:2px 6px; border-radius:4px; font-size:0.75rem; font-weight:700; text-transform:uppercase; margin-left:8px;">{s_status}</span>'
-                s_cell = f'<strong style="color:#f0f0f5; font-size:1rem;">{s_val:.1f}</strong>{s_arrow}{s_badge}'
-            else:
-                s_cell = '<span style="color:#8b949e;">N/A</span>'
-                
-            # Change Cell (Calculated as average of changes)
-            change = data["change"]
-            if (m_chg is not None) or (s_chg is not None):
-                c_color = "#10b981" if change > 0 else "#ef4444" if change < 0 else "#8b949e"
-                c_arrow = "▲" if change > 0 else "▼" if change < 0 else "▬"
-                c_sign = "+" if change > 0 else ""
-                change_cell = f'<span style="color:{c_color}; font-weight:700; font-family:\'Roboto Mono\', monospace;">{c_arrow} {c_sign}{change:+.1f}</span>'
-            else:
-                change_cell = '<span style="color:#8b949e;">N/A</span>'
-                
-            # Reference Date
             ref_str = m_ref if m_ref != "N/A" else s_ref
             
-            row_html = f"""
-            <tr style="border-bottom:1px solid #1f2026; background-color:#0d1117;" onmouseover="this.style.backgroundColor='#161b22'" onmouseout="this.style.backgroundColor='#0d1117'">
-                <td style="padding:14px 16px; font-weight:600; color:#f0f0f5; display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:1.3rem; vertical-align:middle;">{flag}</span>
-                    <span style="vertical-align:middle;">{country_name} ({code})</span>
-                </td>
-                <td style="padding:14px 16px;">{m_cell}</td>
-                <td style="padding:14px 16px;">{s_cell}</td>
-                <td style="padding:14px 16px;">{change_cell}</td>
-                <td style="padding:14px 16px; color:#8b949e; font-size:0.85rem;">{ref_str} <span style="font-size:0.7rem; color:#7d7d8a; margin-left:4px;">({m_src})</span></td>
-            </tr>
-            """
-            html_table += row_html
+            rows.append({
+                "Land": code_to_name.get(code, code),
+                "Manufacturing PMI": m_str,
+                "Services PMI": s_str,
+                "Veränderung zum Vormonat": c_str,
+                "Letzte Aktualisierung": ref_str,
+                "m_sort_val": m_val if m_val is not None else -999.0
+            })
             
-        html_table += "</tbody></table></div>"
-        st.markdown(html_table, unsafe_allow_html=True)
+        df_pmi = pd.DataFrame(rows)
+        
+        # Sort standardly by Manufacturing PMI (highest first)
+        df_pmi = df_pmi.sort_values(by="m_sort_val", ascending=False)
+        df_render = df_pmi.drop(columns=["m_sort_val"]).reset_index(drop=True)
+        
+        # Styling function for Pandas Styler
+        def apply_colors(val):
+            val_str = str(val)
+            if "Expansion" in val_str or "▲" in val_str:
+                return "color: #10b981; font-weight: bold;"
+            elif "Kontraktion" in val_str or "▼" in val_str:
+                return "color: #ef4444; font-weight: bold;"
+            return ""
+            
+        styled_df = df_render.style
+        try:
+            styled_df = styled_df.map(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+        except AttributeError:
+            styled_df = styled_df.applymap(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+            
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.info("Daten momentan nicht verfügbar")
 
