@@ -212,6 +212,14 @@ if not APIFREAKS_KEY:
     except Exception:
         pass
 
+EODHD_KEY = os.getenv("EODHD_API_KEY")
+if not EODHD_KEY:
+    try:
+        EODHD_KEY = st.secrets.get("EODHD_API_KEY") or st.secrets.get("eodhd_api_key")
+    except Exception:
+        pass
+
+
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
     "USD": {"name": "US Dollar", "flag": "🇺🇸", "country": "United States", "wb_code": "USA"},
@@ -237,6 +245,8 @@ def generate_mock_fred(series_id):
         values = np.linspace(17500.0, 22500.0, len(dates)) + np.random.normal(0, 80.0, len(dates))
     elif series_id == "UNRATE":
         values = np.clip(np.linspace(5.5, 3.8, len(dates)) + np.random.normal(0, 0.15, len(dates)), 3.0, 15.0)
+    elif series_id == "NAPM":
+        values = np.clip(50.0 + np.random.normal(0, 3.0, len(dates)), 35.0, 65.0)
     else:
         values = np.zeros(len(dates))
     return pd.DataFrame({"date": dates, "value": values})
@@ -706,6 +716,211 @@ def parse_bls_series(bls_data, series_id):
     except Exception:
         pass
     return pd.DataFrame()
+
+from html.parser import HTMLParser
+
+class TradingEconomicsParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+        self.current_row = []
+        self.current_cell_data = []
+        self.rows = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.in_table = True
+        elif tag == "tr" and self.in_table:
+            self.in_row = True
+            self.current_row = []
+        elif tag in ["td", "th"] and self.in_row:
+            self.in_cell = True
+            self.current_cell_data = []
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            self.in_table = False
+        elif tag == "tr" and self.in_row:
+            self.in_row = False
+            self.rows.append(self.current_row)
+        elif tag in ["td", "th"] and self.in_cell:
+            self.in_cell = False
+            cell_text = " ".join(self.current_cell_data).strip()
+            self.current_row.append(cell_text)
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.current_cell_data.append(data)
+
+@st.cache_data(ttl=3600)
+def parse_tradingeconomics_pmi(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            parser = TradingEconomicsParser()
+            parser.feed(r.text)
+            
+            g8_names = {
+                "United States": "USA",
+                "Euro Area": "EUR",
+                "United Kingdom": "GBP",
+                "Switzerland": "CHF",
+                "Canada": "CAD",
+                "Australia": "AUD",
+                "New Zealand": "NZD",
+                "Japan": "JPY"
+            }
+            
+            results = {}
+            for row in parser.rows:
+                if len(row) >= 4:
+                    country = row[0].strip()
+                    if country in g8_names:
+                        code = g8_names[country]
+                        try:
+                            last_val = float(row[1])
+                        except (ValueError, TypeError):
+                            last_val = None
+                        try:
+                            prev_val = float(row[2])
+                        except (ValueError, TypeError):
+                            prev_val = None
+                        ref_date = row[3].strip()
+                        results[code] = {
+                            "last": last_val,
+                            "previous": prev_val,
+                            "reference": ref_date
+                        }
+            return results
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=3600)
+def get_eodhd_pmi_fallback(country_code, indicator_keyword, api_key):
+    if not api_key:
+        return None
+    country_map = {
+        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
+        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
+    }
+    eodhd_country = country_map.get(country_code, country_code)
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    url = f"https://eodhd.com/api/economic-events"
+    params = {
+        "api_token": api_key,
+        "from": start_date,
+        "to": end_date,
+        "country": eodhd_country,
+        "limit": 300
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            events = r.json()
+            matched = []
+            for ev in events:
+                name = ev.get("name", "").upper()
+                if indicator_keyword.upper() in name:
+                    matched.append(ev)
+            if matched:
+                matched.sort(key=lambda x: x.get("date", ""), reverse=True)
+                latest = matched[0]
+                try:
+                    last_val = float(latest.get("actual"))
+                except (ValueError, TypeError):
+                    last_val = None
+                try:
+                    prev_val = float(latest.get("previous"))
+                except (ValueError, TypeError):
+                    prev_val = None
+                ref_date = latest.get("date", "")
+                return {
+                    "last": last_val,
+                    "previous": prev_val,
+                    "reference": ref_date
+                }
+    except Exception:
+        pass
+    return None
+
+def get_all_pmi_data(fred_key, eodhd_key):
+    te_m = parse_tradingeconomics_pmi("https://tradingeconomics.com/country-list/manufacturing-pmi")
+    te_s = parse_tradingeconomics_pmi("https://tradingeconomics.com/country-list/services-pmi")
+    
+    pmi_results = {}
+    
+    # USD
+    usa_m_last, usa_m_prev, usa_m_ref = None, None, None
+    usa_s_last, usa_s_prev, usa_s_ref = None, None, None
+    
+    if fred_key:
+        df_napm, _, is_live = get_fred_data("NAPM", fred_key)
+        if is_live and df_napm is not None and not df_napm.empty:
+            df_napm = df_napm.sort_values("date", ascending=False)
+            if len(df_napm) >= 1:
+                usa_m_last = float(df_napm.iloc[0]["value"])
+                usa_m_ref = df_napm.iloc[0]["date"].strftime("%b/%y")
+            if len(df_napm) >= 2:
+                usa_m_prev = float(df_napm.iloc[1]["value"])
+                
+    if usa_m_last is None and te_m and "USA" in te_m:
+        usa_m_last = te_m["USA"]["last"]
+        usa_m_prev = te_m["USA"]["previous"]
+        usa_m_ref = te_m["USA"]["reference"]
+        
+    if te_s and "USA" in te_s:
+        usa_s_last = te_s["USA"]["last"]
+        usa_s_prev = te_s["USA"]["previous"]
+        usa_s_ref = te_s["USA"]["reference"]
+        
+    pmi_results["USD"] = {
+        "m_last": usa_m_last, "m_prev": usa_m_prev, "m_ref": usa_m_ref, "m_src": "FRED/TE" if fred_key else "TE",
+        "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref, "s_src": "TE"
+    }
+    
+    for code in ["EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]:
+        m_last, m_prev, m_ref, m_src = None, None, None, "TE"
+        s_last, s_prev, s_ref, s_src = None, None, None, "TE"
+        
+        if te_m and code in te_m:
+            m_last = te_m[code]["last"]
+            m_prev = te_m[code]["previous"]
+            m_ref = te_m[code]["reference"]
+        
+        if m_last is None and eodhd_key:
+            res_eod = get_eodhd_pmi_fallback(code, "Manufacturing PMI", eodhd_key)
+            if res_eod:
+                m_last = res_eod["last"]
+                m_prev = res_eod["previous"]
+                m_ref = res_eod["reference"]
+                m_src = "EODHD"
+                
+        if te_s and code in te_s:
+            s_last = te_s[code]["last"]
+            s_prev = te_s[code]["previous"]
+            s_ref = te_s[code]["reference"]
+            
+        if s_last is None and eodhd_key:
+            res_eod = get_eodhd_pmi_fallback(code, "Services PMI", eodhd_key)
+            if res_eod:
+                s_last = res_eod["last"]
+                s_prev = res_eod["previous"]
+                s_ref = res_eod["reference"]
+                s_src = "EODHD"
+                
+        pmi_results[code] = {
+            "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
+            "s_last": s_last, "s_prev": s_prev, "s_ref": s_ref, "s_src": s_src
+        }
+        
+    return pmi_results
 
 @st.cache_data(ttl=604800) # 1 week
 def get_imf_data(indicator):
@@ -2345,6 +2560,7 @@ st.sidebar.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
 st.sidebar.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
 st.sidebar.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
 st.sidebar.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
+st.sidebar.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
 
 with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
     st.markdown("""
@@ -2352,6 +2568,7 @@ with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
     ```toml
     APIFREAKS_API_KEY = "IhrKey"
     FRED_API_KEY = "IhrKey"
+    EODHD_API_KEY = "IhrKey"
     # ...
     ```
     """)
@@ -2475,7 +2692,7 @@ def get_next_event_for_pair(base, quote, df_c):
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab14 = st.tabs([
     "🏠 Übersicht & Checkliste",
-    "📅 Economic Calendar",
+    "📊 PMI-Daten",
     "🏦 Zinsdifferenz",
     "📊 Analysten-Konsens",
     "🧠 Sentiment-Score",
@@ -2598,107 +2815,112 @@ with tab1:
     st.markdown(html_table, unsafe_allow_html=True)
     st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung (Risikodaten Quelle: IMF DataMapper)</div>", unsafe_allow_html=True)
 
-# ----------------- TAB 2: ECONOMIC CALENDAR -----------------
+# ----------------- TAB 2: PMI-DATEN -----------------
 with tab2:
-    st.header("📅 Globaler Wirtschaftskalender")
-    st.caption("Echtzeit-Timeline der kommenden globalen Events der nächsten 30 Tage mit Checkliste für manuelle Analyse.")
+    st.header("📊 PMI-Daten (Einkaufsmanagerindex)")
+    st.caption("PMI-Werte (Manufacturing & Services) als Frühindikatoren der wirtschaftlichen Aktivität (Expansion > 50 / Kontraktion < 50).")
     
-    # Filter
-    countries_available = ["All"] + list(df_cal["country"].unique())
-    importances_available = ["High & Medium (Standard)", "All", "High", "Medium", "Low"]
-    categories_available = ["All", "Central Bank", "Inflation", "Employment", "Growth"]
-    
-    f_col1, f_col2, f_col3 = st.columns(3)
-    with f_col1:
-        sel_country = st.selectbox("Land filtern", options=countries_available, index=0, key="cal_country_filter")
-    with f_col2:
-        sel_importance = st.selectbox("Wichtigkeit", options=importances_available, index=0, key="cal_imp_filter")
-    with f_col3:
-        sel_category = st.selectbox("Kategorie filtern", options=categories_available, index=0, key="cal_cat_filter")
+    with st.spinner("Lade PMI-Daten..."):
+        pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
         
-    filtered_cal = df_cal.copy()
-    if sel_country != "All":
-        filtered_cal = filtered_cal[filtered_cal["country"] == sel_country]
-        
-    if sel_importance == "High & Medium (Standard)":
-        filtered_cal = filtered_cal[filtered_cal["importance"].isin(["High", "Medium"])]
-    elif sel_importance != "All":
-        filtered_cal = filtered_cal[filtered_cal["importance"] == sel_importance]
-        
-    if sel_category != "All":
-        keywords = {
-            "Central Bank": ["fed", "fomc", "rate", "interest", "leitzins", "notenbank", "ezb", "ecb", "snb", "boe", "boj", "rba", "boc", "rbnz", "policy", "mep", "geldpolitik"],
-            "Inflation": ["cpi", "ppi", "inflation", "teuerung", "pce"],
-            "Employment": ["unemployment", "arbeitslos", "payrolls", "nfp", "employment", "beschäftigung", "jobs"],
-            "Growth": ["gdp", "pmi", "bruttoinlandsprodukt", "wachstum", "growth", "retail sales", "einzelhandel"]
-        }.get(sel_category, [])
-        pattern = "|".join(keywords)
-        filtered_cal = filtered_cal[filtered_cal["event"].str.contains(pattern, case=False, na=False)]
-        
-    if not filtered_cal.empty:
-        st.markdown("### 📋 Event-Abarbeitungsliste")
-        for idx, row in filtered_cal.reset_index().iterrows():
-            act = row["actual"]
-            cons = row["consensus"]
-            prior = row["prior"]
+    if pmi_data:
+        # Calculate average for sorting
+        for code, data in pmi_data.items():
+            vals = []
+            if data["m_last"] is not None:
+                vals.append(data["m_last"])
+            if data["s_last"] is not None:
+                vals.append(data["s_last"])
+            data["avg"] = sum(vals) / len(vals) if vals else 0.0
             
-            act_style = ""
-            act_clean = str(act).strip() if act is not None and not pd.isna(act) else None
-            if act_clean and act_clean.lower() not in ("nan", "none", "", "-"):
-                cons_clean = str(cons).strip() if cons is not None and not pd.isna(cons) else None
-                if cons_clean and cons_clean.lower() not in ("nan", "none", "", "-"):
-                    try:
-                        act_num = float(act_clean.replace("%","").replace("K","").replace("M","").replace("Barrels","").strip())
-                        cons_num = float(cons_clean.replace("%","").replace("K","").replace("M","").replace("Barrels","").strip())
-                        if act_num >= cons_num:
-                            act_color = "#10b981"
-                        else:
-                            act_color = "#ef4444"
-                    except Exception:
-                        act_color = "#f0f0f5"
+        sorted_pmi = sorted(pmi_data.items(), key=lambda x: x[1]["avg"], reverse=True)
+        
+        # Display as cards in columns
+        cols = st.columns(4)
+        for idx, (code, data) in enumerate(sorted_pmi):
+            col = cols[idx % 4]
+            flag = CURRENCIES[code]["flag"]
+            country_name = CURRENCIES[code]["country"]
+            
+            with col:
+                m_val = data["m_last"]
+                m_prev = data["m_prev"]
+                m_ref = data["m_ref"] or "N/A"
+                m_src = data["m_src"]
+                
+                s_val = data["s_last"]
+                s_prev = data["s_prev"]
+                s_ref = data["s_ref"] or "N/A"
+                s_src = data["s_src"]
+                
+                # manufacturing display
+                if m_val is not None:
+                    m_color = "#10b981" if m_val >= 50.0 else "#ef4444"
+                    m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
+                    m_change_arrow = "▲" if (m_prev is not None and m_val > m_prev) else "▼" if (m_prev is not None and m_val < m_prev) else "▬"
+                    m_change_str = f"{m_change_arrow} (Vor: {m_prev:.1f})" if m_prev is not None else ""
+                    m_html = f"""
+                    <div style="margin-top: 10px; border-top: 1px solid #1f2026; padding-top: 8px;">
+                        <span style="font-size: 0.8rem; color: #8b949e;">Manufacturing PMI:</span>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 1.25rem; font-weight: 700; color: {m_color};">{m_val:.1f}</span>
+                            <span style="font-size: 0.7rem; color: {m_color}; background-color: {m_color}18; padding: 2px 6px; border-radius: 4px; font-weight: 700; text-transform: uppercase;">{m_status}</span>
+                        </div>
+                        <div style="font-size: 0.75rem; color: #8b949e; margin-top: 2px;">
+                            {m_change_str} | Ref: {m_ref}
+                        </div>
+                    </div>
+                    """
                 else:
-                    act_color = "#f0f0f5"
-                act_disp = f"**Ist:** <span style='color:{act_color};'>{act_clean}</span>"
-            else:
-                act_disp = "**Ist:** -"
+                    m_html = f"""
+                    <div style="margin-top: 10px; border-top: 1px solid #1f2026; padding-top: 8px; color: #8b949e; font-size: 0.8rem;">
+                        Manufacturing: N/A
+                    </div>
+                    """
+                    
+                # services display
+                if s_val is not None:
+                    s_color = "#10b981" if s_val >= 50.0 else "#ef4444"
+                    s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
+                    s_change_arrow = "▲" if (s_prev is not None and s_val > s_prev) else "▼" if (s_prev is not None and s_val < s_prev) else "▬"
+                    s_change_str = f"{s_change_arrow} (Vor: {s_prev:.1f})" if s_prev is not None else ""
+                    s_html = f"""
+                    <div style="margin-top: 10px; border-top: 1px solid #1f2026; padding-top: 8px;">
+                        <span style="font-size: 0.8rem; color: #8b949e;">Services PMI:</span>
+                        <div style="display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 1.25rem; font-weight: 700; color: {s_color};">{s_val:.1f}</span>
+                            <span style="font-size: 0.7rem; color: {s_color}; background-color: {s_color}18; padding: 2px 6px; border-radius: 4px; font-weight: 700; text-transform: uppercase;">{s_status}</span>
+                        </div>
+                        <div style="font-size: 0.75rem; color: #8b949e; margin-top: 2px;">
+                            {s_change_str} | Ref: {s_ref}
+                        </div>
+                    </div>
+                    """
+                else:
+                    s_html = f"""
+                    <div style="margin-top: 10px; border-top: 1px solid #1f2026; padding-top: 8px; color: #8b949e; font-size: 0.8rem;">
+                        Services: N/A
+                    </div>
+                    """
                 
-            cons_disp = cons if cons else "-"
-            prior_disp = prior if prior else "-"
-            
-            cb_key = f"evt_{row['country']}_{row['time']}_{idx}"
-            
-            c_cb, c_info, c_metrics = st.columns([0.1, 0.6, 0.3])
-            with c_cb:
-                checked = st.checkbox("", key=cb_key, label_visibility="collapsed")
-            with c_info:
-                country_flag = ""
-                for c_key, c_val in CURRENCIES.items():
-                    if c_val["wb_code"] == row["country"] or c_key == row["country"] or c_val["country"] == row["country"]:
-                        country_flag = c_val["flag"]
-                if not country_flag:
-                    if row["country"] == "USA": country_flag = "🇺🇸"
-                    elif row["country"] in ("DEU", "EUR"): country_flag = "🇪🇺"
-                    elif row["country"] == "GBR": country_flag = "🇬🇧"
-                    elif row["country"] == "CHE": country_flag = "🇨🇭"
-                    elif row["country"] == "JPN": country_flag = "🇯🇵"
-                    elif row["country"] == "AUS": country_flag = "🇦🇺"
-                    elif row["country"] == "CAN": country_flag = "🇨🇦"
-                    elif row["country"] == "NZL": country_flag = "🇳🇿"
-                
-                imp_badge = f"<span style='font-size:0.75rem; background-color:{'rgba(239, 68, 68, 0.15)' if row['importance'] == 'High' else 'rgba(255, 255, 255, 0.03)'}; color:{'#ef4444' if row['importance'] == 'High' else '#7d7d8a'}; padding:2px 6px; border-radius:3px;'>{row['importance']}</span>"
-                
-                strike_start = "~~" if checked else ""
-                strike_end = "~~" if checked else ""
-                
-                st.markdown(f"{country_flag} **{row['country']}** | {row['time']} | {imp_badge} <br> {strike_start}**{row['event']}**{strike_end}", unsafe_allow_html=True)
-            with c_metrics:
-                st.markdown(f"Consensus: {cons_disp} | Prior: {prior_disp} <br> {act_disp}", unsafe_allow_html=True)
-                
-            st.markdown("<hr style='margin:5px 0; border-color:#1f2026;' />", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="metric-card-custom" style="border-left: 4px solid #58a6ff; margin-bottom: 15px; padding: 12px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.3rem;">{flag}</span>
+                        <div>
+                            <span style="font-weight: 700; color: #f0f0f5;">{code}</span>
+                            <div style="font-size: 0.75rem; color: #8b949e;">{country_name}</div>
+                        </div>
+                    </div>
+                    {m_html}
+                    {s_html}
+                    <div style="font-size: 0.65rem; color: #7d7d8a; text-align: right; margin-top: 10px;">
+                        Quelle: {m_src}/{s_src}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
     else:
-        st.info("Keine Events für die gewählten Filter vorhanden.")
-        
-    st.markdown(f"<div style='margin-top:15px;' class='source-tag {'source-tag-live' if is_live_cal else ''}'>Quelle: Benzinga</div>", unsafe_allow_html=True)
+        st.info("Daten momentan nicht verfügbar")
 
 # ----------------- TAB 3: ZINSDIFFERENZ -----------------
 with tab3:
