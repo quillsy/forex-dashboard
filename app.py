@@ -860,7 +860,117 @@ def get_eodhd_pmi_fallback(country_code, indicator_keyword, api_key):
         pass
     return None
 
-def get_all_pmi_data(fred_key, eodhd_key):
+@st.cache_data(ttl=86400)
+def get_eodhd_pmi_historical(country_code, indicator_keyword, target_date, api_key):
+    if not api_key:
+        return None
+    country_map = {
+        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
+        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
+    }
+    eodhd_country = country_map.get(country_code, country_code)
+    target_dt = pd.to_datetime(target_date)
+    start_date = (target_dt - timedelta(days=90)).strftime("%Y-%m-%d")
+    end_date = target_dt.strftime("%Y-%m-%d")
+    url = "https://eodhd.com/api/economic-events"
+    params = {
+        "api_token": api_key,
+        "from": start_date,
+        "to": end_date,
+        "country": eodhd_country,
+        "limit": 300
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            events = r.json()
+            matched = []
+            for ev in events:
+                name = ev.get("name", "").upper()
+                if indicator_keyword.upper() in name:
+                    matched.append(ev)
+            if matched:
+                matched.sort(key=lambda x: x.get("date", ""))
+                latest = matched[-1]
+                try:
+                    last_val = float(latest.get("actual"))
+                except (ValueError, TypeError):
+                    last_val = None
+                try:
+                    prev_val = float(latest.get("previous"))
+                except (ValueError, TypeError):
+                    prev_val = None
+                ref_date = latest.get("date", "")
+                return {
+                    "last": last_val,
+                    "previous": prev_val,
+                    "reference": ref_date
+                }
+    except Exception:
+        pass
+    return None
+
+def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
+    pmi_results = {}
+    
+    # USD (FRED)
+    usa_m_last, usa_m_dt, _ = get_fred_data_historical("NAPM", target_date, fred_key)
+    usa_m_prev = None
+    if fred_key and usa_m_last is not None:
+        df_napm, _, _ = get_fred_data("NAPM", fred_key)
+        if df_napm is not None and not df_napm.empty:
+            target_dt = pd.to_datetime(target_date)
+            df_filtered = df_napm[df_napm["date"] <= target_dt].sort_values("date")
+            if len(df_filtered) >= 2:
+                usa_m_prev = float(df_filtered.iloc[-2]["value"])
+                
+    usa_s_last, usa_s_dt, _ = get_fred_data_historical("NMFPT", target_date, fred_key)
+    usa_s_prev = None
+    if fred_key and usa_s_last is not None:
+        df_nmfpt, _, _ = get_fred_data("NMFPT", fred_key)
+        if df_nmfpt is not None and not df_nmfpt.empty:
+            target_dt = pd.to_datetime(target_date)
+            df_filtered = df_nmfpt[df_nmfpt["date"] <= target_dt].sort_values("date")
+            if len(df_filtered) >= 2:
+                usa_s_prev = float(df_filtered.iloc[-2]["value"])
+                
+    usa_m_ref_str = usa_m_dt.strftime("%Y-%m-%d") if isinstance(usa_m_dt, datetime) else str(usa_m_dt) if usa_m_dt else None
+    usa_s_ref_str = usa_s_dt.strftime("%Y-%m-%d") if isinstance(usa_s_dt, datetime) else str(usa_s_dt) if usa_s_dt else None
+                
+    pmi_results["USD"] = {
+        "m_last": usa_m_last, "m_prev": usa_m_prev, "m_ref": usa_m_ref_str, "m_src": "FRED",
+        "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref_str, "s_src": "FRED"
+    }
+    
+    # Other G8 Currencies (EODHD)
+    for code in ["EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]:
+        m_last, m_prev, m_ref, m_src = None, None, None, "EODHD"
+        s_last, s_prev, s_ref, s_src = None, None, None, "EODHD"
+        
+        if eodhd_key:
+            res_m = get_eodhd_pmi_historical(code, "Manufacturing PMI", target_date, eodhd_key)
+            if res_m:
+                m_last = res_m["last"]
+                m_prev = res_m["previous"]
+                m_ref = res_m["reference"]
+                
+            res_s = get_eodhd_pmi_historical(code, "Services PMI", target_date, eodhd_key)
+            if res_s:
+                s_last = res_s["last"]
+                s_prev = res_s["previous"]
+                s_ref = res_s["reference"]
+                
+        pmi_results[code] = {
+            "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
+            "s_last": s_last, "s_prev": s_prev, "s_ref": s_ref, "s_src": s_src
+        }
+        
+    return pmi_results
+
+def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
+    if target_date is not None:
+        return get_all_pmi_data_historical(fred_key, eodhd_key, target_date)
+        
     te_m = parse_tradingeconomics_pmi("https://tradingeconomics.com/country-list/manufacturing-pmi")
     te_s = parse_tradingeconomics_pmi("https://tradingeconomics.com/country-list/services-pmi")
     
@@ -1715,50 +1825,7 @@ def get_country_rate_historical(country_code, target_date):
             
     return None, "Keine Daten verfügbar"
 
-FRED_PMI_SERIES = {
-    "USD": {"m": "NAPM", "s": "NMFPT"},
-    "EUR": {"m": "EUROPAMIMIPDSMEI", "s": "EUROPASEIPDSMEI"},
-    "GBP": {"m": "GBRPAMIMIPDSMEI", "s": "GBRPASEIPDSMEI"},
-    "JPY": {"m": "JPNPAMIMIPDSMEI", "s": "JPNPASEIPDSMEI"},
-    "CAD": {"m": "CANPAMIMIPDSMEI", "s": "CANPASEIPDSMEI"},
-    "AUD": {"m": "AUSPAMIMIPDSMEI", "s": "AUSPASEIPDSMEI"},
-    "CHF": {"m": "CHEPAMIMIPDSMEI", "s": "CHEPASEIPDSMEI"},
-    "NZD": {"m": "NZLPAMIMIPDSMEI", "s": "NZLPASEIPDSMEI"}
-}
 
-def get_pmi_historical_data(curr, target_date, key=FRED_KEY):
-    if not key:
-        return None
-    series_info = FRED_PMI_SERIES.get(curr)
-    if not series_info:
-        return None
-        
-    res = {
-        "m_last": None, "m_prev": None, "m_ref": None,
-        "s_last": None, "s_prev": None, "s_ref": None
-    }
-    
-    df_m = fetch_fred_history_full(series_info["m"], target_date, key)
-    if df_m is not None and not df_m.empty:
-        df_m = df_m.sort_values("date")
-        if len(df_m) >= 1:
-            res["m_last"] = float(df_m.iloc[-1]["value"])
-            res["m_ref"] = df_m.iloc[-1]["date"].strftime("%b/%y")
-        if len(df_m) >= 2:
-            res["m_prev"] = float(df_m.iloc[-2]["value"])
-            
-    df_s = fetch_fred_history_full(series_info["s"], target_date, key)
-    if df_s is not None and not df_s.empty:
-        df_s = df_s.sort_values("date")
-        if len(df_s) >= 1:
-            res["s_last"] = float(df_s.iloc[-1]["value"])
-            res["s_ref"] = df_s.iloc[-1]["date"].strftime("%b/%y")
-        if len(df_s) >= 2:
-            res["s_prev"] = float(df_s.iloc[-2]["value"])
-            
-    if res["m_last"] is None and res["s_last"] is None:
-        return None
-    return res
 
 def get_historical_commodities(target_date, key=FRED_KEY):
     res = {}
@@ -4086,9 +4153,10 @@ with tab14:
                             "JPY": "🇯🇵 Japan"
                         }
                         
+                        pmi_h_all = get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=target_date_str)
                         pmi_rows = []
                         for code_iter, name_iter in code_to_name.items():
-                            pmi_h = get_pmi_historical_data(code_iter, target_date_str, FRED_KEY)
+                            pmi_h = pmi_h_all.get(code_iter, {})
                             if pmi_h and pmi_h.get("m_last") is not None:
                                 m_val = pmi_h["m_last"]
                                 m_prev = pmi_h["m_prev"]
