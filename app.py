@@ -2703,7 +2703,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab14
     "⚠️ Risikoindikatoren (IMF)",
     "📰 News & Research Hub",
     "🛡️ Risk-On/Off",
-    "📊 Backtest – Historische Daten"
+    "📊 Historische Daten"
 ])
 
 # ----------------- TAB 1: ÜBERSICHT & CHECKLISTE -----------------
@@ -3663,319 +3663,592 @@ with tab12:
         st.error("Daten momentan nicht verfügbar")
 
 
+# ----------------- Helper Mock Functions for Historical PMI/Commodities -----------------
+def generate_mock_pmi_historical(code, target_date_str):
+    import hashlib
+    h = int(hashlib.md5(f"{code}_{target_date_str}".encode()).hexdigest(), 16)
+    np.random.seed(h % 4294967295)
+    m_val = np.clip(50.0 + np.random.normal(0, 3.5), 38.0, 62.0)
+    s_val = np.clip(51.0 + np.random.normal(0, 4.0), 36.0, 64.0)
+    m_prev = np.clip(m_val + np.random.normal(0, 1.5), 38.0, 62.0)
+    s_prev = np.clip(s_val + np.random.normal(0, 1.8), 36.0, 64.0)
+    return {
+        "m_last": float(m_val), "m_prev": float(m_prev),
+        "s_last": float(s_val), "s_prev": float(s_prev)
+    }
 
+def generate_mock_commodities_historical(target_date_str):
+    import hashlib
+    h = int(hashlib.md5(target_date_str.encode()).hexdigest(), 16)
+    np.random.seed(h % 4294967295)
+    gold = 1500.0 + np.random.normal(0, 150.0)
+    silver = 18.0 + np.random.normal(0, 3.0)
+    wti = 65.0 + np.random.normal(0, 10.0)
+    brent = 70.0 + np.random.normal(0, 10.0)
+    vix = 18.0 + np.random.normal(0, 4.0)
+    gold_chg = np.random.normal(0, 1.5)
+    silver_chg = np.random.normal(0, 2.5)
+    wti_chg = np.random.normal(0, 3.0)
+    brent_chg = np.random.normal(0, 3.0)
+    vix_chg = np.random.normal(0, 5.0)
+    return {
+        "gold": max(800.0, gold), "gold_chg": gold_chg,
+        "silver": max(10.0, silver), "silver_chg": silver_chg,
+        "wti": max(15.0, wti), "wti_chg": wti_chg,
+        "brent": max(20.0, brent), "brent_chg": brent_chg,
+        "vix": max(8.0, vix), "vix_chg": vix_chg
+    }
 
+def get_historical_labor_data(target_date_str):
+    import hashlib
+    h = int(hashlib.md5(target_date_str.encode()).hexdigest(), 16)
+    np.random.seed(h % 4294967295)
+    nfp = 145000.0 + np.random.normal(0, 1200.0)
+    nfp_chg = 180.0 + np.random.normal(0, 50.0)
+    wage = 28.50 + np.random.normal(0, 1.50)
+    wage_chg = 0.35 + np.random.normal(0, 0.08)
+    part = 62.4 + np.random.normal(0, 0.5)
+    part_chg = 0.05 + np.random.normal(0, 0.02)
+    return {
+        "nfp": nfp, "nfp_chg": nfp_chg,
+        "wage": wage, "wage_chg": wage_chg,
+        "part": part, "part_chg": part_chg
+    }
 
-# ----------------- TAB 14: BACKTEST – HISTORISCHE DATEN -----------------
+# ----------------- TAB 14: HISTORISCHE DATEN -----------------
 with tab14:
-    st.header("📊 Backtest – Historische Daten")
-    st.caption("Analysiere fundamentale Marktdaten für jeden beliebigen Tag in der Vergangenheit, um Handelsentscheidungen im historischen Kontext zu evaluieren.")
+    st.header("📊 Historische Fundamental-Analyse")
+    st.caption("Analysiere das gesamte Fundamental-Dashboard für jeden beliebigen Tag in der Vergangenheit, um historische Marktkontexte zu evaluieren.")
     
     b_col1, b_col2, b_col3 = st.columns(3)
     g8_list = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
     with b_col1:
-        hist_base = st.selectbox("Basiswährung (Base)", options=g8_list, index=0, key="hist_base_select")
+        hist_base = st.selectbox("Basiswährung (Base)", options=g8_list, index=0, key="hist_base_select_v2")
     with b_col2:
-        hist_quote = st.selectbox("Quote-Währung (Quote)", options=g8_list, index=1, key="hist_quote_select")
+        hist_quote = st.selectbox("Quote-Währung (Quote)", options=g8_list, index=1, key="hist_quote_select_v2")
     with b_col3:
-        hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select")
+        hist_analysis_date = st.date_input("Historisches Datum wählen", value=datetime.now().date() - timedelta(days=365), key="hist_analysis_date_select_v2")
 
     hist_analysis_pair = f"{hist_base}/{hist_quote}"
     
     if hist_base == hist_quote:
         st.warning("⚠️ Basis- und Quote-Währung sind identisch.")
-
-    fetch_button = st.button("🔍 Daten abrufen", key="hist_analysis_fetch_btn")
-    
-    if fetch_button or st.session_state.get("hist_analysis_active", False):
-        st.session_state["hist_analysis_active"] = True
+    else:
+        fetch_button = st.button("🔍 Historische Daten laden", key="hist_analysis_fetch_btn_v2")
         
-        target_date_str = hist_analysis_date.strftime("%Y-%m-%d")
-        base_c = hist_base
-        quote_c = hist_quote
-        
-        st.markdown("---")
-        st.subheader(f"📊 Analyseergebnisse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
-        
-        with st.spinner("Berechne fundamentales Signal..."):
-            base_score_h = compute_currency_score_historical(base_c, target_date_str)
-            quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
+        if fetch_button or st.session_state.get("hist_analysis_active_v2", False):
+            st.session_state["hist_analysis_active_v2"] = True
             
-            raw_diff_h = quote_score_h - base_score_h
-            signal_value_h = raw_diff_h / 2.0
-            signal_value_h = max(-50.0, min(50.0, signal_value_h))
+            target_date_str = hist_analysis_date.strftime("%Y-%m-%d")
+            base_c = hist_base
+            quote_c = hist_quote
             
-            if signal_value_h >= 25.0:
-                sig_h = "SB"
-                badge_h = "STRONG BUY"
-                color_h = "#ef4444"
-            elif 10.0 <= signal_value_h < 25.0:
-                sig_h = "MB"
-                badge_h = "BUY"
-                color_h = "#f97316"
-            elif -10.0 < signal_value_h < 10.0:
-                sig_h = "NT"
-                badge_h = "NEUTRAL"
-                color_h = "#7d7d8a"
-            elif -25.0 < signal_value_h <= -10.0:
-                sig_h = "MS"
-                badge_h = "SELL"
-                color_h = "#3b82f6"
-            else:
-                sig_h = "SS"
-                badge_h = "STRONG SELL"
-                color_h = "#34d399"
+            st.markdown("---")
+            st.subheader(f"📊 Historische Analyse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
+            
+            with st.spinner("Berechne fundamentales Signal..."):
+                base_score_h = compute_currency_score_historical(base_c, target_date_str)
+                quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
                 
-        sig_col1, sig_col2, sig_col3 = st.columns(3)
-        with sig_col1:
-            render_metric_card(f"Wirtschaftsscore {base_c}", f"{base_score_h:.2f} / 100", f"Historisch am {target_date_str}", True)
-        with sig_col2:
-            render_metric_card(f"Wirtschaftsscore {quote_c}", f"{quote_score_h:.2f} / 100", f"Historisch am {target_date_str}", True)
-        with sig_col3:
-            st.markdown(f"""
-            <div style="background-color:#14161d; border:1px solid #1f2026; padding:15px; border-radius:8px; text-align:center;">
-                <div style="font-size:0.85rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Fundamentales Signal</div>
-                <div style="font-size:1.8rem; font-weight:700; color:{color_h}; margin:5px 0;">{signal_value_h:+.2f}</div>
-                <div style="background-color:{color_h}1a; color:{color_h}; border:1px solid {color_h}; padding:4px 8px; border-radius:4px; font-size:0.75rem; font-weight:700; display:inline-block;">
-                    {badge_h}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        st.markdown("### 🗂️ Detaillierte historische Analysedaten")
-        
-        hist_sub_tabs = st.tabs([
-            "📅 Economic Calendar",
-            "🏦 Zinsdifferenz",
-            "📊 Analysten-Konsens",
-            "🧠 Sentiment-Score",
-            "⚠️ Risikoindikatoren",
-            "🧮 Korrelationsmatrix",
-            "📈 Langfristige Historie",
-            "📰 News"
-        ])
-        
-        with hist_sub_tabs[0]:
-            st.markdown("#### 📅 Historischer Wirtschaftskalender (±3 Tage)")
-            cal_df_h, _, is_live_cal_h = get_benzinga_historical(BENZINGA_KEY, target_date_str)
-            
-            if cal_df_h is not None and not cal_df_h.empty:
-                g8_countries = ["USA", "EMU", "DEU", "FRA", "ITA", "GBR", "JPN", "CAN", "AUS", "NZL", "CHE"]
-                cal_df_h = cal_df_h[cal_df_h["country"].isin(g8_countries)]
+                raw_diff_h = quote_score_h - base_score_h
+                signal_value_h = raw_diff_h / 2.0
+                signal_value_h = max(-50.0, min(50.0, signal_value_h))
                 
-                if not cal_df_h.empty:
-                    def color_importance(val):
-                        if val == "High":
-                            return "color: #ef4444; font-weight: bold;"
-                        elif val == "Medium":
-                            return "color: #f97316; font-weight: bold;"
-                        return "color: #7d7d8a;"
-                        
-                    styled_df = cal_df_h.style.map(color_importance, subset=["importance"])
-                    st.dataframe(styled_df, use_container_width=True)
+                if signal_value_h >= 25.0:
+                    sig_h = "SB"
+                elif 10.0 <= signal_value_h < 25.0:
+                    sig_h = "MB"
+                elif -10.0 < signal_value_h < 10.0:
+                    sig_h = "NT"
+                elif -25.0 < signal_value_h <= -10.0:
+                    sig_h = "MS"
                 else:
-                    st.info("Keine G8-Events für diesen Zeitraum gefunden.")
-            else:
-                st.warning("Keine Kalenderdaten verfügbar.")
+                    sig_h = "SS"
+                    
+            # 1. Bias Banner and Scores
+            render_bias_box(signal_value_h, base_c, quote_c, base_score_h, quote_score_h, sig_h)
+            
+            col_score_b, col_score_q = st.columns(2)
+            with col_score_b:
+                st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+            <span class="metric-label">{CURRENCIES[base_c]['flag']} {base_c} Wirtschaftsscore (Historisch)</span>
+            <div class="metric-value">{base_score_h:.1f} / 100</div>
+            <div class="source-tag">Zusammengesetzter Score am {target_date_str}</div>
+            </div>""", unsafe_allow_html=True)
+            with col_score_q:
+                st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #444c56;">
+            <span class="metric-label">{CURRENCIES[quote_c]['flag']} {quote_c} Wirtschaftsscore (Historisch)</span>
+            <div class="metric-value">{quote_score_h:.1f} / 100</div>
+            <div class="source-tag">Zusammengesetzter Score am {target_date_str}</div>
+            </div>""", unsafe_allow_html=True)
+            
+            st.markdown("### 🗂️ Detaillierte historische Analysedaten")
+            
+            # 11 subtabs exactly mirroring the live dashboard
+            hist_sub_tabs = st.tabs([
+                "🏠 Übersicht & Checkliste",
+                "📊 PMI-Daten",
+                "🏦 Zinsdifferenz",
+                "📊 Analysten-Konsens",
+                "🧠 Sentiment-Score",
+                "🧮 Korrelationsmatrix",
+                "📈 Langfristige Historie",
+                "🛍️ Rohstoffe & Märkte",
+                "🇺🇸 US-Arbeitsmarkt (BLS)",
+                "⚠️ Risikoindikatoren (IMF)",
+                "📰 News & Research Hub"
+            ])
+            
+            with hist_sub_tabs[0]:
+                st.markdown("#### 🏠 G8 Fundamental-Checkliste (Historisch)")
+                st.caption(f"Vergleich der makroökonomischen Scores und Handelssignale für alle G8-Paare am {target_date_str}.")
                 
-        with hist_sub_tabs[1]:
-            st.markdown("#### 🏦 Historischer Leitzins-Vergleich")
-            base_rate_h, base_src_h = get_country_rate_historical(base_c, target_date_str)
-            quote_rate_h, quote_src_h = get_country_rate_historical(quote_c, target_date_str)
-            diff_bps_h = int((base_rate_h - quote_rate_h) * 100)
-            
-            rate_data = [
-                {"Währung": base_c, "Zinssatz": f"{base_rate_h:.2f}%", "Quelle": base_src_h},
-                {"Währung": quote_c, "Zinssatz": f"{quote_rate_h:.2f}%", "Quelle": quote_src_h},
-            ]
-            st.table(pd.DataFrame(rate_data))
-            st.metric("Zinsdifferenz (Base - Quote)", f"{diff_bps_h:+.0f} bps")
-            
-        with hist_sub_tabs[2]:
-            st.markdown("#### 📊 Historischer Analysten-Konsens (Finnhub)")
-            consensus_h = generate_mock_finnhub_historical(hist_analysis_pair, target_date_str)
-            
-            c_col1, c_col2 = st.columns(2)
-            with c_col1:
-                labels = ["Buy/Strong Buy", "Hold", "Sell/Strong Sell"]
-                values = [consensus_h["buy"], consensus_h["hold"], consensus_h["sell"]]
-                fig_cons_h = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.4, marker=dict(colors=["#34d399", "#7d7d8a", "#ef4444"]))])
-                fig_cons_h.update_layout(
+                # Scores for all currencies on that date
+                scores_h = {curr: compute_currency_score_historical(curr, target_date_str) for curr in CURRENCIES.keys()}
+                
+                # Bar chart of scores
+                fig_scores_h = go.Figure()
+                fig_scores_h.add_trace(go.Bar(
+                    x=list(scores_h.keys()),
+                    y=list(scores_h.values()),
+                    marker_color=['#10b981' if s >= 55.0 else '#e2b13c' if s >= 45.0 else '#ef4444' for s in scores_h.values()],
+                    text=[f"{s:.1f}" for s in scores_h.values()],
+                    textposition='auto'
+                ))
+                fig_scores_h.update_layout(
+                    xaxis_title="Währung",
+                    yaxis_title="Wirtschaftsscore",
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                     font=dict(color="#7d7d8a"),
-                    height=280,
+                    height=300,
                     margin=dict(l=10, r=10, t=10, b=10)
                 )
-                st.plotly_chart(fig_cons_h, use_container_width=True)
+                st.plotly_chart(fig_scores_h, use_container_width=True)
                 
-            with c_col2:
-                st.markdown(f"**Durchschnittliches Kursziel:** `{consensus_h['targetMean']}`")
-                st.markdown(f"**Höchstes Kursziel:** `{consensus_h['targetHigh']}`")
-                st.markdown(f"**Tiefstes Kursziel:** `{consensus_h['targetLow']}`")
-                st.markdown("---")
-                st.markdown("**Letzte Analysten-Einstufungen:**")
-                st.table(pd.DataFrame(consensus_h["history"]))
+                # G8 Checklist Table
+                html_table_h = """
+                <div style="overflow-x:auto; margin-top:10px;">
+                <table style="width:100%; border-collapse: collapse; font-size:0.85rem; border:1px solid #1f2026;">
+                <thead>
+                <tr style="background-color:#161b22; color:#8b949e; border-bottom:2px solid #1f2026; text-align:left;">
+                <th style="padding:12px 10px;">Währungspaar</th>
+                <th style="padding:12px 10px;">Zinsdifferenz</th>
+                <th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
+                <th style="padding:12px 10px; text-align:center;">Handelssignal</th>
+                <th style="padding:12px 10px;">Analysten-Konsens</th>
+                <th style="padding:12px 10px; text-align:center;">Sentiment</th>
+                <th style="padding:12px 10px;">Schulden (% BIP)</th>
+                <th style="padding:12px 10px;">Leistungsbilanz</th>
+                </tr>
+                </thead>
+                <tbody>"""
                 
-        with hist_sub_tabs[3]:
-            st.markdown("#### 🧠 Historischer Sentiment-Score (StockData)")
-            sentiment_h = generate_mock_stockdata_historical(hist_analysis_pair, target_date_str)
-            
-            fig_gauge_h = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=sentiment_h,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Sentiment-Score (-10 bis +10)", 'font': {'color': "#7d7d8a", 'size': 14}},
-                gauge={
-                    'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
-                    'bar': {'color': "#e2b13c"},
-                    'bgcolor': "#14161d",
-                    'borderwidth': 1,
-                    'bordercolor': "#1f2026",
-                    'steps': [
-                        {'range': [-10, -3], 'color': 'rgba(239, 68, 68, 0.15)'},
-                        {'range': [-3, 3], 'color': 'rgba(125, 125, 138, 0.15)'},
-                        {'range': [3, 10], 'color': 'rgba(52, 211, 153, 0.15)'}
-                    ]
+                import itertools
+                currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+                G8_PAIRS = list(itertools.permutations(currencies_list, 2))
+                
+                rows_h = []
+                for b_c_iter, q_c_iter in G8_PAIRS:
+                    b_score_iter = scores_h[b_c_iter]
+                    q_score_iter = scores_h[q_c_iter]
+                    r_diff_iter = q_score_iter - b_score_iter
+                    sig_val_iter = r_diff_iter / 2.0
+                    sig_val_iter = max(-50.0, min(50.0, sig_val_iter))
+                    
+                    # Signal details
+                    if sig_val_iter >= 25.0:
+                        b_name = "STRONG BUY"
+                        b_color = "#ef4444"
+                    elif 10.0 <= sig_val_iter < 25.0:
+                        b_name = "MID BUY"
+                        b_color = "#f97316"
+                    elif -10.0 < sig_val_iter < 10.0:
+                        b_name = "NEUTRAL"
+                        b_color = "#7d7d8a"
+                    elif -25.0 < sig_val_iter <= -10.0:
+                        b_name = "MID SELL"
+                        b_color = "#3b82f6"
+                    else:
+                        b_name = "STRONG SELL"
+                        b_color = "#34d399"
+                        
+                    b_rate_iter, _ = get_country_rate_historical(b_c_iter, target_date_str)
+                    q_rate_iter, _ = get_country_rate_historical(q_c_iter, target_date_str)
+                    diff_bps_iter = int((q_rate_iter - b_rate_iter) * 100)
+                    diff_str_iter = f"{b_rate_iter:.2f}% vs {q_rate_iter:.2f}% ({diff_bps_iter:+d} bps)"
+                    
+                    # mock ratings and sentiment
+                    rec_data_h = generate_mock_finnhub_historical(f"{b_c_iter}/{q_c_iter}", target_date_str)
+                    rec_str_iter = f"<span style='color:#10b981; font-weight:600;'>B:{rec_data_h['buy']}</span> / <span style='color:#e2b13c;'>H:{rec_data_h['hold']}</span> / <span style='color:#ef4444;'>S:{rec_data_h['sell']}</span>"
+                    
+                    sent_val_iter = generate_mock_stockdata_historical(f"{b_c_iter}/{q_c_iter}", target_date_str)
+                    sent_color_iter = "#10b981" if sent_val_iter >= 3.0 else "#ef4444" if sent_val_iter <= -3.0 else "#8b949e"
+                    sent_str_iter = f"<span style='color:{sent_color_iter}; font-weight:600;'>{sent_val_iter:+.1f}</span>"
+                    
+                    # Debt & Current Account
+                    b_iso = CURRENCIES[b_c_iter]["wb_code"]
+                    q_iso = CURRENCIES[q_c_iter]["wb_code"]
+                    
+                    b_debt_h, _, _ = get_worldbank_data_historical(b_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+                    q_debt_h, _, _ = get_worldbank_data_historical(q_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+                    b_debt_str = f"{b_debt_h:.1f}%" if b_debt_h is not None else "N/A"
+                    q_debt_str = f"{q_debt_h:.1f}%" if q_debt_h is not None else "N/A"
+                    debt_str_iter = f"{b_debt_str} / {q_debt_str}"
+                    
+                    b_ca_h, _, _ = get_worldbank_data_historical(b_iso, "BCA_NGDPD", target_date_str)
+                    q_ca_h, _, _ = get_worldbank_data_historical(q_iso, "BCA_NGDPD", target_date_str)
+                    b_ca_str = f"{b_ca_h:+.1f}%" if b_ca_h is not None else "N/A"
+                    q_ca_str = f"{q_ca_h:+.1f}%" if q_ca_h is not None else "N/A"
+                    ca_str_iter = f"{b_ca_str} / {q_ca_str}"
+                    
+                    rows_h.append(f"""<tr style="border-bottom:1px solid #1f2026;">
+                    <td style="padding:10px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[b_c_iter]['flag']} {b_c_iter} / {CURRENCIES[q_c_iter]['flag']} {q_c_iter}</td>
+                    <td style="padding:10px 10px; font-family:'Roboto Mono', monospace;">{diff_str_iter}</td>
+                    <td style="padding:10px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{b_color};">{sig_val_iter:+.1f}</td>
+                    <td style="padding:10px 10px; text-align:center;">
+                    <span style="background-color:{b_color}18; color:{b_color}; border:1px solid {b_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{b_name}</span>
+                    </td>
+                    <td style="padding:10px 10px; font-family:'Roboto Mono', monospace;">{rec_str_iter}</td>
+                    <td style="padding:10px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str_iter}</td>
+                    <td style="padding:10px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{debt_str_iter}</td>
+                    <td style="padding:10px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{ca_str_iter}</td>
+                    </tr>""")
+                    
+                html_table_h += "".join(rows_h) + "</tbody></table></div>"
+                st.markdown(html_table_h, unsafe_allow_html=True)
+                st.markdown(f"<div class='source-tag'>Gesamte Suite-Zusammenfassung am {target_date_str} (Zinssatz- / Risikodaten Quelle: FRED / IMF / World Bank)</div>", unsafe_allow_html=True)
+                
+            with hist_sub_tabs[1]:
+                st.markdown("#### 📊 Historische PMI-Daten (Einkaufsmanagerindex)")
+                st.caption(f"Wirtschafts-PMI für alle 8 Währungsräume am {target_date_str} (Expansion > 50 / Kontraktion < 50).")
+                
+                code_to_name = {
+                    "USD": "🇺🇸 USA",
+                    "EUR": "🇪🇺 Euro",
+                    "GBP": "🇬🇧 UK",
+                    "CHF": "🇨🇭 Schweiz",
+                    "CAD": "🇨🇦 Kanada",
+                    "AUD": "🇦🇺 Australien",
+                    "NZD": "🇳🇿 Neuseeland",
+                    "JPY": "🇯🇵 Japan"
                 }
-            ))
-            fig_gauge_h.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color="#7d7d8a"),
-                height=250,
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            st.plotly_chart(fig_gauge_h, use_container_width=True)
-            
-        with hist_sub_tabs[4]:
-            st.markdown("#### ⚠️ Historische Risikokennzahlen")
-            base_iso = CURRENCIES.get(base_c, {}).get("wb_code", base_c)
-            quote_iso = CURRENCIES.get(quote_c, {}).get("wb_code", quote_c)
-            
-            base_debt_h, base_debt_dt, _ = get_worldbank_data_historical(base_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-            quote_debt_h, quote_debt_dt, _ = get_worldbank_data_historical(quote_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-            
-            base_cli_res = get_historical_oecd_cli(base_c, target_date_str)
-            quote_cli_res = get_historical_oecd_cli(quote_c, target_date_str)
-            
-            base_cli_h = base_cli_res[0] if base_cli_res is not None else None
-            quote_cli_h = quote_cli_res[0] if quote_cli_res is not None else None
-            
-            debt_col1, debt_col2 = st.columns(2)
-            with debt_col1:
-                st.markdown(f"##### 🏛️ Staatsverschuldung (% BIP)")
-                b_debt_str = f"{base_debt_h:.1f}%" if base_debt_h is not None else "Daten nicht verfügbar"
-                q_debt_str = f"{quote_debt_h:.1f}%" if quote_debt_h is not None else "Daten nicht verfügbar"
-                st.markdown(f"- **{base_c}:** `{b_debt_str}` (Jahr: {base_debt_dt.strftime('%Y') if base_debt_dt else 'N/A'})")
-                st.markdown(f"- **{quote_c}:** `{q_debt_str}` (Jahr: {quote_debt_dt.strftime('%Y') if quote_debt_dt else 'N/A'})")
                 
-            with debt_col2:
-                st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
-                if base_cli_h is not None:
-                    try:
-                        b_cli_str = f"{float(base_cli_h):.2f}"
-                    except (ValueError, TypeError):
-                        b_cli_str = "Daten nicht verfügbar"
-                else:
-                    b_cli_str = "Daten nicht verfügbar"
+                rows_pmi_h = []
+                for code_iter in code_to_name.keys():
+                    pmi_h = generate_mock_pmi_historical(code_iter, target_date_str)
+                    m_val = pmi_h["m_last"]
+                    m_prev = pmi_h["m_prev"]
+                    s_val = pmi_h["s_last"]
+                    s_prev = pmi_h["s_prev"]
                     
-                if quote_cli_h is not None:
-                    try:
-                        q_cli_str = f"{float(quote_cli_h):.2f}"
-                    except (ValueError, TypeError):
-                        q_cli_str = "Daten nicht verfügbar"
-                else:
-                    q_cli_str = "Daten nicht verfügbar"
+                    m_chg = m_val - m_prev
+                    s_chg = s_val - s_prev
                     
-                st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {'>100 (Wachstum)' if base_cli_h and float(base_cli_h) > 100.0 else '<100 (Verlangsamung)' if base_cli_h else 'N/A'})")
-                st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {'>100 (Wachstum)' if quote_cli_h and float(quote_cli_h) > 100.0 else '<100 (Verlangsamung)' if quote_cli_h else 'N/A'})")
+                    m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
+                    m_arrow = "▲" if m_chg > 0 else "▼" if m_chg < 0 else "▬"
+                    m_str = f"{m_val:.1f} {m_arrow} {m_status}"
+                    
+                    s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
+                    s_arrow = "▲" if s_chg > 0 else "▼" if s_chg < 0 else "▬"
+                    s_str = f"{s_val:.1f} {s_arrow} {s_status}"
+                    
+                    avg_chg = (m_chg + s_chg) / 2.0
+                    c_arrow = "▲" if avg_chg > 0 else "▼" if avg_chg < 0 else "▬"
+                    c_str = f"{c_arrow} {avg_chg:+.1f}"
+                    
+                    dt_obj = pd.to_datetime(target_date_str)
+                    ref_str = dt_obj.strftime("%b/%y")
+                    
+                    rows_pmi_h.append({
+                        "Land": code_to_name[code_iter],
+                        "Manufacturing PMI": m_str,
+                        "Services PMI": s_str,
+                        "Veränderung zum Vormonat": c_str,
+                        "Letzte Aktualisierung": ref_str,
+                        "m_sort_val": m_val
+                    })
+                    
+                df_pmi_h = pd.DataFrame(rows_pmi_h)
+                df_pmi_h = df_pmi_h.sort_values(by="m_sort_val", ascending=False)
+                df_render_pmi_h = df_pmi_h.drop(columns=["m_sort_val"]).reset_index(drop=True)
                 
-        with hist_sub_tabs[5]:
-            st.markdown("#### 🧮 30-Tage Historische Pearson-Korrelation")
-            corr_df_h, is_live_corr_h = get_historical_correlation_matrix(target_date_str)
-            
-            fig_heatmap_h = go.Figure(data=go.Heatmap(
-                z=corr_df_h.values,
-                x=corr_df_h.columns,
-                y=corr_df_h.index,
-                colorscale="RdBu",
-                zmin=-1.0, zmax=1.0,
-                text=np.round(corr_df_h.values, 2),
-                texttemplate="%{text}",
-                showscale=True
-            ))
-            fig_heatmap_h.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color="#7d7d8a", size=9),
-                height=380,
-                margin=dict(l=10, r=10, t=10, b=10)
-            )
-            st.plotly_chart(fig_heatmap_h, use_container_width=True)
-            st.caption(f"Quelle: {'Reale daily rates' if is_live_corr_h else 'Mock-Korrelation (Fallback)'}")
-            
-        with hist_sub_tabs[6]:
-            st.markdown("#### 📈 Kursverlauf bis zu diesem Datum")
-            df_hist_all, _, _ = get_fcs_history_data(hist_analysis_pair, FCS_KEY)
-            
-            if df_hist_all is not None and not df_hist_all.empty:
-                target_dt_limit = pd.to_datetime(target_date_str)
-                df_hist_h = df_hist_all[df_hist_all["date"] <= target_dt_limit]
+                def apply_colors_h(val):
+                    val_str = str(val)
+                    if "Expansion" in val_str or "▲" in val_str:
+                        return "color: #10b981; font-weight: bold;"
+                    elif "Kontraktion" in val_str or "▼" in val_str:
+                        return "color: #ef4444; font-weight: bold;"
+                    return ""
+                    
+                styled_pmi_h = df_render_pmi_h.style
+                try:
+                    styled_pmi_h = styled_pmi_h.map(apply_colors_h, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+                except AttributeError:
+                    styled_pmi_h = styled_pmi_h.applymap(apply_colors_h, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+                    
+                st.dataframe(styled_pmi_h, use_container_width=True, hide_index=True)
+                st.markdown(f"<div class='source-tag'>Quelle: Trading Economics (Historisches Mock am {target_date_str})</div>", unsafe_allow_html=True)
                 
-                if not df_hist_h.empty:
-                    fig_hist_h = go.Figure()
-                    fig_hist_h.add_trace(go.Scatter(
-                        x=df_hist_h["date"], y=df_hist_h["close"],
-                        line=dict(color="#e2b13c", width=2),
-                        name="Schlusskurs"
-                    ))
-                    fig_hist_h.update_layout(
-                        xaxis_title="Datum",
-                        yaxis_title="Kurs",
+            with hist_sub_tabs[2]:
+                st.markdown("#### 🏦 Historischer Leitzins-Vergleich")
+                st.caption(f"Vergleich der aktuellen Leitzinsen der 8 Haupt-Zentralbanken am {target_date_str}.")
+                
+                rates_h_data = {}
+                for curr_iter in CURRENCIES.keys():
+                    r_val_iter, src_iter = get_country_rate_historical(curr_iter, target_date_str)
+                    rates_h_data[curr_iter] = {
+                        "rate": r_val_iter,
+                        "source": src_iter
+                    }
+                    
+                df_rates_plot_h = pd.DataFrame([
+                    {"Zentralbank": f"{curr_iter} ({CURRENCIES[curr_iter]['name']})", "Zinssatz": data["rate"], "Quelle": data["source"]}
+                    for curr_iter, data in rates_h_data.items()
+                ])
+                
+                fig_rates_g8_h = go.Figure()
+                fig_rates_g8_h.add_trace(go.Bar(
+                    x=df_rates_plot_h["Zentralbank"],
+                    y=df_rates_plot_h["Zinssatz"],
+                    marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot_h["Zinssatz"]],
+                    text=[f"{r:.2f}%" for r in df_rates_plot_h["Zinssatz"]],
+                    textposition='auto',
+                    name="Zinssatz"
+                ))
+                fig_rates_g8_h.update_layout(
+                    xaxis_title="Zentralbank",
+                    yaxis_title="Leitzins (%)",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a"),
+                    height=300,
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
+                st.plotly_chart(fig_rates_g8_h, use_container_width=True)
+                st.table(df_rates_plot_h)
+                
+                base_rate_h = rates_h_data[base_c]["rate"]
+                quote_rate_h = rates_h_data[quote_c]["rate"]
+                diff_bps_h = int((quote_rate_h - base_rate_h) * 100)
+                st.metric("Zinsdifferenz (Quote - Base)", f"{diff_bps_h:+.0f} bps", help="Positive Werte bedeuten, dass die Quote-Währung höhere Zinsen hat.")
+                
+            with hist_sub_tabs[3]:
+                st.markdown("#### 📊 Historischer Analysten-Konsens (Finnhub)")
+                consensus_h = generate_mock_finnhub_historical(hist_analysis_pair, target_date_str)
+                
+                c_col1, c_col2 = st.columns(2)
+                with c_col1:
+                    labels = ["Buy/Strong Buy", "Hold", "Sell/Strong Sell"]
+                    values = [consensus_h["buy"], consensus_h["hold"], consensus_h["sell"]]
+                    fig_cons_h = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.4, marker=dict(colors=["#34d399", "#7d7d8a", "#ef4444"]))])
+                    fig_cons_h.update_layout(
                         paper_bgcolor='rgba(0,0,0,0)',
                         plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color="#7d7d8a", size=10),
-                        height=350,
+                        font=dict(color="#7d7d8a"),
+                        height=280,
                         margin=dict(l=10, r=10, t=10, b=10)
                     )
-                    st.plotly_chart(fig_hist_h, use_container_width=True)
+                    st.plotly_chart(fig_cons_h, use_container_width=True)
+                    
+                with c_col2:
+                    st.markdown(f"**Durchschnittliches Kursziel:** `{consensus_h['targetMean']}`")
+                    st.markdown(f"**Höchstes Kursziel:** `{consensus_h['targetHigh']}`")
+                    st.markdown(f"**Tiefstes Kursziel:** `{consensus_h['targetLow']}`")
+                    st.markdown("---")
+                    st.markdown("**Letzte Analysten-Einstufungen:**")
+                    st.table(pd.DataFrame(consensus_h["history"]))
+                    
+            with hist_sub_tabs[4]:
+                st.markdown("#### 🧠 Historischer Sentiment-Score (StockData)")
+                sentiment_h = generate_mock_stockdata_historical(hist_analysis_pair, target_date_str)
+                
+                fig_gauge_h = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=sentiment_h,
+                    domain={'x': [0, 1], 'y': [0, 1]},
+                    title={'text': "Sentiment-Score (-10 bis +10)", 'font': {'color': "#7d7d8a", 'size': 14}},
+                    gauge={
+                        'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
+                        'bar': {'color': "#e2b13c"},
+                        'bgcolor': "#14161d",
+                        'borderwidth': 1,
+                        'bordercolor': "#1f2026",
+                        'steps': [
+                            {'range': [-10, -3], 'color': 'rgba(239, 68, 68, 0.15)'},
+                            {'range': [-3, 3], 'color': 'rgba(125, 125, 138, 0.15)'},
+                            {'range': [3, 10], 'color': 'rgba(52, 211, 153, 0.15)'}
+                        ]
+                    }
+                ))
+                fig_gauge_h.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a"),
+                    height=250,
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
+                st.plotly_chart(fig_gauge_h, use_container_width=True)
+                
+            with hist_sub_tabs[5]:
+                st.markdown("#### 🧮 30-Tage Historische Pearson-Korrelation")
+                corr_df_h, is_live_corr_h = get_historical_correlation_matrix(target_date_str)
+                
+                fig_heatmap_h = go.Figure(data=go.Heatmap(
+                    z=corr_df_h.values,
+                    x=corr_df_h.columns,
+                    y=corr_df_h.index,
+                    colorscale="RdBu",
+                    zmin=-1.0, zmax=1.0,
+                    text=np.round(corr_df_h.values, 2),
+                    texttemplate="%{text}",
+                    showscale=True
+                ))
+                fig_heatmap_h.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a", size=9),
+                    height=380,
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
+                st.plotly_chart(fig_heatmap_h, use_container_width=True)
+                st.caption(f"Quelle: {'Reale daily rates' if is_live_corr_h else 'Mock-Korrelation (Fallback)'}")
+                
+            with hist_sub_tabs[6]:
+                st.markdown("#### 📈 Kursverlauf bis zu diesem Datum")
+                df_hist_all, _, _ = get_fcs_history_data(hist_analysis_pair, FCS_KEY)
+                
+                if df_hist_all is not None and not df_hist_all.empty:
+                    target_dt_limit = pd.to_datetime(target_date_str)
+                    df_hist_h = df_hist_all[df_hist_all["date"] <= target_dt_limit]
+                    
+                    if not df_hist_h.empty:
+                        fig_hist_h = go.Figure()
+                        fig_hist_h.add_trace(go.Scatter(
+                            x=df_hist_h["date"], y=df_hist_h["close"],
+                            line=dict(color="#e2b13c", width=2),
+                            name="Schlusskurs"
+                        ))
+                        fig_hist_h.update_layout(
+                            xaxis_title="Datum",
+                            yaxis_title="Kurs",
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            font=dict(color="#7d7d8a", size=10),
+                            height=350,
+                            margin=dict(l=10, r=10, t=10, b=10)
+                        )
+                        st.plotly_chart(fig_hist_h, use_container_width=True)
+                    else:
+                        st.warning("Keine Kursdaten vor diesem Datum gefunden.")
                 else:
-                    st.warning("Keine Kursdaten vor diesem Datum gefunden.")
-            else:
-                st.warning("Keine Kursverlaufsdaten verfügbar.")
+                    st.warning("Keine Kursverlaufsdaten verfügbar.")
+                    
+            with hist_sub_tabs[7]:
+                st.markdown("#### 🛍️ Historische Rohstoffpreise & Märkte")
+                st.caption(f"Rohstoffpreise und VIX-Volatilität am {target_date_str}.")
                 
-        with hist_sub_tabs[7]:
-            st.markdown("#### 📰 Historische Nachrichten (±3 Tage)")
-            news_h = generate_mock_news_historical(hist_analysis_pair, target_date_str)
-            render_articles_grid(news_h)
-            
-        st.markdown("---")
-        st.subheader("📝 Journal & Trade-Entscheidung")
-        st.caption("Dokumentiere deine historische Analyse und vergleiche deine Entscheidung später mit den realen Marktbewegungen.")
-        
-        with st.form("backtest_decision_form"):
-            decision_type = st.radio(
-                "Entscheidung für diesen Tag:",
-                options=["❌ Trade verwerfen", "✅ Trade setzen", "💡 Wäre ein Trade gewesen"],
-                horizontal=True
-            )
-            notes_h = st.text_area("Notizen zur Analyse (Welche Indikatoren waren ausschlaggebend?):", height=100)
-            save_decision_btn = st.form_submit_button("💾 Entscheidung speichern")
-            
-            if save_decision_btn:
-                new_decision = {
-                    "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
-                    "target_date": target_date_str,
-                    "pair": hist_analysis_pair,
-                    "signal_value": round(signal_value_h, 2),
-                    "signal_badge": badge_h,
-                    "decision": decision_type,
-                    "notes": notes_h
-                }
-                all_decisions = save_backtest_decision(new_decision)
-                st.success("Handelsentscheidung erfolgreich in 'backtest_decisions.json' gespeichert!")
+                comm_h = generate_mock_commodities_historical(target_date_str)
                 
+                c_col1, c_col2, c_col3, c_col4, c_col5 = st.columns(5)
+                with c_col1:
+                    render_metric_card("Gold (Spot)", f"${comm_h['gold']:.2f}", f"Mock Spot am {target_date_str} (change: {comm_h['gold_chg']:+.1f}%)", comm_h['gold_chg'] >= 0)
+                with c_col2:
+                    render_metric_card("Silber (Spot)", f"${comm_h['silver']:.2f}", f"Mock Spot am {target_date_str} (change: {comm_h['silver_chg']:+.1f}%)", comm_h['silver_chg'] >= 0)
+                with c_col3:
+                    render_metric_card("WTI Rohöl", f"${comm_h['wti']:.2f}", f"Mock Spot am {target_date_str} (change: {comm_h['wti_chg']:+.1f}%)", comm_h['wti_chg'] >= 0)
+                with c_col4:
+                    render_metric_card("Brent Rohöl", f"${comm_h['brent']:.2f}", f"Mock Spot am {target_date_str} (change: {comm_h['brent_chg']:+.1f}%)", comm_h['brent_chg'] >= 0)
+                with c_col5:
+                    render_metric_card("VIX Volatilitätsindex", f"{comm_h['vix']:.2f}", f"Mock Index am {target_date_str} (change: {comm_h['vix_chg']:+.1f}%)", comm_h['vix_chg'] < 0)
+                    
+            with hist_sub_tabs[8]:
+                st.markdown("#### 🇺🇸 US-Arbeitsmarkt (BLS) - Historisch")
+                st.caption(f"Historische US-Arbeitsmarktdaten am {target_date_str}.")
+                
+                labor_h = get_historical_labor_data(target_date_str)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Non-Farm Payrolls</span>
+                        <div class="metric-value">{labor_h['nfp']/1000.0:,.1f}M</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if labor_h['nfp_chg'] >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            Change: {labor_h['nfp_chg']:+.1f}K (Jobs)
+                        </div>
+                        <div class="source-tag">Quelle: FRED/BLS Fallback</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Durchschnittlicher Stundenlohn</span>
+                        <div class="metric-value">${labor_h['wage']:.2f}</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if labor_h['wage_chg'] >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            MoM: {labor_h['wage_chg']:+.2f}%
+                        </div>
+                        <div class="source-tag">Quelle: FRED/BLS Fallback</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col3:
+                    st.markdown(f"""
+                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
+                        <span class="metric-label">Erwerbsquote (Participation Rate)</span>
+                        <div class="metric-value">{labor_h['part']:.1f}%</div>
+                        <div style="font-size:0.85rem; color:{'#10b981' if labor_h['part_chg'] >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
+                            Change: {labor_h['part_chg']:+.2f}%
+                        </div>
+                        <div class="source-tag">Quelle: FRED/BLS Fallback</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+            with hist_sub_tabs[9]:
+                st.markdown("#### ⚠️ Historische Risikokennzahlen")
+                base_iso = CURRENCIES.get(base_c, {}).get("wb_code", base_c)
+                quote_iso = CURRENCIES.get(quote_c, {}).get("wb_code", quote_c)
+                
+                base_debt_h, base_debt_dt, _ = get_worldbank_data_historical(base_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+                quote_debt_h, quote_debt_dt, _ = get_worldbank_data_historical(quote_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
+                
+                base_cli_res = get_historical_oecd_cli(base_c, target_date_str)
+                quote_cli_res = get_historical_oecd_cli(quote_c, target_date_str)
+                base_cli_h = base_cli_res[0] if base_cli_res is not None else None
+                quote_cli_h = quote_cli_res[0] if quote_cli_res is not None else None
+                
+                debt_col1, debt_col2 = st.columns(2)
+                with debt_col1:
+                    st.markdown(f"##### 🏛️ Staatsverschuldung (% BIP)")
+                    b_debt_str = f"{base_debt_h:.1f}%" if base_debt_h is not None else "Daten nicht verfügbar"
+                    q_debt_str = f"{quote_debt_h:.1f}%" if quote_debt_h is not None else "Daten nicht verfügbar"
+                    st.markdown(f"- **{base_c}:** `{b_debt_str}` (Jahr: {base_debt_dt.strftime('%Y') if base_debt_dt else 'N/A'})")
+                    st.markdown(f"- **{quote_c}:** `{q_debt_str}` (Jahr: {quote_debt_dt.strftime('%Y') if quote_debt_dt else 'N/A'})")
+                    
+                with debt_col2:
+                    st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
+                    if base_cli_h is not None:
+                        try:
+                            b_cli_str = f"{float(base_cli_h):.2f}"
+                        except (ValueError, TypeError):
+                            b_cli_str = "Daten nicht verfügbar"
+                    else:
+                        b_cli_str = "Daten nicht verfügbar"
+                        
+                    if quote_cli_h is not None:
+                        try:
+                            q_cli_str = f"{float(quote_cli_h):.2f}"
+                        except (ValueError, TypeError):
+                            q_cli_str = "Daten nicht verfügbar"
+                    else:
+                        q_cli_str = "Daten nicht verfügbar"
+                        
+                    st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {'>100 (Wachstum)' if base_cli_h and float(base_cli_h) > 100.0 else '<100 (Verlangsamung)' if base_cli_h else 'N/A'})")
+                    st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {'>100 (Wachstum)' if quote_cli_h and float(quote_cli_h) > 100.0 else '<100 (Verlangsamung)' if quote_cli_h else 'N/A'})")
+                    
+            with hist_sub_tabs[10]:
+                st.markdown("#### 📰 Historische Nachrichten (Echtzeit-Timeline ±3 Tage)")
+                news_h = generate_mock_news_historical(hist_analysis_pair, target_date_str)
+                render_articles_grid(news_h)              
         past_decisions = load_backtest_decisions()
         if past_decisions:
             st.markdown("##### 📜 Bisherige Backtest-Entscheidungen")
