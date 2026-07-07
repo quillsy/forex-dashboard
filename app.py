@@ -1431,95 +1431,72 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
         return None, None, False
 
     try:
-        target_date_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-        url = "https://api.stlouisfed.org/fred/series/observations"
-        params = {
-            "series_id": series_id,
-            "api_key": fred_key,
-            "file_type": "json",
-            "observation_end": target_date_str,
-            "sort_order": "desc",
-            "limit": 1
-        }
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200:
-            obs = r.json().get("observations", [])
-            if obs and obs[0]["value"] != ".":
-                val = float(obs[0]["value"])
-                dt = pd.to_datetime(obs[0]["date"])
-                return val, dt, True
-    except Exception:
-        pass
-
-    try:
         df, _, is_live = get_fred_data(series_id, fred_key)
         if df is not None and not df.empty:
             target_dt = pd.to_datetime(target_date)
-            df_filtered = df[df["date"] <= target_dt]
-            if not df_filtered.empty:
-                latest_row = df_filtered.iloc[-1]
-                return float(latest_row["value"]), latest_row["date"], is_live
+            df = df.copy()
+            df["diff"] = (df["date"] - target_dt).abs()
+            closest_row = df.sort_values("diff").iloc[0]
+            return float(closest_row["value"]), closest_row["date"], is_live
     except Exception:
         pass
 
     return None, None, False
 
 
-ECB_HISTORICAL_MRO = {
-    "2005-01-01": 2.00,
-    "2005-12-06": 2.25,
-    "2006-03-08": 2.50,
-    "2006-06-15": 2.75,
-    "2006-08-31": 3.00,
-    "2006-10-11": 3.25,
-    "2006-12-13": 3.50,
-    "2007-03-14": 3.75,
-    "2007-06-13": 4.00,
-    "2008-07-09": 4.25,
-    "2008-10-15": 3.75,
-    "2008-11-12": 3.25,
-    "2008-12-10": 2.50,
-    "2009-01-21": 2.00,
-    "2009-03-11": 1.50,
-    "2009-04-08": 1.25,
-    "2009-05-13": 1.00,
-    "2011-04-13": 1.25,
-    "2011-07-13": 1.50,
-    "2011-11-09": 1.25,
-    "2011-12-14": 1.00,
-    "2012-07-11": 0.75,
-    "2013-05-08": 0.50,
-    "2013-11-13": 0.25,
-    "2014-06-11": 0.15,
-    "2014-09-10": 0.05,
-    "2016-03-16": 0.00,
-    "2022-07-27": 0.50,
-    "2022-09-14": 1.25,
-    "2022-11-02": 2.00,
-    "2022-12-21": 2.50,
-    "2023-02-08": 3.00,
-    "2023-03-22": 3.50,
-    "2023-05-10": 3.75,
-    "2023-06-21": 4.00,
-    "2023-08-02": 4.25,
-    "2023-09-20": 4.50,
-    "2024-06-12": 4.25,
-    "2024-09-18": 3.65,
-    "2024-10-23": 3.40,
-    "2024-12-18": 3.15
-}
-
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_ecb_rate_historical(target_date):
-    target_dt = pd.to_datetime(target_date)
-    valid_changes = []
-    for date_str, rate in ECB_HISTORICAL_MRO.items():
-        change_dt = pd.to_datetime(date_str)
-        if change_dt <= target_dt:
-            valid_changes.append((change_dt, rate))
-    if valid_changes:
-        valid_changes.sort(key=lambda x: x[0])
-        latest_change = valid_changes[-1]
-        return float(latest_change[1]), latest_change[0]
+    try:
+        target_date_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        url = f"https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.MRR_FR.LEV?startPeriod={target_date_str}&endPeriod={target_date_str}&format=jsondata"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            res = r.json()
+            series = res["dataSets"][0]["series"]
+            if series:
+                series_key = list(series.keys())[0]
+                obs = series[series_key]["observations"]
+                if obs:
+                    val = float(list(obs.values())[0][0])
+                    return val, pd.to_datetime(target_date_str)
+    except Exception:
+        pass
+
+    # Fallback to querying series up to target date using endPeriod
+    try:
+        target_date_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        url = f"https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.MRR_FR.LEV?endPeriod={target_date_str}&format=jsondata"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            res = r.json()
+            series = res["dataSets"][0]["series"]
+            if series:
+                series_key = list(series.keys())[0]
+                obs = series[series_key]["observations"]
+                
+                dimensions = res["structure"]["dimensions"]["observation"]
+                time_dim = next(dim for dim in dimensions if dim["id"] == "TIME_PERIOD")
+                time_values = [v["id"] for v in time_dim["values"]]
+                
+                parsed = []
+                for idx_str, val_list in obs.items():
+                    idx = int(idx_str)
+                    date_str = time_values[idx]
+                    parsed.append((pd.to_datetime(date_str), float(val_list[0])))
+                if parsed:
+                    parsed.sort(key=lambda x: x[0])
+                    return parsed[-1][1], parsed[-1][0]
+    except Exception:
+        pass
+        
     return None, None
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1550,10 +1527,10 @@ def get_boc_rate_historical(target_date):
     df = get_boc_rate_historical_cached()
     if df is not None and not df.empty:
         target_dt = pd.to_datetime(target_date)
-        df_filtered = df[df["date"] <= target_dt]
-        if not df_filtered.empty:
-            latest = df_filtered.sort_values("date").iloc[-1]
-            return float(latest["value"]), "Bank of Canada API"
+        df = df.copy()
+        df["diff"] = (df["date"] - target_dt).abs()
+        closest = df.sort_values("diff").iloc[0]
+        return float(closest["value"]), "Bank of Canada API"
             
     # Fallback to FRED IRSTCI01CAM156N
     val_fred, dt_fred, _ = get_fred_data_historical("IRSTCI01CAM156N", target_date)
@@ -1595,12 +1572,10 @@ def get_snb_rate_historical(target_date):
         df_lz = df_lz.sort_values("parsed_date")
         
         target_dt = pd.to_datetime(target_date)
-        df_filtered = df_lz[df_lz["parsed_date"] <= target_dt]
-        if not df_filtered.empty:
-            latest = df_filtered.sort_values("parsed_date").iloc[-1]
-            return float(latest["Value"]), latest["parsed_date"]
-        first = df_lz.sort_values("parsed_date").iloc[0]
-        return float(first["Value"]), first["parsed_date"]
+        df_lz = df_lz.copy()
+        df_lz["diff"] = (df_lz["parsed_date"] - target_dt).abs()
+        closest = df_lz.sort_values("diff").iloc[0]
+        return float(closest["Value"]), closest["parsed_date"]
     except Exception:
         pass
     return None, None
@@ -1706,7 +1681,7 @@ def get_country_rate_historical(country_code, target_date):
     elif curr == "EUR":
         val, _ = get_ecb_rate_historical(target_date)
         if val is not None:
-            return val, "ECB Table"
+            return val, "ECB API"
             
     elif curr == "CHF":
         val, _ = get_snb_rate_historical(target_date)
@@ -2084,15 +2059,17 @@ def compute_currency_score_historical(curr, target_date):
     fred_key = FRED_KEY
     if curr == "USD":
         rate_val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
-        rate_val = rate_val if rate_val is not None else 5.25
+        if rate_val is None:
+            return None
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
         unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date)
-        unemp_val = unemp_val if unemp_val is not None else 3.8
+        if unemp_val is None:
+            return None
         unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
         
         df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
-        latest_cpi = 2.4
+        latest_cpi = None
         if df_cpi is not None and not df_cpi.empty:
             df_cpi_c = df_cpi.copy()
             if len(df_cpi_c) >= 13:
@@ -2100,10 +2077,12 @@ def compute_currency_score_historical(curr, target_date):
                 df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
                 if not df_filtered.empty:
                     latest_cpi = df_filtered.iloc[-1]["yoy"]
+        if latest_cpi is None:
+            return None
         cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
         
         df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
-        latest_gdp = 1.8
+        latest_gdp = None
         if df_gdp is not None and not df_gdp.empty:
             df_gdp_c = df_gdp.copy()
             if len(df_gdp_c) >= 5:
@@ -2111,26 +2090,31 @@ def compute_currency_score_historical(curr, target_date):
                 df_filtered = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(target_date)]
                 if not df_filtered.empty:
                     latest_gdp = df_filtered.iloc[-1]["yoy"]
+        if latest_gdp is None:
+            return None
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
     else:
         code = CURRENCIES[curr]["wb_code"]
         
         gdp_val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-        gdp_val = gdp_val if gdp_val is not None else 1.5
+        if gdp_val is None:
+            return None
         gdp_score = np.clip((gdp_val + 2.0) / 6.0 * 100, 0, 100)
         
         cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
-        cpi_val = cpi_val if cpi_val is not None else 2.5
+        if cpi_val is None:
+            return None
         cpi_score = np.clip((cpi_val / 5.0) * 100, 0, 100)
         
         rate_val, _ = get_country_rate_historical(code, target_date)
+        if rate_val is None:
+            return None
         rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
         
         unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
-        if unemp_val is not None:
-            unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
-        else:
-            unemp_score = np.clip(65 + (gdp_val - 2.0) * 5, 40, 85)
+        if unemp_val is None:
+            return None
+        unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
             
     total_score = 0.50 * rate_score + 0.20 * cpi_score + 0.15 * unemp_score + 0.15 * gdp_score
     return total_score
