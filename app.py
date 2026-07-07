@@ -3645,6 +3645,8 @@ with tab10:
         cli_data = get_latest_oecd_cli(curr)
         if cli_data:
             cli_val, cli_date = cli_data
+            if -15.0 <= cli_val <= 15.0:
+                cli_val = 100.0 + cli_val
             trend_str = "über Trend" if cli_val > 100.0 else ("unter Trend" if cli_val < 100.0 else "auf Trend")
             cli_str = f"{cli_val:.2f} ({trend_str}, {cli_date})"
         else:
@@ -4433,10 +4435,21 @@ with tab14:
                             
                         with debt_col2:
                             st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
-                            b_cli_str = f"{float(base_cli_h):.2f}" if base_cli_h is not None else "Daten nicht verfügbar"
-                            q_cli_str = f"{float(quote_cli_h):.2f}" if quote_cli_h is not None else "Daten nicht verfügbar"
-                            b_trend = '>100 (Wachstum)' if base_cli_h and float(base_cli_h) > 100.0 else '<100 (Verlangsamung)' if base_cli_h else 'N/A'
-                            q_trend = '>100 (Wachstum)' if quote_cli_h and float(quote_cli_h) > 100.0 else '<100 (Verlangsamung)' if quote_cli_h else 'N/A'
+                            b_val = float(base_cli_h) if base_cli_h is not None else None
+                            q_val = float(quote_cli_h) if quote_cli_h is not None else None
+                            
+                            # Normalize deviation values (e.g. -15 to 15) to 100-base
+                            if b_val is not None and -15.0 <= b_val <= 15.0:
+                                b_val = 100.0 + b_val
+                            if q_val is not None and -15.0 <= q_val <= 15.0:
+                                q_val = 100.0 + q_val
+                                
+                            b_cli_str = f"{b_val:.2f}" if b_val is not None else "Daten nicht verfügbar"
+                            q_cli_str = f"{q_val:.2f}" if q_val is not None else "Daten nicht verfügbar"
+                            
+                            b_trend = '>100 (Wachstum)' if b_val and b_val > 100.0 else '<100 (Verlangsamung)' if b_val else 'N/A'
+                            q_trend = '>100 (Wachstum)' if q_val and q_val > 100.0 else '<100 (Verlangsamung)' if q_val else 'N/A'
+                            
                             st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {b_trend}) [Quelle: OECD]")
                             st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {q_trend}) [Quelle: OECD]")
                             
