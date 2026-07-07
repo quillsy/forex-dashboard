@@ -1692,6 +1692,8 @@ def get_snb_rate_historical(target_date):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_worldbank_data_historical_cached(country_code, indicator):
+    if country_code == "EMU":
+        country_code = "DEU"
     try:
         # Auto-translate ZG to ZS for unemployment
         ind_code = "SL.UEM.TOTL.ZS" if indicator == "SL.UEM.TOTL.ZG" else indicator
@@ -1715,6 +1717,8 @@ def get_worldbank_data_historical_cached(country_code, indicator):
     return None, False
 
 def get_worldbank_data_historical(country_code, indicator, target_date):
+    if country_code == "EMU":
+        country_code = "DEU"
     df, is_live = get_worldbank_data_historical_cached(country_code, indicator)
     if df is not None and not df.empty:
         target_year = pd.to_datetime(target_date).year
