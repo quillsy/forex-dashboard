@@ -247,6 +247,16 @@ def generate_mock_fred(series_id):
         values = np.clip(np.linspace(5.5, 3.8, len(dates)) + np.random.normal(0, 0.15, len(dates)), 3.0, 15.0)
     elif series_id == "NAPM":
         values = np.clip(50.0 + np.random.normal(0, 3.0, len(dates)), 35.0, 65.0)
+    elif series_id == "BOEBASE":
+        values = np.clip(np.linspace(0.5, 5.25, len(dates)) + np.random.normal(0, 0.2, len(dates)), 0.1, 6.0)
+    elif series_id == "JPNIR":
+        values = np.clip(np.linspace(-0.1, 0.25, len(dates)) + np.random.normal(0, 0.05, len(dates)), -0.15, 0.5)
+    elif series_id == "CANIR":
+        values = np.clip(np.linspace(0.75, 5.0, len(dates)) + np.random.normal(0, 0.2, len(dates)), 0.25, 6.0)
+    elif series_id == "AUDIR":
+        values = np.clip(np.linspace(1.5, 4.35, len(dates)) + np.random.normal(0, 0.2, len(dates)), 0.1, 5.5)
+    elif series_id == "NZLIR":
+        values = np.clip(np.linspace(1.5, 5.5, len(dates)) + np.random.normal(0, 0.2, len(dates)), 0.25, 6.5)
     else:
         values = np.zeros(len(dates))
     return pd.DataFrame({"date": dates, "value": values})
@@ -1653,11 +1663,11 @@ def get_historical_oecd_cli(curr, target_date):
 
 FRED_RATE_SERIES = {
     "USD": "FEDFUNDS",
-    "GBP": "IRSTCI01GBM156N",
-    "JPY": "IRSTCI01JPM156N",
-    "CAD": "IRSTCI01CAM156N",
-    "AUD": "IRSTCI01AUM156N",
-    "NZD": "IRSTCI01NZM156N"
+    "GBP": "BOEBASE",
+    "JPY": "JPNIR",
+    "CAD": "CANIR",
+    "AUD": "AUDIR",
+    "NZD": "NZLIR"
 }
 
 def get_country_rate_historical(country_code, target_date):
