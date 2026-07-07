@@ -1483,10 +1483,12 @@ def get_ecb_rate_historical(target_date):
     df = get_ecb_rate_historical_cached()
     if df is not None and not df.empty:
         target_dt = pd.to_datetime(target_date)
-        df = df.copy()
-        df["diff"] = (df["date"] - target_dt).abs()
-        closest_row = df.sort_values("diff").iloc[0]
-        return float(closest_row["value"]), closest_row["date"]
+        df_filtered = df[df["date"] <= target_dt]
+        if not df_filtered.empty:
+            latest = df_filtered.sort_values("date").iloc[-1]
+            return float(latest["value"]), latest["date"]
+        first = df.sort_values("date").iloc[0]
+        return float(first["value"]), first["date"]
     return None, None
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1524,7 +1526,10 @@ def get_snb_rate_historical(target_date):
         target_dt = pd.to_datetime(target_date)
         df_filtered = df_lz[df_lz["parsed_date"] <= target_dt]
         if not df_filtered.empty:
-            return float(df_filtered.iloc[-1]["Value"]), df_filtered.iloc[-1]["parsed_date"]
+            latest = df_filtered.sort_values("parsed_date").iloc[-1]
+            return float(latest["Value"]), latest["parsed_date"]
+        first = df_lz.sort_values("parsed_date").iloc[0]
+        return float(first["Value"]), first["parsed_date"]
     except Exception:
         pass
     return None, None
