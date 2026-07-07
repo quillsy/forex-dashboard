@@ -1392,13 +1392,10 @@ def get_news_data_search(query, newsdata_key, newsapi_key):
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_fred_history_full(series_id, target_date, key):
     if not key:
-        df_mock = generate_mock_fred(series_id)
-        if df_mock is not None and not df_mock.empty:
-            target_dt = pd.to_datetime(target_date)
-            return df_mock[df_mock["date"] <= target_dt]
         return None
     try:
-        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_end={target_date}"
+        target_date_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_end={target_date_str}"
         r = requests.get(url, timeout=8)
         if r.status_code == 200:
             obs = r.json().get("observations", [])
@@ -1431,22 +1428,16 @@ def fetch_fred_history_full(series_id, target_date, key):
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
     if not fred_key:
-        df_mock = generate_mock_fred(series_id)
-        if df_mock is not None and not df_mock.empty:
-            target_dt = pd.to_datetime(target_date)
-            df_filtered = df_mock[df_mock["date"] <= target_dt]
-            if not df_filtered.empty:
-                latest_row = df_filtered.iloc[-1]
-                return float(latest_row["value"]), latest_row["date"], False
         return None, None, False
 
     try:
+        target_date_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
             "series_id": series_id,
             "api_key": fred_key,
             "file_type": "json",
-            "observation_end": str(target_date),
+            "observation_end": target_date_str,
             "sort_order": "desc",
             "limit": 1
         }
@@ -1473,69 +1464,62 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
 
     return None, None, False
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_ecb_rate_historical_cached():
-    try:
-        url = "https://data-api.ecb.europa.eu/service/data/FM/D.U2.EUR.4F.KR.MRR_FR.LEV?format=jsondata"
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0"
-        }
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        res = r.json()
-        series = res["dataSets"][0]["series"]
-        series_key = list(series.keys())[0]
-        obs = series[series_key]["observations"]
-        
-        dimensions = res["structure"]["dimensions"]["observation"]
-        time_dim = next(dim for dim in dimensions if dim["id"] == "TIME_PERIOD")
-        time_values = [v["id"] for v in time_dim["values"]]
-        
-        parsed = []
-        for idx_str, val_list in obs.items():
-            idx = int(idx_str)
-            date_str = time_values[idx]
-            val = float(val_list[0])
-            parsed.append((pd.to_datetime(date_str), val))
-            
-        if parsed:
-            df = pd.DataFrame(parsed, columns=["date", "value"]).sort_values("date").reset_index(drop=True)
-            return df
-    except Exception:
-        pass
-        
-    # Generate mock fallback covering wide date range (2005-2027)
-    years = pd.date_range(start="2005-01-01", end="2027-01-01", freq="D")
-    rates = []
-    for dt in years:
-        y = dt.year
-        if y < 2008:
-            rates.append(3.0)
-        elif y < 2009:
-            rates.append(4.25)
-        elif y < 2012:
-            rates.append(1.0)
-        elif y < 2016:
-            rates.append(0.05)
-        elif y < 2022:
-            rates.append(0.0)
-        elif y < 2025:
-            rates.append(4.5)
-        else:
-            rates.append(3.0)
-    return pd.DataFrame({"date": years, "value": rates})
+
+ECB_HISTORICAL_MRO = {
+    "2005-01-01": 2.00,
+    "2005-12-06": 2.25,
+    "2006-03-08": 2.50,
+    "2006-06-15": 2.75,
+    "2006-08-31": 3.00,
+    "2006-10-11": 3.25,
+    "2006-12-13": 3.50,
+    "2007-03-14": 3.75,
+    "2007-06-13": 4.00,
+    "2008-07-09": 4.25,
+    "2008-10-15": 3.75,
+    "2008-11-12": 3.25,
+    "2008-12-10": 2.50,
+    "2009-01-21": 2.00,
+    "2009-03-11": 1.50,
+    "2009-04-08": 1.25,
+    "2009-05-13": 1.00,
+    "2011-04-13": 1.25,
+    "2011-07-13": 1.50,
+    "2011-11-09": 1.25,
+    "2011-12-14": 1.00,
+    "2012-07-11": 0.75,
+    "2013-05-08": 0.50,
+    "2013-11-13": 0.25,
+    "2014-06-11": 0.15,
+    "2014-09-10": 0.05,
+    "2016-03-16": 0.00,
+    "2022-07-27": 0.50,
+    "2022-09-14": 1.25,
+    "2022-11-02": 2.00,
+    "2022-12-21": 2.50,
+    "2023-02-08": 3.00,
+    "2023-03-22": 3.50,
+    "2023-05-10": 3.75,
+    "2023-06-21": 4.00,
+    "2023-08-02": 4.25,
+    "2023-09-20": 4.50,
+    "2024-06-12": 4.25,
+    "2024-09-18": 3.65,
+    "2024-10-23": 3.40,
+    "2024-12-18": 3.15
+}
 
 def get_ecb_rate_historical(target_date):
-    df = get_ecb_rate_historical_cached()
-    if df is not None and not df.empty:
-        target_dt = pd.to_datetime(target_date)
-        df_filtered = df[df["date"] <= target_dt]
-        if not df_filtered.empty:
-            latest = df_filtered.sort_values("date").iloc[-1]
-            return float(latest["value"]), latest["date"]
-        first = df.sort_values("date").iloc[0]
-        return float(first["value"]), first["date"]
+    target_dt = pd.to_datetime(target_date)
+    valid_changes = []
+    for date_str, rate in ECB_HISTORICAL_MRO.items():
+        change_dt = pd.to_datetime(date_str)
+        if change_dt <= target_dt:
+            valid_changes.append((change_dt, rate))
+    if valid_changes:
+        valid_changes.sort(key=lambda x: x[0])
+        latest_change = valid_changes[-1]
+        return float(latest_change[1]), latest_change[0]
     return None, None
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1560,29 +1544,7 @@ def get_boc_rate_historical_cached():
                     return df
         except Exception:
             pass
-            
-    # Mock fallback covering wide date range (2005-2027)
-    years = pd.date_range(start="2005-01-01", end="2027-01-01", freq="D")
-    rates = []
-    for dt in years:
-        y = dt.year
-        if y < 2008:
-            rates.append(4.25)
-        elif y < 2010:
-            rates.append(0.25)
-        elif y < 2015:
-            rates.append(1.0)
-        elif y < 2017:
-            rates.append(0.5)
-        elif y < 2020:
-            rates.append(1.75)
-        elif y < 2022:
-            rates.append(0.25)
-        elif y < 2024:
-            rates.append(5.0)
-        else:
-            rates.append(4.25)
-    return pd.DataFrame({"date": years, "value": rates})
+    return None
 
 def get_boc_rate_historical(target_date):
     df = get_boc_rate_historical_cached()
@@ -1591,10 +1553,14 @@ def get_boc_rate_historical(target_date):
         df_filtered = df[df["date"] <= target_dt]
         if not df_filtered.empty:
             latest = df_filtered.sort_values("date").iloc[-1]
-            return float(latest["value"]), latest["date"]
-        first = df.sort_values("date").iloc[0]
-        return float(first["value"]), first["date"]
-    return None, None
+            return float(latest["value"]), "Bank of Canada API"
+            
+    # Fallback to FRED IRSTCI01CAM156N
+    val_fred, dt_fred, _ = get_fred_data_historical("IRSTCI01CAM156N", target_date)
+    if val_fred is not None:
+        return val_fred, "FRED (IRSTCI01CAM156N)"
+        
+    return None, "Keine Daten verfügbar"
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_snb_rate_historical(target_date):
@@ -1666,10 +1632,12 @@ def get_worldbank_data_historical_cached(country_code, indicator):
 def get_worldbank_data_historical(country_code, indicator, target_date):
     df, is_live = get_worldbank_data_historical_cached(country_code, indicator)
     if df is not None and not df.empty:
-        target_dt = pd.to_datetime(target_date)
-        df_filtered = df[df["date"] <= target_dt]
+        target_year = pd.to_datetime(target_date).year
+        df = df.copy()
+        df["year"] = df["date"].dt.year
+        df_filtered = df[df["year"] <= target_year]
         if not df_filtered.empty:
-            latest_row = df_filtered.sort_values("date").iloc[-1]
+            latest_row = df_filtered.sort_values("year").iloc[-1]
             return float(latest_row["value"]), latest_row["date"], is_live
     return None, None, False
 
@@ -1738,45 +1706,37 @@ def get_country_rate_historical(country_code, target_date):
     elif curr == "EUR":
         val, _ = get_ecb_rate_historical(target_date)
         if val is not None:
-            return val, "ECB API"
-        # Fallback to FRED ECBMRRFR
-        val_fred, _, _ = get_fred_data_historical("ECBMRRFR", target_date)
-        if val_fred is not None:
-            return val_fred, "FRED (ECBMRRFR)"
+            return val, "ECB Table"
             
     elif curr == "CHF":
         val, _ = get_snb_rate_historical(target_date)
         if val is not None:
             return val, "SNB API"
-        # Fallback to FRED IRSTCI01CHM156N
-        val_fred, _, _ = get_fred_data_historical("IRSTCI01CHM156N", target_date)
-        if val_fred is not None:
-            return val_fred, "FRED (IRSTCI01CHM156N)"
             
     elif curr == "GBP":
-        val, dt, _ = get_fred_data_historical("BOEBASE", target_date)
+        val, dt, _ = get_fred_data_historical("IRSTCI01GBM156N", target_date)
         if val is not None:
-            return val, "FRED (BOEBASE)"
+            return val, "FRED (IRSTCI01GBM156N)"
             
     elif curr == "JPY":
-        val, dt, _ = get_fred_data_historical("JPNIR", target_date)
+        val, dt, _ = get_fred_data_historical("IRSTCI01JPM156N", target_date)
         if val is not None:
-            return val, "FRED (JPNIR)"
+            return val, "FRED (IRSTCI01JPM156N)"
             
     elif curr == "AUD":
-        val, dt, _ = get_fred_data_historical("AUDIR", target_date)
+        val, dt, _ = get_fred_data_historical("IRSTCI01AUM156N", target_date)
         if val is not None:
-            return val, "FRED (AUDIR)"
+            return val, "FRED (IRSTCI01AUM156N)"
             
     elif curr == "NZD":
-        val, dt, _ = get_fred_data_historical("NZLIR", target_date)
+        val, dt, _ = get_fred_data_historical("IRSTCI01NZM156N", target_date)
         if val is not None:
-            return val, "FRED (NZLIR)"
+            return val, "FRED (IRSTCI01NZM156N)"
             
     elif curr == "CAD":
-        val, _ = get_boc_rate_historical(target_date)
+        val, src = get_boc_rate_historical(target_date)
         if val is not None:
-            return val, "Bank of Canada API"
+            return val, src
             
     return None, "Keine Daten verfügbar"
 
