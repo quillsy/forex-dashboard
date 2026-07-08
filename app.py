@@ -2587,6 +2587,130 @@ def compute_currency_score(curr, fred_key):
     return total_score
 
 
+COT_SYMBOLS = {
+    "EUR": "098662",
+    "GBP": "096742",
+    "CHF": "092741",
+    "CAD": "090741",
+    "AUD": "232741",
+    "NZD": "112741",
+    "JPY": "097741"
+}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_cot_year_cached(year):
+    try:
+        import cot_reports as cot
+        df = cot.cot_year(year, cot_report_type='legacy_fut')
+        if os.path.exists("annual.txt"):
+            try:
+                os.remove("annual.txt")
+            except Exception:
+                pass
+        return df
+    except Exception:
+        return None
+
+def get_cot_signal(symbol_code, target_date):
+    try:
+        target_dt = pd.to_datetime(target_date)
+        y = target_dt.year
+        
+        df_curr = load_cot_year_cached(y)
+        df_prev = load_cot_year_cached(y - 1) if y - 1 >= 2004 else None
+        
+        dfs = []
+        if df_curr is not None and not df_curr.empty:
+            dfs.append(df_curr)
+        if df_prev is not None and not df_prev.empty:
+            dfs.append(df_prev)
+            
+        if not dfs:
+            return 0
+            
+        df = pd.concat(dfs, ignore_index=True)
+        df.columns = df.columns.str.strip()
+        
+        code_col = "CFTC Contract Market Code" if "CFTC Contract Market Code" in df.columns else "CFTC_Contract_Market_Code"
+        if code_col not in df.columns:
+            return 0
+            
+        df[code_col] = df[code_col].astype(str).str.strip()
+        df[code_col] = df[code_col].apply(lambda x: x.zfill(6) if x.isdigit() else x)
+        
+        symbol_code_std = str(symbol_code).strip().zfill(6)
+        df_filtered = df[df[code_col] == symbol_code_std].copy()
+        
+        if df_filtered.empty:
+            return 0
+            
+        date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_filtered.columns else "As of Date in Form YYMMDD"
+        if date_col == "As of Date in Form YYYY-MM-DD":
+            df_filtered["parsed_date"] = pd.to_datetime(df_filtered[date_col], errors="coerce")
+        else:
+            df_filtered["parsed_date"] = pd.to_datetime(df_filtered[date_col], format="%y%m%d", errors="coerce")
+            
+        df_filtered = df_filtered.dropna(subset=["parsed_date"])
+        df_filtered = df_filtered[df_filtered["parsed_date"] <= target_dt]
+        if df_filtered.empty:
+            return 0
+            
+        df_filtered = df_filtered.sort_values("parsed_date")
+        df_filtered = df_filtered.tail(52)
+        if len(df_filtered) < 5:
+            return 0
+            
+        long_col = "Noncommercial Positions-Long (All)"
+        short_col = "Noncommercial Positions-Short (All)"
+        
+        df_filtered[long_col] = pd.to_numeric(df_filtered[long_col], errors="coerce").fillna(0.0)
+        df_filtered[short_col] = pd.to_numeric(df_filtered[short_col], errors="coerce").fillna(0.0)
+        
+        df_filtered["net_pos"] = df_filtered[long_col] - df_filtered[short_col]
+        
+        net_positions = df_filtered["net_pos"].values
+        current_net = net_positions[-1]
+        
+        p20 = np.percentile(net_positions, 20)
+        p80 = np.percentile(net_positions, 80)
+        
+        if current_net <= p20:
+            return 1
+        elif current_net >= p80:
+            return -1
+        else:
+            return 0
+    except Exception:
+        return 0
+
+def compute_score_with_cot(curr, target_date=None):
+    if target_date is None:
+        existing_score = compute_currency_score(curr, FRED_KEY)
+        cot_date = datetime.now().strftime("%Y-%m-%d")
+    else:
+        existing_score = compute_currency_score_historical(curr, target_date)
+        cot_date = target_date
+        
+    if existing_score is None:
+        return None
+        
+    symbol_code = COT_SYMBOLS.get(curr)
+    if symbol_code:
+        cot_sig = get_cot_signal(symbol_code, cot_date)
+    else:
+        cot_sig = 0
+        
+    if cot_sig == 1:
+        cot_scaled = 100.0
+    elif cot_sig == -1:
+        cot_scaled = 0.0
+    else:
+        cot_scaled = 50.0
+        
+    final_score = 0.90 * existing_score + 0.10 * cot_scaled
+    return final_score
+
+
 # ----------------- UI RENDERERS -----------------
 def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
@@ -2829,8 +2953,8 @@ with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 with st.spinner("Initialisiere globale Marktdaten..."):
     # Pre-load macro scores
-    base_score = compute_currency_score(base_curr, FRED_KEY)
-    quote_score = compute_currency_score(quote_curr, FRED_KEY)
+    base_score = compute_score_with_cot(base_curr)
+    quote_score = compute_score_with_cot(quote_curr)
     
     # Calculate corrected signal value (scaled to range -50 to +50)
     raw_diff = quote_score - base_score
@@ -2885,8 +3009,8 @@ df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
 st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
 
 def get_pair_signal_and_badge(base, quote):
-    b_score = compute_currency_score(base, FRED_KEY)
-    q_score = compute_currency_score(quote, FRED_KEY)
+    b_score = compute_score_with_cot(base)
+    q_score = compute_score_with_cot(quote)
     r_diff = q_score - b_score
     sig_val = r_diff / 2.0
     sig_val = max(-50.0, min(50.0, sig_val))
@@ -2965,7 +3089,7 @@ with tab1:
     st.caption("Auf einen Blick die makroökonomischen Scores und Handelssignale für alle Währungspaare vergleichen.")
     
     # 1. Macro scores comparison chart
-    scores = {curr: compute_currency_score(curr, FRED_KEY) for curr in CURRENCIES.keys()}
+    scores = {curr: compute_score_with_cot(curr) for curr in CURRENCIES.keys()}
     df_scores = pd.DataFrame(list(scores.items()), columns=["Currency", "Score"])
     currency_order = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
     df_scores['Currency'] = pd.Categorical(df_scores['Currency'], categories=currency_order, ordered=True)
@@ -3956,8 +4080,8 @@ with tab14:
             st.subheader(f"📊 Historische Analyse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
             
             with st.spinner("Berechne fundamentales Signal..."):
-                base_score_h = compute_currency_score_historical(base_c, target_date_str)
-                quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
+                base_score_h = compute_score_with_cot(base_c, target_date_str)
+                quote_score_h = compute_score_with_cot(quote_c, target_date_str)
                 
                 if base_score_h is None or quote_score_h is None:
                     st.warning("⚠️ Historische Fundamental-Daten für dieses Währungspaar/Datum unvollständig oder nicht verfügbar (Fehlende API-Daten).")
@@ -4015,7 +4139,7 @@ with tab14:
                         st.markdown("#### 🏠 G8 Fundamental-Checkliste (Historisch)")
                         st.caption(f"Vergleich der makroökonomischen Scores und Handelssignale für alle G8-Paare am {target_date_str}.")
                         
-                        scores_h = {curr: compute_currency_score_historical(curr, target_date_str) for curr in CURRENCIES.keys()}
+                        scores_h = {curr: compute_score_with_cot(curr, target_date_str) for curr in CURRENCIES.keys()}
                         scores_h_valid = {k: v for k, v in scores_h.items() if v is not None}
                         
                         if not scores_h_valid:
