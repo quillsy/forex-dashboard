@@ -910,6 +910,17 @@ def get_eodhd_pmi_historical(country_code, indicator_keyword, target_date, api_k
         pass
     return None
 
+FRED_PMI_SERIES = {
+    "USD": {"m": "NAPM", "s": "NMFPT"},
+    "EUR": {"m": "EUROPAMIMIPDSMEI", "s": "EUROPASEIPDSMEI"},
+    "GBP": {"m": "GBRPAMIMIPDSMEI", "s": "GBRPASEIPDSMEI"},
+    "JPY": {"m": "JPNPAMIMIPDSMEI", "s": "JPNPASEIPDSMEI"},
+    "CAD": {"m": "CANPAMIMIPDSMEI", "s": "CANPASEIPDSMEI"},
+    "AUD": {"m": "AUSPAMIMIPDSMEI", "s": "AUSPASEIPDSMEI"},
+    "CHF": {"m": "CHEPAMIMIPDSMEI", "s": "CHEPASEIPDSMEI"},
+    "NZD": {"m": "NZLPAMIMIPDSMEI", "s": "NZLPASEIPDSMEI"}
+}
+
 def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
     pmi_results = {}
     
@@ -942,7 +953,7 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
         "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref_str, "s_src": "FRED"
     }
     
-    # Other G8 Currencies (EODHD)
+    # Other G8 Currencies (EODHD with FRED fallback)
     for code in ["EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]:
         m_last, m_prev, m_ref, m_src = None, None, None, "EODHD"
         s_last, s_prev, s_ref, s_src = None, None, None, "EODHD"
@@ -960,6 +971,37 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
                 s_prev = res_s["previous"]
                 s_ref = res_s["reference"]
                 
+        # FRED Fallback
+        if m_last is None and fred_key:
+            series_info = FRED_PMI_SERIES.get(code)
+            if series_info:
+                val, dt, _ = get_fred_data_historical(series_info["m"], target_date, fred_key)
+                if val is not None:
+                    m_last = val
+                    m_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+                    m_src = "FRED"
+                    df_m, _, _ = get_fred_data(series_info["m"], fred_key)
+                    if df_m is not None and not df_m.empty:
+                        target_dt = pd.to_datetime(target_date)
+                        df_filtered = df_m[df_m["date"] <= target_dt].sort_values("date")
+                        if len(df_filtered) >= 2:
+                            m_prev = float(df_filtered.iloc[-2]["value"])
+
+        if s_last is None and fred_key:
+            series_info = FRED_PMI_SERIES.get(code)
+            if series_info:
+                val, dt, _ = get_fred_data_historical(series_info["s"], target_date, fred_key)
+                if val is not None:
+                    s_last = val
+                    s_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+                    s_src = "FRED"
+                    df_s, _, _ = get_fred_data(series_info["s"], fred_key)
+                    if df_s is not None and not df_s.empty:
+                        target_dt = pd.to_datetime(target_date)
+                        df_filtered = df_s[df_s["date"] <= target_dt].sort_values("date")
+                        if len(df_filtered) >= 2:
+                            s_prev = float(df_filtered.iloc[-2]["value"])
+                            
         pmi_results[code] = {
             "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
             "s_last": s_last, "s_prev": s_prev, "s_ref": s_ref, "s_src": s_src
@@ -1022,6 +1064,18 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
                 m_ref = res_eod["reference"]
                 m_src = "EODHD"
                 
+        # FRED Fallback for Manufacturing
+        if m_last is None and fred_key:
+            series_info = FRED_PMI_SERIES.get(code)
+            if series_info:
+                df_m, _, _ = get_fred_data(series_info["m"], fred_key)
+                if df_m is not None and not df_m.empty:
+                    m_last = float(df_m.iloc[-1]["value"])
+                    m_ref = df_m.iloc[-1]["date"].strftime("%Y-%m-%d")
+                    m_src = "FRED"
+                    if len(df_m) >= 2:
+                        m_prev = float(df_m.iloc[-2]["value"])
+                        
         if te_s and code in te_s:
             s_last = te_s[code]["last"]
             s_prev = te_s[code]["previous"]
@@ -1035,6 +1089,18 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
                 s_ref = res_eod["reference"]
                 s_src = "EODHD"
                 
+        # FRED Fallback for Services
+        if s_last is None and fred_key:
+            series_info = FRED_PMI_SERIES.get(code)
+            if series_info:
+                df_s, _, _ = get_fred_data(series_info["s"], fred_key)
+                if df_s is not None and not df_s.empty:
+                    s_last = float(df_s.iloc[-1]["value"])
+                    s_ref = df_s.iloc[-1]["date"].strftime("%Y-%m-%d")
+                    s_src = "FRED"
+                    if len(df_s) >= 2:
+                        s_prev = float(df_s.iloc[-2]["value"])
+                        
         pmi_results[code] = {
             "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
             "s_last": s_last, "s_prev": s_prev, "s_ref": s_ref, "s_src": s_src
@@ -2126,69 +2192,136 @@ def get_historical_correlation_matrix(target_date):
 
 
 
+YIELD_SERIES = {
+    "USD": "DGS2",
+    "EUR": "IRLTLT01EZM156N",
+    "GBP": "IRLTLT01GBM156N",
+    "JPY": "IRLTLT01JPM156N",
+    "CHF": "IRLTLT01CHM156N",
+    "CAD": "IRLTLT01CAM156N",
+    "AUD": "IRLTLT01AUM156N",
+    "NZD": "IRLTLT01NZM156N"
+}
+
 def compute_currency_score_historical(curr, target_date):
     fred_key = FRED_KEY
-    if curr == "USD":
-        rate_val, _, _ = get_fred_data_historical("FEDFUNDS", target_date)
-        if rate_val is None:
+    try:
+        # 1. 2Y Yield (Zinserwartungen)
+        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], target_date, fred_key)
+        if yield_val is None:
             return None
-        rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
+        yield_score = np.clip((yield_val / 6.0) * 100, 0, 100)
         
-        unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date)
-        if unemp_val is None:
-            return None
-        unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
-        
-        df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
-        latest_cpi = None
-        if df_cpi is not None and not df_cpi.empty:
-            df_cpi_c = df_cpi.copy()
-            if len(df_cpi_c) >= 13:
-                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
-                df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
-                if not df_filtered.empty:
-                    latest_cpi = df_filtered.iloc[-1]["yoy"]
+        # 2. CPI YoY
+        if curr == "USD":
+            df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+            latest_cpi = None
+            if df_cpi is not None and not df_cpi.empty:
+                df_cpi_c = df_cpi.copy()
+                if len(df_cpi_c) >= 13:
+                    df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                    df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
+                    if not df_filtered.empty:
+                        latest_cpi = df_filtered.iloc[-1]["yoy"]
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+            latest_cpi = cpi_val
+            
         if latest_cpi is None:
             return None
         cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
         
-        df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
-        latest_gdp = None
-        if df_gdp is not None and not df_gdp.empty:
-            df_gdp_c = df_gdp.copy()
-            if len(df_gdp_c) >= 5:
-                df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
-                df_filtered = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(target_date)]
-                if not df_filtered.empty:
-                    latest_gdp = df_filtered.iloc[-1]["yoy"]
+        # 3. Real Yield
+        real_yield = yield_val - latest_cpi
+        real_yield_score = np.clip(((real_yield + 5.0) / 10.0) * 100, 0, 100)
+        
+        # 4. Unemployment (Labor Market)
+        if curr == "USD":
+            unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date, fred_key)
+            latest_unemp = unemp_val
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
+            latest_unemp = unemp_val
+            
+        if latest_unemp is None:
+            return None
+        unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
+        
+        # 5. GDP YoY
+        if curr == "USD":
+            df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
+            latest_gdp = None
+            if df_gdp is not None and not df_gdp.empty:
+                df_gdp_c = df_gdp.copy()
+                if len(df_gdp_c) >= 5:
+                    df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
+                    df_filtered = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(target_date)]
+                    if not df_filtered.empty:
+                        latest_gdp = df_filtered.iloc[-1]["yoy"]
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            gdp_val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
+            latest_gdp = gdp_val
+            
         if latest_gdp is None:
             return None
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
-    else:
-        code = CURRENCIES[curr]["wb_code"]
         
-        gdp_val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-        if gdp_val is None:
-            return None
-        gdp_score = np.clip((gdp_val + 2.0) / 6.0 * 100, 0, 100)
-        
-        cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
-        if cpi_val is None:
-            return None
-        cpi_score = np.clip((cpi_val / 5.0) * 100, 0, 100)
-        
-        rate_val, _ = get_country_rate_historical(code, target_date)
-        if rate_val is None:
-            return None
-        rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
-        
-        unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
-        if unemp_val is None:
-            return None
-        unemp_score = np.clip((10.0 - unemp_val) / 8.0 * 100, 0, 100)
+        # 6. PMI
+        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=target_date)
+        pmi_data = pmi_all.get(curr, {})
+        m_val = pmi_data.get("m_last")
+        s_val = pmi_data.get("s_last")
+        pmi_vals = [v for v in [m_val, s_val] if v is not None]
+        if pmi_vals:
+            pmi_avg = np.mean(pmi_vals)
+            pmi_score = np.clip((pmi_avg - 40.0) / 20.0 * 100, 0, 100)
+        else:
+            pmi_score = 50.0
             
-    total_score = 0.50 * rate_score + 0.20 * cpi_score + 0.15 * unemp_score + 0.15 * gdp_score
-    return total_score
+        # 7. Base Weighted Score
+        base_score = (
+            0.40 * yield_score +
+            0.15 * real_yield_score +
+            0.15 * cpi_score +
+            0.15 * unemp_score +
+            0.10 * pmi_score +
+            0.05 * gdp_score
+        )
+        
+        # 8. OECD CLI Correction (±5%)
+        cli_res = get_historical_oecd_cli(curr, target_date)
+        if cli_res is not None:
+            cli_val = cli_res[0]
+            if -15.0 <= cli_val <= 15.0:
+                cli_val = 100.0 + cli_val
+            if cli_val > 100.0:
+                base_score *= 1.05
+            elif cli_val < 100.0:
+                base_score *= 0.95
+                
+        # 9. COT Percentile Points Adjustment
+        symbol_code = COT_SYMBOLS.get(curr)
+        cot_points = 0
+        if symbol_code:
+            rank = get_cot_signal(symbol_code, target_date)
+            if 95.0 <= rank <= 100.0:
+                cot_points = -10
+            elif 80.0 <= rank < 95.0:
+                cot_points = -5
+            elif 20.0 <= rank <= 80.0:
+                cot_points = 0
+            elif 5.0 < rank < 20.0:
+                cot_points = 5
+            elif 0.0 <= rank <= 5.0:
+                cot_points = 10
+                
+        final_score = np.clip(base_score + cot_points, 0.0, 100.0)
+        return final_score
+    except Exception:
+        return None
 
 
 def load_backtest_decisions():
@@ -2528,63 +2661,118 @@ def get_country_rate(country_code, fred_key):
 
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
-    if curr == "USD":
-        df_rate, _, _ = get_fred_data("FEDFUNDS", fred_key)
-        df_unemp, _, _ = get_fred_data("UNRATE", fred_key)
-        df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
-        df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
+    try:
+        # 1. 2Y Yield (Zinserwartungen)
+        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], datetime.now().strftime("%Y-%m-%d"), fred_key)
+        if yield_val is None:
+            return None
+        yield_score = np.clip((yield_val / 6.0) * 100, 0, 100)
         
-        latest_rate = df_rate.iloc[-1]["value"] if not df_rate.empty else 5.25
-        rate_score = np.clip((latest_rate / 6.0) * 100, 0, 100)
+        # 2. CPI YoY
+        if curr == "USD":
+            df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+            latest_cpi = None
+            if not df_cpi.empty and len(df_cpi) >= 13:
+                df_cpi_c = df_cpi.copy()
+                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                latest_cpi = df_cpi_c.iloc[-1]["yoy"]
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
+            latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else None
+            
+        if latest_cpi is None:
+            return None
+        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
         
-        latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else 3.8
+        # 3. Real Yield
+        real_yield = yield_val - latest_cpi
+        real_yield_score = np.clip(((real_yield + 5.0) / 10.0) * 100, 0, 100)
+        
+        # 4. Unemployment (Labor Market)
+        if curr == "USD":
+            df_unemp, _, _ = get_fred_data("UNRATE", fred_key)
+            latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else None
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            df_unemp, _, _ = get_worldbank_data(code, "SL.UEM.TOTL.ZG")
+            latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else None
+            
+        if latest_unemp is None:
+            return None
         unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
         
-        if not df_cpi.empty and len(df_cpi) >= 13:
-            df_cpi_c = df_cpi.copy()
-            df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
-            latest_cpi = df_cpi_c.iloc[-1]["yoy"]
+        # 5. GDP YoY
+        if curr == "USD":
+            df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
+            latest_gdp = None
+            if not df_gdp.empty and len(df_gdp) >= 5:
+                df_gdp_c = df_gdp.copy()
+                df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
+                latest_gdp = df_gdp_c.iloc[-1]["yoy"]
         else:
-            latest_cpi = 2.4
-        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
-        
-        if not df_gdp.empty and len(df_gdp) >= 5:
-            df_gdp_c = df_gdp.copy()
-            df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
-            latest_gdp = df_gdp_c.iloc[-1]["yoy"]
-        else:
-            latest_gdp = 1.8
+            code = CURRENCIES[curr]["wb_code"]
+            df_gdp, _, _ = get_worldbank_data(code, "NY.GDP.MKTP.KD.ZG")
+            latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else None
+            
+        if latest_gdp is None:
+            return None
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
-    else:
-        code = CURRENCIES[curr]["wb_code"]
         
-        # GDP und CPI von World Bank holen
-        df_gdp, _, _ = get_worldbank_data(code, "NY.GDP.MKTP.KD.ZG")
-        df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
-        
-        # Rate (Zins) von FRED oder manueller Eingabe
-        rate_val, _, _ = get_country_rate(code, fred_key)
-        rate_score = np.clip((rate_val / 6.0) * 100, 0, 100)
-        
-        # NEU: Arbeitslosenquote dynamisch von World Bank holen (oder intelligenter Fallback)
-        df_unemp, _, _ = get_worldbank_data(code, "SL.UEM.TOTL.ZG")
-        if not df_unemp.empty:
-            latest_unemp = df_unemp.iloc[-1]["value"]
-            unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
+        # 6. PMI
+        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY)
+        pmi_data = pmi_all.get(curr, {})
+        m_val = pmi_data.get("m_last")
+        s_val = pmi_data.get("s_last")
+        pmi_vals = [v for v in [m_val, s_val] if v is not None]
+        if pmi_vals:
+            pmi_avg = np.mean(pmi_vals)
+            pmi_score = np.clip((pmi_avg - 40.0) / 20.0 * 100, 0, 100)
         else:
-            # Fallback: Schätze die Arbeitslosenquote anhand der GDP-Wachstumsrate
-            latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else 1.5
-            unemp_score = np.clip(65 + (latest_gdp - 2.0) * 5, 40, 85)
+            pmi_score = 50.0
+            
+        # 7. Base Weighted Score
+        base_score = (
+            0.40 * yield_score +
+            0.15 * real_yield_score +
+            0.15 * cpi_score +
+            0.15 * unemp_score +
+            0.10 * pmi_score +
+            0.05 * gdp_score
+        )
         
-        # CPI und GDP (wie gehabt)
-        latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else 2.5
-        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
-        
-        latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else 1.5
-        gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
-
-    total_score = 0.50 * rate_score + 0.20 * cpi_score + 0.15 * unemp_score + 0.15 * gdp_score
-    return total_score
+        # 8. OECD CLI Correction (±5%)
+        cli_res = get_latest_oecd_cli(curr)
+        if cli_res is not None:
+            cli_val = cli_res[0]
+            if -15.0 <= cli_val <= 15.0:
+                cli_val = 100.0 + cli_val
+            if cli_val > 100.0:
+                base_score *= 1.05
+            elif cli_val < 100.0:
+                base_score *= 0.95
+                
+        # 9. COT Percentile Points Adjustment
+        symbol_code = COT_SYMBOLS.get(curr)
+        cot_points = 0
+        if symbol_code:
+            cot_date = datetime.now().strftime("%Y-%m-%d")
+            rank = get_cot_signal(symbol_code, cot_date)
+            if 95.0 <= rank <= 100.0:
+                cot_points = -10
+            elif 80.0 <= rank < 95.0:
+                cot_points = -5
+            elif 20.0 <= rank <= 80.0:
+                cot_points = 0
+            elif 5.0 < rank < 20.0:
+                cot_points = 5
+            elif 0.0 <= rank <= 5.0:
+                cot_points = 10
+                
+        final_score = np.clip(base_score + cot_points, 0.0, 100.0)
+        return final_score
+    except Exception:
+        return None
 
 
 COT_SYMBOLS = {
@@ -2616,24 +2804,22 @@ def get_cot_signal(symbol_code, target_date):
         target_dt = pd.to_datetime(target_date)
         y = target_dt.year
         
-        df_curr = load_cot_year_cached(y)
-        df_prev = load_cot_year_cached(y - 1) if y - 1 >= 2004 else None
-        
+        # Load 3 years of COT data (current year + 3 previous years)
         dfs = []
-        if df_curr is not None and not df_curr.empty:
-            dfs.append(df_curr)
-        if df_prev is not None and not df_prev.empty:
-            dfs.append(df_prev)
-            
+        for offset in range(4):
+            df_y = load_cot_year_cached(y - offset)
+            if df_y is not None and not df_y.empty:
+                dfs.append(df_y)
+                
         if not dfs:
-            return 0
+            return 50.0
             
         df = pd.concat(dfs, ignore_index=True)
         df.columns = df.columns.str.strip()
         
         code_col = "CFTC Contract Market Code" if "CFTC Contract Market Code" in df.columns else "CFTC_Contract_Market_Code"
         if code_col not in df.columns:
-            return 0
+            return 50.0
             
         df[code_col] = df[code_col].astype(str).str.strip()
         df[code_col] = df[code_col].apply(lambda x: x.zfill(6) if x.isdigit() else x)
@@ -2642,7 +2828,7 @@ def get_cot_signal(symbol_code, target_date):
         df_filtered = df[df[code_col] == symbol_code_std].copy()
         
         if df_filtered.empty:
-            return 0
+            return 50.0
             
         date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_filtered.columns else "As of Date in Form YYMMDD"
         if date_col == "As of Date in Form YYYY-MM-DD":
@@ -2653,12 +2839,13 @@ def get_cot_signal(symbol_code, target_date):
         df_filtered = df_filtered.dropna(subset=["parsed_date"])
         df_filtered = df_filtered[df_filtered["parsed_date"] <= target_dt]
         if df_filtered.empty:
-            return 0
+            return 50.0
             
         df_filtered = df_filtered.sort_values("parsed_date")
-        df_filtered = df_filtered.tail(52)
+        # Keep last 156 observations (3 years of weekly reports)
+        df_filtered = df_filtered.tail(156)
         if len(df_filtered) < 5:
-            return 0
+            return 50.0
             
         long_col = "Noncommercial Positions-Long (All)"
         short_col = "Noncommercial Positions-Short (All)"
@@ -2671,44 +2858,15 @@ def get_cot_signal(symbol_code, target_date):
         net_positions = df_filtered["net_pos"].values
         current_net = net_positions[-1]
         
-        p20 = np.percentile(net_positions, 20)
-        p80 = np.percentile(net_positions, 80)
+        # Calculate percentile rank
+        count_less_or_equal = np.sum(net_positions <= current_net)
+        percentile_rank = (count_less_or_equal / len(net_positions)) * 100.0
         
-        if current_net <= p20:
-            return 1
-        elif current_net >= p80:
-            return -1
-        else:
-            return 0
+        return percentile_rank
     except Exception:
-        return 0
+        return 50.0
 
-def compute_score_with_cot(curr, target_date=None):
-    if target_date is None:
-        existing_score = compute_currency_score(curr, FRED_KEY)
-        cot_date = datetime.now().strftime("%Y-%m-%d")
-    else:
-        existing_score = compute_currency_score_historical(curr, target_date)
-        cot_date = target_date
-        
-    if existing_score is None:
-        return None
-        
-    symbol_code = COT_SYMBOLS.get(curr)
-    if symbol_code:
-        cot_sig = get_cot_signal(symbol_code, cot_date)
-    else:
-        cot_sig = 0
-        
-    if cot_sig == 1:
-        cot_scaled = 100.0
-    elif cot_sig == -1:
-        cot_scaled = 0.0
-    else:
-        cot_scaled = 50.0
-        
-    final_score = 0.90 * existing_score + 0.10 * cot_scaled
-    return final_score
+
 
 
 # ----------------- UI RENDERERS -----------------
@@ -2953,8 +3111,8 @@ with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 with st.spinner("Initialisiere globale Marktdaten..."):
     # Pre-load macro scores
-    base_score = compute_score_with_cot(base_curr)
-    quote_score = compute_score_with_cot(quote_curr)
+    base_score = compute_currency_score(base_curr, FRED_KEY)
+    quote_score = compute_currency_score(quote_curr, FRED_KEY)
     
     # Calculate corrected signal value (scaled to range -50 to +50)
     raw_diff = quote_score - base_score
@@ -3009,8 +3167,8 @@ df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
 st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
 
 def get_pair_signal_and_badge(base, quote):
-    b_score = compute_score_with_cot(base)
-    q_score = compute_score_with_cot(quote)
+    b_score = compute_currency_score(base, FRED_KEY)
+    q_score = compute_currency_score(quote, FRED_KEY)
     r_diff = q_score - b_score
     sig_val = r_diff / 2.0
     sig_val = max(-50.0, min(50.0, sig_val))
@@ -3089,7 +3247,7 @@ with tab1:
     st.caption("Auf einen Blick die makroökonomischen Scores und Handelssignale für alle Währungspaare vergleichen.")
     
     # 1. Macro scores comparison chart
-    scores = {curr: compute_score_with_cot(curr) for curr in CURRENCIES.keys()}
+    scores = {curr: compute_currency_score(curr, FRED_KEY) for curr in CURRENCIES.keys()}
     df_scores = pd.DataFrame(list(scores.items()), columns=["Currency", "Score"])
     currency_order = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
     df_scores['Currency'] = pd.Categorical(df_scores['Currency'], categories=currency_order, ordered=True)
@@ -4080,8 +4238,8 @@ with tab14:
             st.subheader(f"📊 Historische Analyse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
             
             with st.spinner("Berechne fundamentales Signal..."):
-                base_score_h = compute_score_with_cot(base_c, target_date_str)
-                quote_score_h = compute_score_with_cot(quote_c, target_date_str)
+                base_score_h = compute_currency_score_historical(base_c, target_date_str)
+                quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
                 
                 if base_score_h is None or quote_score_h is None:
                     st.warning("⚠️ Historische Fundamental-Daten für dieses Währungspaar/Datum unvollständig oder nicht verfügbar (Fehlende API-Daten).")
@@ -4139,7 +4297,7 @@ with tab14:
                         st.markdown("#### 🏠 G8 Fundamental-Checkliste (Historisch)")
                         st.caption(f"Vergleich der makroökonomischen Scores und Handelssignale für alle G8-Paare am {target_date_str}.")
                         
-                        scores_h = {curr: compute_score_with_cot(curr, target_date_str) for curr in CURRENCIES.keys()}
+                        scores_h = {curr: compute_currency_score_historical(curr, target_date_str) for curr in CURRENCIES.keys()}
                         scores_h_valid = {k: v for k, v in scores_h.items() if v is not None}
                         
                         if not scores_h_valid:
