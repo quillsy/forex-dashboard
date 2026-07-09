@@ -2699,56 +2699,66 @@ def compute_currency_score_historical(curr, target_date):
             0.05 * gdp_score
         )
         
-        # 9. Additive Correction Factors (±5% each)
+        # 9. Additive Correction Factors (±3% / ±5% each)
         dev_points = get_inflation_deviation(curr, target_date)
+        dev_points = np.clip(dev_points, -3.0, 3.0)
         
         surp_cpi = get_surprise_score(curr, "CPI", target_date)
         surp_pmi = get_surprise_score(curr, "PMI", target_date)
         surp_gdp = get_surprise_score(curr, "GDP", target_date)
         surp_nfp = get_surprise_score(curr, "NFP", target_date)
-        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -5.0, 5.0)
+        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -3.0, 3.0)
         
         mom_cpi = get_momentum_score(curr, "CPI", target_date)
         mom_mpmi = get_momentum_score(curr, "Manufacturing PMI", target_date)
         mom_spmi = get_momentum_score(curr, "Services PMI", target_date)
         mom_gdp = get_momentum_score(curr, "GDP", target_date)
-        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -5.0, 5.0)
+        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -3.0, 3.0)
         
         comm_points = get_commodity_score(curr, target_date)
+        comm_points = np.clip(comm_points, -3.0, 3.0)
         
         risk_val = get_risk_score(target_date)
         risk_points = 0.0
         if curr in ["AUD", "NZD", "CAD"]:
-            risk_points = risk_val * 5.0
+            risk_points = risk_val * 3.0
         elif curr in ["CHF", "JPY"]:
-            risk_points = -risk_val * 5.0
+            risk_points = -risk_val * 3.0
+        risk_points = np.clip(risk_points, -3.0, 3.0)
             
         ca_points = get_current_account_score(curr, target_date)
-        debt_points = get_debt_score(curr, target_date)
-        deficit_points = get_deficit_score(curr, target_date)
+        ca_points = np.clip(ca_points, -3.0, 3.0)
         
-        # COT Point Offset
+        debt_points = get_debt_score(curr, target_date)
+        debt_points = np.clip(debt_points, -3.0, 3.0)
+        
+        deficit_points = get_deficit_score(curr, target_date)
+        deficit_points = np.clip(deficit_points, -3.0, 3.0)
+        
+        # COT Point Offset (±5 points max)
         symbol_code = COT_SYMBOLS.get(curr)
         cot_points = 0
         if symbol_code:
             rank = get_cot_signal(symbol_code, target_date)
             if 95.0 <= rank <= 100.0:
-                cot_points = -10
-            elif 80.0 <= rank < 95.0:
                 cot_points = -5
+            elif 80.0 <= rank < 95.0:
+                cot_points = -2.5
             elif 20.0 <= rank <= 80.0:
                 cot_points = 0
             elif 5.0 < rank < 20.0:
-                cot_points = 5
+                cot_points = 2.5
             elif 0.0 <= rank <= 5.0:
-                cot_points = 10
+                cot_points = 5
                 
-        final_score = np.clip(
-            base_score + dev_points + surprise_total + momentum_total + 
-            comm_points + risk_points + ca_points + debt_points + 
-            deficit_points + cot_points, 
-            0.0, 100.0
+        # Total Correction Cap (±20 points max)
+        total_correction = (
+            cot_points + dev_points + surprise_total + momentum_total + 
+            comm_points + risk_points + ca_points + debt_points + deficit_points
         )
+        total_correction = np.clip(total_correction, -20.0, 20.0)
+        
+        final_score = np.clip(base_score + total_correction, 0.0, 100.0)
         return final_score
     except Exception:
         return None
@@ -3178,57 +3188,67 @@ def compute_currency_score(curr, fred_key):
             0.05 * gdp_score
         )
         
-        # 9. Additive Correction Factors (±5% each)
+        # 9. Additive Correction Factors (±3% / ±5% each)
         dev_points = get_inflation_deviation(curr, None)
+        dev_points = np.clip(dev_points, -3.0, 3.0)
         
         surp_cpi = get_surprise_score(curr, "CPI", None)
         surp_pmi = get_surprise_score(curr, "PMI", None)
         surp_gdp = get_surprise_score(curr, "GDP", None)
         surp_nfp = get_surprise_score(curr, "NFP", None)
-        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -5.0, 5.0)
+        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -3.0, 3.0)
         
         mom_cpi = get_momentum_score(curr, "CPI", None)
         mom_mpmi = get_momentum_score(curr, "Manufacturing PMI", None)
         mom_spmi = get_momentum_score(curr, "Services PMI", None)
         mom_gdp = get_momentum_score(curr, "GDP", None)
-        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -5.0, 5.0)
+        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -3.0, 3.0)
         
         comm_points = get_commodity_score(curr, None)
+        comm_points = np.clip(comm_points, -3.0, 3.0)
         
         risk_val = get_risk_score(None)
         risk_points = 0.0
         if curr in ["AUD", "NZD", "CAD"]:
-            risk_points = risk_val * 5.0
+            risk_points = risk_val * 3.0
         elif curr in ["CHF", "JPY"]:
-            risk_points = -risk_val * 5.0
+            risk_points = -risk_val * 3.0
+        risk_points = np.clip(risk_points, -3.0, 3.0)
             
         ca_points = get_current_account_score(curr, None)
-        debt_points = get_debt_score(curr, None)
-        deficit_points = get_deficit_score(curr, None)
+        ca_points = np.clip(ca_points, -3.0, 3.0)
         
-        # COT Point Offset
+        debt_points = get_debt_score(curr, None)
+        debt_points = np.clip(debt_points, -3.0, 3.0)
+        
+        deficit_points = get_deficit_score(curr, None)
+        deficit_points = np.clip(deficit_points, -3.0, 3.0)
+        
+        # COT Point Offset (±5 points max)
         symbol_code = COT_SYMBOLS.get(curr)
         cot_points = 0
         if symbol_code:
             cot_date = datetime.now().strftime("%Y-%m-%d")
             rank = get_cot_signal(symbol_code, cot_date)
             if 95.0 <= rank <= 100.0:
-                cot_points = -10
-            elif 80.0 <= rank < 95.0:
                 cot_points = -5
+            elif 80.0 <= rank < 95.0:
+                cot_points = -2.5
             elif 20.0 <= rank <= 80.0:
                 cot_points = 0
             elif 5.0 < rank < 20.0:
-                cot_points = 5
+                cot_points = 2.5
             elif 0.0 <= rank <= 5.0:
-                cot_points = 10
+                cot_points = 5
                 
-        final_score = np.clip(
-            base_score + dev_points + surprise_total + momentum_total + 
-            comm_points + risk_points + ca_points + debt_points + 
-            deficit_points + cot_points, 
-            0.0, 100.0
+        # Total Correction Cap (±20 points max)
+        total_correction = (
+            cot_points + dev_points + surprise_total + momentum_total + 
+            comm_points + risk_points + ca_points + debt_points + deficit_points
         )
+        total_correction = np.clip(total_correction, -20.0, 20.0)
+        
+        final_score = np.clip(base_score + total_correction, 0.0, 100.0)
         return final_score
     except Exception:
         return None
