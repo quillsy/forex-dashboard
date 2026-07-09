@@ -1897,6 +1897,7 @@ def get_country_rate_historical(country_code, target_date):
 
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_historical_commodities(target_date, key=FRED_KEY):
     res = {}
     
@@ -2192,6 +2193,406 @@ def get_historical_correlation_matrix(target_date):
 
 
 
+def get_historical_imf_value(curr, indicator, target_date):
+    try:
+        target_year = pd.to_datetime(target_date).year
+        mapping = {
+            "USD": ["USA"],
+            "EUR": ["EUR", "EMU", "U2", "DEU"],
+            "GBP": ["GBR"],
+            "CHF": ["CHE"],
+            "CAD": ["CAN"],
+            "AUD": ["AUS"],
+            "NZD": ["NZL"],
+            "JPY": ["JPN"]
+        }
+        candidates = mapping.get(curr, [curr])
+        data = get_imf_data(indicator)
+        if not data:
+            return None
+        indicator_data = data.get("values", {}).get(indicator, {})
+        for code in candidates:
+            values_dict = indicator_data.get(code, {})
+            if values_dict:
+                years = [int(yr) for yr in values_dict.keys() if yr.isdigit()]
+                if years:
+                    valid_years = [y for y in years if y <= target_year]
+                    if not valid_years:
+                        best_year = min(years)
+                    else:
+                        best_year = max(valid_years)
+                    val = values_dict[str(best_year)]
+                    if val is not None:
+                        return float(val)
+    except Exception:
+        pass
+    return None
+
+def get_inflation_deviation(curr, target_date=None):
+    fred_key = FRED_KEY
+    try:
+        if target_date is None:
+            if curr == "USD":
+                df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+                latest_cpi = None
+                if not df_cpi.empty and len(df_cpi) >= 13:
+                    df_cpi_c = df_cpi.copy()
+                    df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                    latest_cpi = df_cpi_c.iloc[-1]["yoy"]
+            else:
+                code = CURRENCIES[curr]["wb_code"]
+                df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
+                latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else None
+        else:
+            if curr == "USD":
+                df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+                latest_cpi = None
+                if df_cpi is not None and not df_cpi.empty:
+                    df_cpi_c = df_cpi.copy()
+                    if len(df_cpi_c) >= 13:
+                        df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                        df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
+                        if not df_filtered.empty:
+                            latest_cpi = df_filtered.iloc[-1]["yoy"]
+            else:
+                code = CURRENCIES[curr]["wb_code"]
+                cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+                latest_cpi = cpi_val
+                
+        if latest_cpi is None:
+            return 0.0
+            
+        deviation = latest_cpi - 2.0
+        deviation_points = np.clip(deviation / 3.0 * 5.0, -5.0, 5.0)
+        return deviation_points
+    except Exception:
+        return 0.0
+
+def clean_surprise_val(val_str):
+    if val_str is None:
+        return None
+    s = str(val_str).strip().upper()
+    if s == "" or s == "-" or s == "N/A":
+        return None
+    multiplier = 1.0
+    if "K" in s:
+        multiplier = 1000.0
+        s = s.replace("K", "")
+    elif "M" in s:
+        multiplier = 1000000.0
+        s = s.replace("M", "")
+    elif "B" in s:
+        multiplier = 1000000000.0
+        s = s.replace("B", "")
+    s = s.replace("%", "").replace("$", "").replace(",", "").strip()
+    try:
+        return float(s) * multiplier
+    except ValueError:
+        return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_benzinga_surprise_calendar_cached(key, date_from, date_to):
+    try:
+        url = f"https://api.benzinga.com/api/v2.1/calendar/economics?token={key}&parameters[date_from]={date_from}&parameters[date_to]={date_to}"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("economics", [])
+    except Exception:
+        pass
+    return []
+
+def get_surprise_score(curr, indicator, target_date=None):
+    if not BENZINGA_KEY:
+        return 0.0
+    try:
+        if target_date is None:
+            dt = datetime.now()
+        else:
+            dt = pd.to_datetime(target_date)
+            
+        date_from = (dt - timedelta(days=45)).strftime("%Y-%m-%d")
+        date_to = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
+        
+        events = fetch_benzinga_surprise_calendar_cached(BENZINGA_KEY, date_from, date_to)
+        if not events:
+            return 0.0
+            
+        country_map = {
+            "USD": "United States",
+            "EUR": "Eurozone",
+            "GBP": "United Kingdom",
+            "CHF": "Switzerland",
+            "CAD": "Canada",
+            "AUD": "Australia",
+            "NZD": "New Zealand",
+            "JPY": "Japan"
+        }
+        country_name = country_map.get(curr, curr)
+        
+        kw_map = {
+            "CPI": ["cpi", "consumer price index", "inflation rate"],
+            "GDP": ["gdp", "gross domestic product"],
+            "PMI": ["pmi", "purchasing managers"],
+            "NFP": ["non-farm payrolls", "nonfarm payrolls", "employment change", "unemployment"]
+        }
+        keywords = kw_map.get(indicator, [indicator.lower()])
+        
+        filtered = []
+        for item in events:
+            c = item.get("country") or ""
+            if country_name.lower() not in c.lower() and c.lower() not in country_name.lower():
+                if curr == "EUR" and "germany" not in c.lower():
+                    continue
+                elif curr != "EUR":
+                    continue
+            
+            ev_name = (item.get("event_name") or "").lower()
+            match = False
+            for kw in keywords:
+                if kw in ev_name:
+                    match = True
+                    break
+            if match:
+                filtered.append(item)
+                
+        if not filtered:
+            return 0.0
+            
+        filtered = sorted(filtered, key=lambda x: x.get("date") or "", reverse=True)
+        latest_event = None
+        for ev in filtered:
+            ev_dt_str = ev.get("date")
+            if ev_dt_str:
+                ev_dt = pd.to_datetime(ev_dt_str)
+                if ev_dt <= dt:
+                    latest_event = ev
+                    break
+                    
+        if latest_event is None:
+            return 0.0
+            
+        actual_raw = latest_event.get("actual")
+        consensus_raw = latest_event.get("consensus")
+        prior_raw = latest_event.get("prior")
+        
+        actual = clean_surprise_val(actual_raw)
+        consensus = clean_surprise_val(consensus_raw)
+        prior = clean_surprise_val(prior_raw)
+        
+        if actual is None:
+            return 0.0
+            
+        if consensus is None:
+            if prior is not None:
+                consensus = prior
+            else:
+                return 0.0
+                
+        surprise = actual - consensus
+        
+        if indicator == "CPI":
+            points = np.clip(surprise / 0.2 * 2.5, -5.0, 5.0)
+        elif indicator == "PMI":
+            points = np.clip(surprise / 1.5 * 2.5, -5.0, 5.0)
+        elif indicator == "GDP":
+            points = np.clip(surprise / 0.5 * 2.5, -5.0, 5.0)
+        elif indicator == "NFP":
+            if abs(surprise) > 500:
+                points = np.clip(surprise / 80000.0 * 2.5, -5.0, 5.0)
+            else:
+                points = np.clip(surprise / 80.0 * 2.5, -5.0, 5.0)
+        else:
+            points = np.clip(surprise, -5.0, 5.0)
+            
+        return points
+    except Exception:
+        return 0.0
+
+def get_momentum_score(curr, indicator, target_date=None):
+    fred_key = FRED_KEY
+    try:
+        if target_date is None:
+            date_now = datetime.now().strftime("%Y-%m-%d")
+            date_3m = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        else:
+            date_now = target_date
+            date_3m = (pd.to_datetime(target_date) - timedelta(days=90)).strftime("%Y-%m-%d")
+            
+        if indicator == "CPI":
+            def get_abs_cpi(c_code, d):
+                if c_code == "USD":
+                    df_c, _, _ = get_fred_data("CPIAUCSL", fred_key)
+                    if df_c is not None and not df_c.empty:
+                        df_c_c = df_c.copy()
+                        df_c_c["yoy"] = df_c_c["value"].pct_change(periods=12) * 100
+                        df_f = df_c_c[df_c_c["date"] <= pd.to_datetime(d)]
+                        if not df_f.empty:
+                            return df_f.iloc[-1]["yoy"]
+                else:
+                    wb = CURRENCIES[c_code]["wb_code"]
+                    v, _, _ = get_worldbank_data_historical(wb, "FP.CPI.TOTL.ZG", d)
+                    return v
+                return None
+            cpi_now = get_abs_cpi(curr, date_now)
+            cpi_3m = get_abs_cpi(curr, date_3m)
+            if cpi_now is not None and cpi_3m is not None:
+                return np.clip((cpi_now - cpi_3m) / 1.0 * 5.0, -5.0, 5.0)
+                
+        elif indicator in ["Manufacturing PMI", "Services PMI"]:
+            pmi_all_now = get_all_pmi_data(fred_key, EODHD_KEY, target_date=date_now)
+            pmi_all_3m = get_all_pmi_data(fred_key, EODHD_KEY, target_date=date_3m)
+            key = "m_last" if indicator == "Manufacturing PMI" else "s_last"
+            pmi_now = pmi_all_now.get(curr, {}).get(key)
+            pmi_3m = pmi_all_3m.get(curr, {}).get(key)
+            if pmi_now is not None and pmi_3m is not None:
+                return np.clip((pmi_now - pmi_3m) / 5.0 * 5.0, -5.0, 5.0)
+                
+        elif indicator == "GDP":
+            def get_abs_gdp(c_code, d):
+                if c_code == "USD":
+                    df_g, _, _ = get_fred_data("GDPC1", fred_key)
+                    if df_g is not None and not df_g.empty:
+                        df_g_c = df_g.copy()
+                        df_g_c["yoy"] = df_g_c["value"].pct_change(periods=4) * 100
+                        df_f = df_g_c[df_g_c["date"] <= pd.to_datetime(d)]
+                        if not df_f.empty:
+                            return df_f.iloc[-1]["yoy"]
+                else:
+                    wb = CURRENCIES[c_code]["wb_code"]
+                    v, _, _ = get_worldbank_data_historical(wb, "NY.GDP.MKTP.KD.ZG", d)
+                    return v
+                return None
+            gdp_now = get_abs_gdp(curr, date_now)
+            gdp_3m = get_abs_gdp(curr, date_3m)
+            if gdp_now is not None and gdp_3m is not None:
+                return np.clip((gdp_now - gdp_3m) / 1.0 * 5.0, -5.0, 5.0)
+    except Exception:
+        pass
+    return 0.0
+
+def get_commodity_score(curr, target_date=None):
+    if curr not in ["AUD", "CAD", "NZD"]:
+        return 0.0
+    try:
+        if target_date is None:
+            date_now = datetime.now().strftime("%Y-%m-%d")
+            date_3m = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        else:
+            date_now = target_date
+            date_3m = (pd.to_datetime(target_date) - timedelta(days=90)).strftime("%Y-%m-%d")
+            
+        if curr == "AUD":
+            g_now = get_historical_commodities(date_now, FRED_KEY).get("gold")
+            g_3m = get_historical_commodities(date_3m, FRED_KEY).get("gold")
+            if g_now and g_3m:
+                chg = (g_now - g_3m) / g_3m * 100.0
+                return np.clip(chg / 10.0 * 5.0, -5.0, 5.0)
+        elif curr == "CAD":
+            o_now = get_historical_commodities(date_now, FRED_KEY).get("wti")
+            o_3m = get_historical_commodities(date_3m, FRED_KEY).get("wti")
+            if o_now and o_3m:
+                chg = (o_now - o_3m) / o_3m * 100.0
+                return np.clip(chg / 10.0 * 5.0, -5.0, 5.0)
+        elif curr == "NZD":
+            m_now, _, _ = get_fred_data_historical("PRAWINDEXM", date_now)
+            m_3m, _, _ = get_fred_data_historical("PRAWINDEXM", date_3m)
+            if m_now and m_3m:
+                chg = (m_now - m_3m) / m_3m * 100.0
+                return np.clip(chg / 10.0 * 5.0, -5.0, 5.0)
+    except Exception:
+        pass
+    return 0.0
+
+def get_risk_score(target_date=None):
+    fred_key = FRED_KEY
+    try:
+        if target_date is None:
+            date_now = datetime.now().strftime("%Y-%m-%d")
+            date_3m = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        else:
+            date_now = target_date
+            date_3m = (pd.to_datetime(target_date) - timedelta(days=90)).strftime("%Y-%m-%d")
+            
+        vix_val, _, _ = get_fred_data_historical("VIXCLS", date_now, fred_key)
+        if vix_val is None:
+            vix_val = 15.0
+        vix_score = -np.clip((vix_val - 17.5) / 7.5, -1.0, 1.0)
+        
+        sp_now, _, _ = get_fred_data_historical("SP500", date_now, fred_key)
+        sp_3m, _, _ = get_fred_data_historical("SP500", date_3m, fred_key)
+        if sp_now and sp_3m:
+            sp_chg = (sp_now - sp_3m) / sp_3m * 100.0
+            sp_score = np.clip(sp_chg / 5.0, -1.0, 1.0)
+        else:
+            sp_score = 0.0
+            
+        g_now = get_historical_commodities(date_now, fred_key).get("gold")
+        g_3m = get_historical_commodities(date_3m, fred_key).get("gold")
+        if g_now and g_3m:
+            g_chg = (g_now - g_3m) / g_3m * 100.0
+            gold_score = -np.clip(g_chg / 5.0, -1.0, 1.0)
+        else:
+            gold_score = 0.0
+            
+        y_now, _, _ = get_fred_data_historical("DGS10", date_now, fred_key)
+        y_3m, _, _ = get_fred_data_historical("DGS10", date_3m, fred_key)
+        if y_now is not None and y_3m is not None:
+            y_chg = y_now - y_3m
+            yield_score = np.clip(y_chg / 0.5, -1.0, 1.0)
+        else:
+            yield_score = 0.0
+            
+        risk_factor = (vix_score + sp_score + gold_score + yield_score) / 4.0
+        return risk_factor
+    except Exception:
+        return 0.0
+
+def get_current_account_score(curr, target_date=None):
+    try:
+        if target_date is None:
+            ca_val = get_latest_imf_value(curr, "BCA_NGDPD")
+        else:
+            ca_val = get_historical_imf_value(curr, "BCA_NGDPD", target_date)
+        if ca_val is None:
+            return 0.0
+        return np.clip(ca_val / 5.0 * 5.0, -5.0, 5.0)
+    except Exception:
+        return 0.0
+
+def get_debt_score(curr, target_date=None):
+    try:
+        if target_date is None:
+            debt_val = get_latest_imf_value(curr, "GGXWDG_NGDP")
+        else:
+            debt_val = get_historical_imf_value(curr, "GGXWDG_NGDP", target_date)
+            
+        if debt_val is None:
+            if target_date is None:
+                code = CURRENCIES[curr]["wb_code"]
+                df_d, _, _ = get_worldbank_data(code, "GC.DOD.TOTL.GD.ZS")
+                debt_val = df_d.iloc[-1]["value"] if not df_d.empty else None
+            else:
+                code = CURRENCIES[curr]["wb_code"]
+                debt_val, _, _ = get_worldbank_data_historical(code, "GC.DOD.TOTL.GD.ZS", target_date)
+                
+        if debt_val is None:
+            return 0.0
+        return np.clip((80.0 - debt_val) / 40.0 * 5.0, -5.0, 5.0)
+    except Exception:
+        return 0.0
+
+def get_deficit_score(curr, target_date=None):
+    try:
+        if target_date is None:
+            deficit_val = get_latest_imf_value(curr, "GGXCNL_NGDP")
+        else:
+            deficit_val = get_historical_imf_value(curr, "GGXCNL_NGDP", target_date)
+        if deficit_val is None:
+            return 0.0
+        return np.clip((deficit_val + 3.0) / 3.0 * 5.0, -5.0, 5.0)
+    except Exception:
+        return 0.0
+
 YIELD_SERIES = {
     "USD": "DGS2",
     "EUR": "IRLTLT01EZM156N",
@@ -2269,40 +2670,64 @@ def compute_currency_score_historical(curr, target_date):
             return None
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
         
-        # 6. PMI
+        # 6. PMI (Manufacturing & Services)
         pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=target_date)
         pmi_data = pmi_all.get(curr, {})
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
-        pmi_vals = [v for v in [m_val, s_val] if v is not None]
-        if pmi_vals:
-            pmi_avg = np.mean(pmi_vals)
-            pmi_score = np.clip((pmi_avg - 40.0) / 20.0 * 100, 0, 100)
-        else:
-            pmi_score = 50.0
-            
-        # 7. Base Weighted Score
-        base_score = (
-            0.40 * yield_score +
-            0.15 * real_yield_score +
-            0.15 * cpi_score +
-            0.15 * unemp_score +
-            0.10 * pmi_score +
-            0.05 * gdp_score
-        )
+        m_pmi_score = np.clip((m_val - 40.0) / 20.0 * 100, 0, 100) if m_val is not None else 50.0
+        s_pmi_score = np.clip((s_val - 40.0) / 20.0 * 100, 0, 100) if s_val is not None else 50.0
         
-        # 8. OECD CLI Correction (±5%)
+        # 7. OECD CLI
+        cli_score = 50.0
         cli_res = get_historical_oecd_cli(curr, target_date)
         if cli_res is not None:
             cli_val = cli_res[0]
             if -15.0 <= cli_val <= 15.0:
                 cli_val = 100.0 + cli_val
-            if cli_val > 100.0:
-                base_score *= 1.05
-            elif cli_val < 100.0:
-                base_score *= 0.95
-                
-        # 9. COT Percentile Points Adjustment
+            cli_score = np.clip(((cli_val - 95.0) / 10.0) * 100, 0, 100)
+            
+        # 8. Core Weighted Score (95% weight)
+        base_score = (
+            0.25 * yield_score +
+            0.15 * real_yield_score +
+            0.10 * cpi_score +
+            0.10 * unemp_score +
+            0.10 * m_pmi_score +
+            0.10 * s_pmi_score +
+            0.10 * cli_score +
+            0.05 * gdp_score
+        )
+        
+        # 9. Additive Correction Factors (±5% each)
+        dev_points = get_inflation_deviation(curr, target_date)
+        
+        surp_cpi = get_surprise_score(curr, "CPI", target_date)
+        surp_pmi = get_surprise_score(curr, "PMI", target_date)
+        surp_gdp = get_surprise_score(curr, "GDP", target_date)
+        surp_nfp = get_surprise_score(curr, "NFP", target_date)
+        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -5.0, 5.0)
+        
+        mom_cpi = get_momentum_score(curr, "CPI", target_date)
+        mom_mpmi = get_momentum_score(curr, "Manufacturing PMI", target_date)
+        mom_spmi = get_momentum_score(curr, "Services PMI", target_date)
+        mom_gdp = get_momentum_score(curr, "GDP", target_date)
+        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -5.0, 5.0)
+        
+        comm_points = get_commodity_score(curr, target_date)
+        
+        risk_val = get_risk_score(target_date)
+        risk_points = 0.0
+        if curr in ["AUD", "NZD", "CAD"]:
+            risk_points = risk_val * 5.0
+        elif curr in ["CHF", "JPY"]:
+            risk_points = -risk_val * 5.0
+            
+        ca_points = get_current_account_score(curr, target_date)
+        debt_points = get_debt_score(curr, target_date)
+        deficit_points = get_deficit_score(curr, target_date)
+        
+        # COT Point Offset
         symbol_code = COT_SYMBOLS.get(curr)
         cot_points = 0
         if symbol_code:
@@ -2318,7 +2743,12 @@ def compute_currency_score_historical(curr, target_date):
             elif 0.0 <= rank <= 5.0:
                 cot_points = 10
                 
-        final_score = np.clip(base_score + cot_points, 0.0, 100.0)
+        final_score = np.clip(
+            base_score + dev_points + surprise_total + momentum_total + 
+            comm_points + risk_points + ca_points + debt_points + 
+            deficit_points + cot_points, 
+            0.0, 100.0
+        )
         return final_score
     except Exception:
         return None
@@ -2719,40 +3149,64 @@ def compute_currency_score(curr, fred_key):
             return None
         gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
         
-        # 6. PMI
+        # 6. PMI (Manufacturing & Services)
         pmi_all = get_all_pmi_data(fred_key, EODHD_KEY)
         pmi_data = pmi_all.get(curr, {})
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
-        pmi_vals = [v for v in [m_val, s_val] if v is not None]
-        if pmi_vals:
-            pmi_avg = np.mean(pmi_vals)
-            pmi_score = np.clip((pmi_avg - 40.0) / 20.0 * 100, 0, 100)
-        else:
-            pmi_score = 50.0
-            
-        # 7. Base Weighted Score
-        base_score = (
-            0.40 * yield_score +
-            0.15 * real_yield_score +
-            0.15 * cpi_score +
-            0.15 * unemp_score +
-            0.10 * pmi_score +
-            0.05 * gdp_score
-        )
+        m_pmi_score = np.clip((m_val - 40.0) / 20.0 * 100, 0, 100) if m_val is not None else 50.0
+        s_pmi_score = np.clip((s_val - 40.0) / 20.0 * 100, 0, 100) if s_val is not None else 50.0
         
-        # 8. OECD CLI Correction (±5%)
+        # 7. OECD CLI
+        cli_score = 50.0
         cli_res = get_latest_oecd_cli(curr)
         if cli_res is not None:
             cli_val = cli_res[0]
             if -15.0 <= cli_val <= 15.0:
                 cli_val = 100.0 + cli_val
-            if cli_val > 100.0:
-                base_score *= 1.05
-            elif cli_val < 100.0:
-                base_score *= 0.95
-                
-        # 9. COT Percentile Points Adjustment
+            cli_score = np.clip(((cli_val - 95.0) / 10.0) * 100, 0, 100)
+            
+        # 8. Core Weighted Score (95% weight)
+        base_score = (
+            0.25 * yield_score +
+            0.15 * real_yield_score +
+            0.10 * cpi_score +
+            0.10 * unemp_score +
+            0.10 * m_pmi_score +
+            0.10 * s_pmi_score +
+            0.10 * cli_score +
+            0.05 * gdp_score
+        )
+        
+        # 9. Additive Correction Factors (±5% each)
+        dev_points = get_inflation_deviation(curr, None)
+        
+        surp_cpi = get_surprise_score(curr, "CPI", None)
+        surp_pmi = get_surprise_score(curr, "PMI", None)
+        surp_gdp = get_surprise_score(curr, "GDP", None)
+        surp_nfp = get_surprise_score(curr, "NFP", None)
+        surprise_total = np.clip(surp_cpi + surp_pmi + surp_gdp + surp_nfp, -5.0, 5.0)
+        
+        mom_cpi = get_momentum_score(curr, "CPI", None)
+        mom_mpmi = get_momentum_score(curr, "Manufacturing PMI", None)
+        mom_spmi = get_momentum_score(curr, "Services PMI", None)
+        mom_gdp = get_momentum_score(curr, "GDP", None)
+        momentum_total = np.clip(mom_cpi + mom_mpmi + mom_spmi + mom_gdp, -5.0, 5.0)
+        
+        comm_points = get_commodity_score(curr, None)
+        
+        risk_val = get_risk_score(None)
+        risk_points = 0.0
+        if curr in ["AUD", "NZD", "CAD"]:
+            risk_points = risk_val * 5.0
+        elif curr in ["CHF", "JPY"]:
+            risk_points = -risk_val * 5.0
+            
+        ca_points = get_current_account_score(curr, None)
+        debt_points = get_debt_score(curr, None)
+        deficit_points = get_deficit_score(curr, None)
+        
+        # COT Point Offset
         symbol_code = COT_SYMBOLS.get(curr)
         cot_points = 0
         if symbol_code:
@@ -2769,7 +3223,12 @@ def compute_currency_score(curr, fred_key):
             elif 0.0 <= rank <= 5.0:
                 cot_points = 10
                 
-        final_score = np.clip(base_score + cot_points, 0.0, 100.0)
+        final_score = np.clip(
+            base_score + dev_points + surprise_total + momentum_total + 
+            comm_points + risk_points + ca_points + debt_points + 
+            deficit_points + cot_points, 
+            0.0, 100.0
+        )
         return final_score
     except Exception:
         return None
