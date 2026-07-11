@@ -3567,6 +3567,60 @@ else:
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
 
+def get_cot_data_status():
+    try:
+        now = datetime.now()
+        y = now.year
+        df_cot = load_cot_year_cached(y)
+        if df_cot is None or df_cot.empty:
+            df_cot = load_cot_year_cached(y - 1)
+        if df_cot is not None and not df_cot.empty:
+            date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_cot.columns else "As of Date in Form YYMMDD"
+            dates = pd.to_datetime(df_cot[date_col])
+            latest_date = dates.max()
+            days_diff = (now - latest_date).days
+            
+            if days_diff <= 10:
+                status = "🟢 Aktuell"
+                weekday = now.weekday()
+                if weekday in [5, 6, 0]: # Saturday, Sunday, Monday
+                    explanation = "Der Bericht spiegelt die Daten vom letzten Dienstag wider."
+                elif weekday in [1, 2, 3]: # Tuesday, Wednesday, Thursday
+                    explanation = "Daten vom Dienstag dieser Woche werden am Freitagabend veröffentlicht."
+                else: # Friday
+                    explanation = "Neue Daten werden heute Abend (Freitag) veröffentlicht."
+            else:
+                status = "🟡 Veraltet"
+                explanation = f"Der letzte Bericht ist {days_diff} Tage alt. Bitte warten Sie auf das nächste Update am Freitag/Samstag."
+                
+            return latest_date.strftime("%d.%m.%Y"), status, explanation
+    except Exception:
+        pass
+    return None, "🔴 Nicht verfügbar", "Es konnten keine COT-Daten geladen werden."
+
+# 1. 📅 COT-Status
+with st.sidebar.expander("📅 COT-Status", expanded=False):
+    rep_date, status_val, explanation_val = get_cot_data_status()
+    st.write(f"**Status:** {status_val}")
+    if rep_date:
+        st.write(f"**Bericht vom:** {rep_date}")
+    st.caption(explanation_val)
+    
+    try:
+        y = datetime.now().year
+        df_cot = load_cot_year_cached(y)
+        if df_cot is None or df_cot.empty:
+            df_cot = load_cot_year_cached(y - 1)
+        if df_cot is not None and not df_cot.empty:
+            cot_rows = []
+            for curr, code in COT_SYMBOLS.items():
+                rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
+                cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
+            st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
+    except Exception as e:
+        st.error(f"Fehler bei Tabelle: {e}")
+
+# 2. 🔑 API Key Status
 with st.sidebar.expander("🔑 API Key Status", expanded=False):
     st.caption("Geladene Schlüssel (Env / Secrets):")
     st.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
@@ -3575,23 +3629,8 @@ with st.sidebar.expander("🔑 API Key Status", expanded=False):
     st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
     st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
 
-with st.sidebar.expander("📅 COT-Status", expanded=False):
-    try:
-        y = datetime.now().year
-        df_cot = load_cot_year_cached(y)
-        if df_cot is not None and not df_cot.empty:
-            st.success(f"COT-Daten für {y} geladen")
-            cot_rows = []
-            for curr, code in COT_SYMBOLS.items():
-                rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
-                cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
-            st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
-        else:
-            st.warning("Keine aktuellen COT-Daten geladen")
-    except Exception as e:
-        st.error(f"Fehler: {e}")
-
-with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
+# 3. 📝 Streamlit Secrets Anleitung
+with st.sidebar.expander("📝 Streamlit Secrets Anleitung", expanded=False):
     st.markdown("""
     Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
     ```toml
