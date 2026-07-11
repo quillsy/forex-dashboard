@@ -3567,14 +3567,29 @@ else:
 
 st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔑 API Key Status")
-st.sidebar.caption("Geladene Schlüssel (Env / Secrets):")
-st.sidebar.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
-st.sidebar.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
-st.sidebar.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
-st.sidebar.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
-st.sidebar.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
+with st.sidebar.expander("🔑 API Key Status", expanded=False):
+    st.caption("Geladene Schlüssel (Env / Secrets):")
+    st.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
+    st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
+    st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
+    st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
+    st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
+
+with st.sidebar.expander("📅 COT-Status", expanded=False):
+    try:
+        y = datetime.now().year
+        df_cot = load_cot_year_cached(y)
+        if df_cot is not None and not df_cot.empty:
+            st.success(f"COT-Daten für {y} geladen")
+            cot_rows = []
+            for curr, code in COT_SYMBOLS.items():
+                rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
+                cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
+            st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
+        else:
+            st.warning("Keine aktuellen COT-Daten geladen")
+    except Exception as e:
+        st.error(f"Fehler: {e}")
 
 with st.sidebar.expander("📝 Streamlit Secrets Anleitung"):
     st.markdown("""
