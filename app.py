@@ -2311,37 +2311,17 @@ def get_house_price_index(target_date=None):
         pass
     return 0.0
 
-def get_china_pmi(target_date=None):
+def get_china_pmi_fred(target_date=None):
     try:
-        import akshare as ak
-        df = ak.macro_china_pmi()
-        if df is not None and not df.empty:
-            month_col = None
-            val_col = None
-            for col in df.columns:
-                if "月份" in str(col):
-                    month_col = col
-                elif "制造业-指数" in str(col):
-                    val_col = col
-            if not month_col or not val_col:
-                month_col = df.columns[0]
-                val_col = df.columns[1]
-                
-            df[month_col] = pd.to_datetime(df[month_col])
-            df[val_col] = pd.to_numeric(df[val_col], errors='coerce')
-            df = df.dropna(subset=[month_col, val_col])
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
-            if target_date is None:
-                target_dt = datetime.now()
-            else:
-                target_dt = pd.to_datetime(target_date)
-                
-            df_filtered = df[df[month_col] <= target_dt]
-            if not df_filtered.empty:
-                df_sorted = df_filtered.sort_values(month_col)
-                latest_row = df_sorted.iloc[-1]
-                pmi_val = float(latest_row[val_col])
-                return np.clip(pmi_val - 50.0, -5.0, 5.0)
+        val, _, _ = get_fred_data_historical("CVPMA", dt_str, fred_key)
+        if val is not None:
+            return np.clip(val - 50.0, -5.0, 5.0)
     except Exception:
         pass
     return 0.0
@@ -2519,9 +2499,9 @@ def compute_currency_score_historical(curr, target_date):
         elif curr == "CAD":
             correction += get_oil_price(target_date)
         elif curr == "AUD":
-            correction += get_china_pmi(target_date)
+            correction += get_china_pmi_fred(target_date)
         elif curr == "NZD":
-            correction += get_china_pmi(target_date) * 0.8
+            correction += get_china_pmi_fred(target_date) * 0.8
             correction += get_milk_price(target_date)
         elif curr == "JPY":
             correction += get_trade_balance(target_date)
@@ -2955,9 +2935,9 @@ def compute_currency_score(curr, fred_key):
         elif curr == "CAD":
             correction += get_oil_price(None)
         elif curr == "AUD":
-            correction += get_china_pmi(None)
+            correction += get_china_pmi_fred(None)
         elif curr == "NZD":
-            correction += get_china_pmi(None) * 0.8
+            correction += get_china_pmi_fred(None) * 0.8
             correction += get_milk_price(None)
         elif curr == "JPY":
             correction += get_trade_balance(None)
