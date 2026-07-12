@@ -2490,21 +2490,30 @@ def compute_currency_score_historical(curr, target_date):
         
         # 8. Additive Correction Factors (±2 to ±5 points)
         correction = 0.0
-        if curr == "USD":
-            correction += get_yield_spread(target_date)
-        elif curr == "EUR":
-            correction += get_ciss_index(target_date)
-        elif curr == "GBP":
-            correction += get_house_price_index(target_date)
-        elif curr == "CAD":
-            correction += get_oil_price(target_date)
-        elif curr == "AUD":
-            correction += get_china_pmi_fred(target_date)
-        elif curr == "NZD":
-            correction += get_china_pmi_fred(target_date) * 0.8
-            correction += get_milk_price(target_date)
-        elif curr == "JPY":
-            correction += get_trade_balance(target_date)
+        try:
+            val = 0.0
+            if curr == "USD":
+                val = get_yield_spread(target_date)
+            elif curr == "EUR":
+                val = get_ciss_index(target_date)
+            elif curr == "GBP":
+                val = get_house_price_index(target_date)
+            elif curr == "CAD":
+                val = get_oil_price(target_date)
+            elif curr == "AUD":
+                val = get_china_pmi_fred(target_date)
+            elif curr == "NZD":
+                pmi_val = get_china_pmi_fred(target_date)
+                pmi_val = pmi_val if pmi_val is not None else 0.0
+                milk_val = get_milk_price(target_date)
+                milk_val = milk_val if milk_val is not None else 0.0
+                val = pmi_val * 0.8 + milk_val
+            elif curr == "JPY":
+                val = get_trade_balance(target_date)
+                
+            correction = float(val) if val is not None else 0.0
+        except Exception:
+            correction = 0.0
             
         final_score = np.clip(base_score + correction, 0.0, 100.0)
         return final_score
@@ -2926,21 +2935,30 @@ def compute_currency_score(curr, fred_key):
         
         # 8. Additive Correction Factors (±2 to ±5 points)
         correction = 0.0
-        if curr == "USD":
-            correction += get_yield_spread(None)
-        elif curr == "EUR":
-            correction += get_ciss_index(None)
-        elif curr == "GBP":
-            correction += get_house_price_index(None)
-        elif curr == "CAD":
-            correction += get_oil_price(None)
-        elif curr == "AUD":
-            correction += get_china_pmi_fred(None)
-        elif curr == "NZD":
-            correction += get_china_pmi_fred(None) * 0.8
-            correction += get_milk_price(None)
-        elif curr == "JPY":
-            correction += get_trade_balance(None)
+        try:
+            val = 0.0
+            if curr == "USD":
+                val = get_yield_spread(None)
+            elif curr == "EUR":
+                val = get_ciss_index(None)
+            elif curr == "GBP":
+                val = get_house_price_index(None)
+            elif curr == "CAD":
+                val = get_oil_price(None)
+            elif curr == "AUD":
+                val = get_china_pmi_fred(None)
+            elif curr == "NZD":
+                pmi_val = get_china_pmi_fred(None)
+                pmi_val = pmi_val if pmi_val is not None else 0.0
+                milk_val = get_milk_price(None)
+                milk_val = milk_val if milk_val is not None else 0.0
+                val = pmi_val * 0.8 + milk_val
+            elif curr == "JPY":
+                val = get_trade_balance(None)
+                
+            correction = float(val) if val is not None else 0.0
+        except Exception:
+            correction = 0.0
             
         final_score = np.clip(base_score + correction, 0.0, 100.0)
         return final_score
