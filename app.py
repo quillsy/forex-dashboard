@@ -2244,11 +2244,11 @@ def get_yield_spread(target_date=None):
             dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
         val, _, _ = get_fred_data_historical("T10Y2Y", dt_str, fred_key)
-        if val is not None:
-            return np.clip(val / 2.0 * 5.0, -5.0, 5.0)
+        if val is None:
+            return 0.0
+        return float(np.clip(val / 2.0 * 5.0, -5.0, 5.0))
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 def get_ciss_index(target_date=None):
     try:
@@ -2268,9 +2268,11 @@ def get_ciss_index(target_date=None):
                 sorted_keys = sorted(obs.keys(), key=int)
                 if sorted_keys:
                     latest_val = float(obs[sorted_keys[-1]][0])
-                    return np.clip((0.2 - latest_val) / 0.3 * 5.0, -5.0, 5.0)
+                    if latest_val is None:
+                        return 0.0
+                    return float(np.clip((0.2 - latest_val) / 0.3 * 5.0, -5.0, 5.0))
     except Exception:
-        pass
+        return 0.0
     return 0.0
 
 def get_house_price_index(target_date=None):
@@ -2305,10 +2307,12 @@ def get_house_price_index(target_date=None):
                 if len(valid_data) >= 2:
                     latest_hpi = valid_data[-1]["hpi"]
                     prev_hpi = valid_data[-2]["hpi"]
+                    if latest_hpi is None or prev_hpi is None or prev_hpi == 0:
+                        return 0.0
                     growth = (latest_hpi - prev_hpi) / prev_hpi * 100.0
-                    return np.clip(growth / 0.5 * 2.0, -2.0, 2.0)
+                    return float(np.clip(growth / 0.5 * 2.0, -2.0, 2.0))
     except Exception:
-        pass
+        return 0.0
     return 0.0
 
 def get_china_pmi_fred(target_date=None):
@@ -2320,11 +2324,11 @@ def get_china_pmi_fred(target_date=None):
             dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
         val, _, _ = get_fred_data_historical("CVPMA", dt_str, fred_key)
-        if val is not None:
-            return np.clip(val - 50.0, -5.0, 5.0)
+        if val is None:
+            return 0.0
+        return float(np.clip(val - 50.0, -5.0, 5.0))
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 def get_oil_price(target_date=None):
     try:
@@ -2338,12 +2342,12 @@ def get_oil_price(target_date=None):
         val_now, _, _ = get_fred_data_historical("DCOILWTICO", dt_str, fred_key)
         val_3m, _, _ = get_fred_data_historical("DCOILWTICO", dt_3m_ago, fred_key)
         
-        if val_now is not None and val_3m is not None and val_3m > 0:
-            chg = (val_now - val_3m) / val_3m * 100.0
-            return np.clip(chg / 10.0 * 5.0, -5.0, 5.0)
+        if val_now is None or val_3m is None or val_3m == 0:
+            return 0.0
+        chg = (val_now - val_3m) / val_3m * 100.0
+        return float(np.clip(chg / 10.0 * 5.0, -5.0, 5.0))
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 def get_milk_price(target_date=None):
     try:
@@ -2357,28 +2361,29 @@ def get_milk_price(target_date=None):
         val_now, _, _ = get_fred_data_historical("PRAWINDEXM", dt_str, fred_key)
         val_3m, _, _ = get_fred_data_historical("PRAWINDEXM", dt_3m_ago, fred_key)
         
-        if val_now is not None and val_3m is not None and val_3m > 0:
-            chg = (val_now - val_3m) / val_3m * 100.0
-            return np.clip(chg / 10.0 * 3.0, -3.0, 3.0)
+        if val_now is None or val_3m is None or val_3m == 0:
+            return 0.0
+        chg = (val_now - val_3m) / val_3m * 100.0
+        return float(np.clip(chg / 10.0 * 3.0, -3.0, 3.0))
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 def get_trade_balance(target_date=None):
-    if ESTAT_APP_ID:
-        try:
-            url = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={ESTAT_APP_ID}&statsDataId=0003444800&limit=10"
-            r = requests.get(url, timeout=8)
-            if r.status_code == 200:
-                data = r.json()
-                values = data.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
-                if values:
-                    latest_val = float(values[-1].get("$"))
-                    return np.clip(latest_val / 1e12 * 5.0, -5.0, 5.0)
-        except Exception:
-            pass
-            
     try:
+        if ESTAT_APP_ID:
+            try:
+                url = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={ESTAT_APP_ID}&statsDataId=0003444800&limit=10"
+                r = requests.get(url, timeout=8)
+                if r.status_code == 200:
+                    data = r.json()
+                    values = data.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
+                    if values:
+                        latest_val = float(values[-1].get("$"))
+                        if latest_val is not None:
+                            return float(np.clip(latest_val / 1e12 * 5.0, -5.0, 5.0))
+            except Exception:
+                pass
+                
         fred_key = FRED_KEY
         if target_date is None:
             dt_str = datetime.now().strftime("%Y-%m-%d")
@@ -2386,11 +2391,11 @@ def get_trade_balance(target_date=None):
             dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
         val, _, _ = get_fred_data_historical("XTNTVA01JPM667S", dt_str, fred_key)
-        if val is not None:
-            return np.clip(val / 5000.0 * 5.0, -5.0, 5.0)
+        if val is None:
+            return 0.0
+        return float(np.clip(val / 5000.0 * 5.0, -5.0, 5.0))
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 YIELD_SERIES = {
     "USD": "DGS2",
@@ -2493,25 +2498,23 @@ def compute_currency_score_historical(curr, target_date):
         try:
             val = 0.0
             if curr == "USD":
-                val = get_yield_spread(target_date)
+                val = float(get_yield_spread(target_date) or 0.0)
             elif curr == "EUR":
-                val = get_ciss_index(target_date)
+                val = float(get_ciss_index(target_date) or 0.0)
             elif curr == "GBP":
-                val = get_house_price_index(target_date)
+                val = float(get_house_price_index(target_date) or 0.0)
             elif curr == "CAD":
-                val = get_oil_price(target_date)
+                val = float(get_oil_price(target_date) or 0.0)
             elif curr == "AUD":
-                val = get_china_pmi_fred(target_date)
+                val = float(get_china_pmi_fred(target_date) or 0.0)
             elif curr == "NZD":
-                pmi_val = get_china_pmi_fred(target_date)
-                pmi_val = pmi_val if pmi_val is not None else 0.0
-                milk_val = get_milk_price(target_date)
-                milk_val = milk_val if milk_val is not None else 0.0
+                pmi_val = float(get_china_pmi_fred(target_date) or 0.0)
+                milk_val = float(get_milk_price(target_date) or 0.0)
                 val = pmi_val * 0.8 + milk_val
             elif curr == "JPY":
-                val = get_trade_balance(target_date)
+                val = float(get_trade_balance(target_date) or 0.0)
                 
-            correction = float(val) if val is not None else 0.0
+            correction = float(val or 0.0)
         except Exception:
             correction = 0.0
             
@@ -2938,25 +2941,23 @@ def compute_currency_score(curr, fred_key):
         try:
             val = 0.0
             if curr == "USD":
-                val = get_yield_spread(None)
+                val = float(get_yield_spread(None) or 0.0)
             elif curr == "EUR":
-                val = get_ciss_index(None)
+                val = float(get_ciss_index(None) or 0.0)
             elif curr == "GBP":
-                val = get_house_price_index(None)
+                val = float(get_house_price_index(None) or 0.0)
             elif curr == "CAD":
-                val = get_oil_price(None)
+                val = float(get_oil_price(None) or 0.0)
             elif curr == "AUD":
-                val = get_china_pmi_fred(None)
+                val = float(get_china_pmi_fred(None) or 0.0)
             elif curr == "NZD":
-                pmi_val = get_china_pmi_fred(None)
-                pmi_val = pmi_val if pmi_val is not None else 0.0
-                milk_val = get_milk_price(None)
-                milk_val = milk_val if milk_val is not None else 0.0
+                pmi_val = float(get_china_pmi_fred(None) or 0.0)
+                milk_val = float(get_milk_price(None) or 0.0)
                 val = pmi_val * 0.8 + milk_val
             elif curr == "JPY":
-                val = get_trade_balance(None)
+                val = float(get_trade_balance(None) or 0.0)
                 
-            correction = float(val) if val is not None else 0.0
+            correction = float(val or 0.0)
         except Exception:
             correction = 0.0
             
