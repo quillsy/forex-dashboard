@@ -2408,120 +2408,262 @@ YIELD_SERIES = {
     "NZD": "IRLTLT01NZM156N"
 }
 
-def compute_currency_score_historical(curr, target_date):
-    fred_key = FRED_KEY
+def get_vix_value(target_date=None):
     try:
-        # 1. 2Y Yield (Zinserwartungen)
-        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], target_date, fred_key)
-        if yield_val is None:
-            return None
-        yield_score = np.clip((yield_val / 6.0) * 100, 0, 100)
-        
-        # 2. CPI YoY
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        val, _, _ = get_fred_data_historical("VIXCLS", dt_str, fred_key)
+        if val is not None:
+            return float(val)
+    except Exception:
+        pass
+    return 15.0
+
+def detect_market_regime(curr, target_date=None):
+    regime = "Normal"
+    try:
+        vix = get_vix_value(target_date)
+        if vix > 25.0:
+            return "Risk-Off"
+            
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+            
         if curr == "USD":
             df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
-            latest_cpi = None
             if df_cpi is not None and not df_cpi.empty:
                 df_cpi_c = df_cpi.copy()
-                if len(df_cpi_c) >= 13:
-                    df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
-                    df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(target_date)]
-                    if not df_filtered.empty:
-                        latest_cpi = df_filtered.iloc[-1]["yoy"]
+                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                df_filtered = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(dt_str)]
+                if not df_filtered.empty:
+                    cpi_val = df_filtered.iloc[-1]["yoy"]
+                    cpi_3m_ago = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+                    df_3m = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(cpi_3m_ago)]
+                    cpi_val_3m = df_3m.iloc[-1]["yoy"] if not df_3m.empty else cpi_val
+                    if cpi_val > 3.0 and cpi_val > cpi_val_3m:
+                        return "Inflation"
         else:
             code = CURRENCIES[curr]["wb_code"]
-            cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
-            latest_cpi = cpi_val
-            
-        if latest_cpi is None:
-            return None
-        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
-        
-        # 3. Real Yield
-        real_yield = yield_val - latest_cpi
-        real_yield_score = np.clip(((real_yield + 5.0) / 10.0) * 100, 0, 100)
-        
-        # 4. Unemployment (Labor Market)
-        if curr == "USD":
-            unemp_val, _, _ = get_fred_data_historical("UNRATE", target_date, fred_key)
-            latest_unemp = unemp_val
-        else:
-            code = CURRENCIES[curr]["wb_code"]
-            unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
-            latest_unemp = unemp_val
-            
-        if latest_unemp is None:
-            return None
-        unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
-        
-        # 5. GDP YoY
-        if curr == "USD":
-            df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
-            latest_gdp = None
-            if df_gdp is not None and not df_gdp.empty:
-                df_gdp_c = df_gdp.copy()
-                if len(df_gdp_c) >= 5:
-                    df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
-                    df_filtered = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(target_date)]
-                    if not df_filtered.empty:
-                        latest_gdp = df_filtered.iloc[-1]["yoy"]
-        else:
-            code = CURRENCIES[curr]["wb_code"]
-            gdp_val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-            latest_gdp = gdp_val
-            
-        if latest_gdp is None:
-            return None
-        gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
-        
-        # 6. PMI (Manufacturing & Services)
-        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=target_date)
+            cpi_val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", dt_str)
+            cpi_3m_ago = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+            cpi_val_3m, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", cpi_3m_ago)
+            if cpi_val is not None and cpi_val_3m is not None:
+                if cpi_val > 3.0 and cpi_val > cpi_val_3m:
+                    return "Inflation"
+                    
+        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
         pmi_data = pmi_all.get(curr, {})
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
-        m_pmi_score = np.clip((m_val - 40.0) / 20.0 * 100, 0, 100) if m_val is not None else 50.0
-        s_pmi_score = np.clip((s_val - 40.0) / 20.0 * 100, 0, 100) if s_val is not None else 50.0
-        pmi_score = (m_pmi_score + s_pmi_score) / 2.0
+        pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
+        pmi_avg = np.mean(pmi_vals) if pmi_vals else 50.0
         
-        # 7. Core Weighted Score (95% weight)
-        base_score = (
-            0.25 * yield_score +
-            0.15 * real_yield_score +
-            0.20 * cpi_score +
-            0.20 * unemp_score +
-            0.15 * pmi_score +
-            0.05 * gdp_score
-        )
-        
-        # 8. Additive Correction Factors (±2 to ±5 points)
-        correction = 0.0
-        try:
-            val = 0.0
-            if curr == "USD":
-                val = float(get_yield_spread(target_date) or 0.0)
-            elif curr == "EUR":
-                val = float(get_ciss_index(target_date) or 0.0)
-            elif curr == "GBP":
-                val = float(get_house_price_index(target_date) or 0.0)
-            elif curr == "CAD":
-                val = float(get_oil_price(target_date) or 0.0)
-            elif curr == "AUD":
-                val = float(get_china_pmi_fred(target_date) or 0.0)
-            elif curr == "NZD":
-                pmi_val = float(get_china_pmi_fred(target_date) or 0.0)
-                milk_val = float(get_milk_price(target_date) or 0.0)
-                val = pmi_val * 0.8 + milk_val
-            elif curr == "JPY":
-                val = float(get_trade_balance(target_date) or 0.0)
-                
-            correction = float(val or 0.0)
-        except Exception:
-            correction = 0.0
+        if curr == "USD":
+            unemp_val, _, _ = get_fred_data_historical("UNRATE", dt_str, fred_key)
+            unemp_3m_ago = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+            unemp_val_3m, _, _ = get_fred_data_historical("UNRATE", unemp_3m_ago, fred_key)
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            unemp_val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", dt_str)
+            unemp_3m_ago = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+            unemp_val_3m, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", unemp_3m_ago)
             
-        final_score = np.clip(base_score + correction, 0.0, 100.0)
-        return final_score
+        if pmi_avg < 50.0 and unemp_val is not None and unemp_val_3m is not None and unemp_val > unemp_val_3m:
+            return "Rezession"
+            
     except Exception:
-        return None
+        pass
+    return regime
+
+def compute_currency_details(curr, target_date=None):
+    fred_key = FRED_KEY
+    if target_date is None:
+        dt_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        
+    scores = {
+        "Geldpolitik": 0.0,
+        "Inflation": 0.0,
+        "Arbeitsmarkt": 0.0,
+        "Wachstum": 0.0,
+        "Risiko": 0.0,
+        "Kapitalfluesse": 0.0
+    }
+    
+    try:
+        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], dt_str, fred_key)
+        if yield_val is None:
+            yield_val = 3.0
+            
+        if curr == "USD":
+            df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
+            latest_cpi = 2.0
+            cpi_val_3m = 2.0
+            if df_cpi is not None and not df_cpi.empty:
+                df_cpi_c = df_cpi.copy()
+                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
+                df_f = df_cpi_c[df_cpi_c["date"] <= pd.to_datetime(dt_str)]
+                if not df_f.empty:
+                    latest_cpi = df_f.iloc[-1]["yoy"]
+                df_3m = df_cpi_c[df_cpi_c["date"] <= (pd.to_datetime(dt_str) - timedelta(days=90))]
+                if not df_3m.empty:
+                    cpi_val_3m = df_3m.iloc[-1]["yoy"]
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            latest_cpi, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", dt_str)
+            if latest_cpi is None:
+                latest_cpi = 2.0
+            cpi_val_3m, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", (pd.to_datetime(dt_str) - timedelta(days=90)))
+            if cpi_val_3m is None:
+                cpi_val_3m = latest_cpi
+                
+        if curr == "USD":
+            latest_unemp, _, _ = get_fred_data_historical("UNRATE", dt_str, fred_key)
+            if latest_unemp is None:
+                latest_unemp = 5.0
+            unemp_val_3m, _, _ = get_fred_data_historical("UNRATE", (pd.to_datetime(dt_str) - timedelta(days=90)), fred_key)
+            if unemp_val_3m is None:
+                unemp_val_3m = latest_unemp
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            latest_unemp, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", dt_str)
+            if latest_unemp is None:
+                latest_unemp = 5.0
+            unemp_val_3m, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", (pd.to_datetime(dt_str) - timedelta(days=90)))
+            if unemp_val_3m is None:
+                unemp_val_3m = latest_unemp
+                
+        if curr == "USD":
+            df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
+            latest_gdp = 1.5
+            gdp_val_3m = 1.5
+            if df_gdp is not None and not df_gdp.empty:
+                df_gdp_c = df_gdp.copy()
+                df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
+                df_f = df_gdp_c[df_gdp_c["date"] <= pd.to_datetime(dt_str)]
+                if not df_f.empty:
+                    latest_gdp = df_f.iloc[-1]["yoy"]
+                df_3m = df_gdp_c[df_gdp_c["date"] <= (pd.to_datetime(dt_str) - timedelta(days=90))]
+                if not df_3m.empty:
+                    gdp_val_3m = df_3m.iloc[-1]["yoy"]
+        else:
+            code = CURRENCIES[curr]["wb_code"]
+            latest_gdp, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", dt_str)
+            if latest_gdp is None:
+                latest_gdp = 1.5
+            gdp_val_3m, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", (pd.to_datetime(dt_str) - timedelta(days=90)))
+            if gdp_val_3m is None:
+                gdp_val_3m = latest_gdp
+
+        real_yield = yield_val - latest_cpi
+        geld_yield_score = (yield_val - 3.0) / 3.0 * 100.0
+        geld_real_score = real_yield / 3.0 * 100.0
+        scores["Geldpolitik"] = np.clip((geld_yield_score + geld_real_score) / 2.0, -100.0, 100.0)
+        
+        cpi_dev = latest_cpi - 2.0
+        cpi_dev_score = cpi_dev / 2.0 * 100.0
+        cpi_trend = 25.0 if latest_cpi > cpi_val_3m else (-25.0 if latest_cpi < cpi_val_3m else 0.0)
+        scores["Inflation"] = np.clip((cpi_dev_score + cpi_trend) / 2.0 * 1.5, -100.0, 100.0)
+        
+        unemp_dev = 5.0 - latest_unemp
+        unemp_score = unemp_dev / 3.0 * 100.0
+        unemp_trend = 25.0 if latest_unemp < unemp_val_3m else (-25.0 if latest_unemp > unemp_val_3m else 0.0)
+        scores["Arbeitsmarkt"] = np.clip((unemp_score + unemp_trend) / 2.0 * 1.5, -100.0, 100.0)
+        
+        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
+        pmi_data = pmi_all.get(curr, {})
+        m_val = pmi_data.get("m_last")
+        s_val = pmi_data.get("s_last")
+        pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
+        pmi_avg = np.mean(pmi_vals) if pmi_vals else 50.0
+        pmi_score = (pmi_avg - 50.0) / 10.0 * 100.0
+        
+        gdp_score = (latest_gdp - 1.5) / 1.5 * 100.0
+        
+        cli_score = 0.0
+        cli_res = get_historical_oecd_cli(curr, dt_str)
+        if cli_res is not None:
+            cli_val = cli_res[0]
+            cli_score = (cli_val - 100.0) / 2.0 * 100.0
+            
+        gdp_trend = 25.0 if latest_gdp > gdp_val_3m else (-25.0 if latest_gdp < gdp_val_3m else 0.0)
+        scores["Wachstum"] = np.clip((pmi_score + gdp_score + cli_score + gdp_trend) / 4.0 * 1.5, -100.0, 100.0)
+        
+        vix = get_vix_value(dt_str)
+        vix_score = 0.0
+        if vix > 22.0:
+            if curr in ["USD", "CHF", "JPY"]:
+                vix_score = 50.0
+            elif curr in ["AUD", "NZD", "CAD"]:
+                vix_score = -50.0
+        else:
+            if curr in ["USD", "CHF", "JPY"]:
+                vix_score = -20.0
+            elif curr in ["AUD", "NZD", "CAD"]:
+                vix_score = 30.0
+                
+        comm_score = 0.0
+        if curr == "CAD":
+            comm_score = get_oil_price(dt_str) * 20.0
+        elif curr == "NZD":
+            comm_score = (get_china_pmi_fred(dt_str) * 0.8 + get_milk_price(dt_str)) * 15.0
+        elif curr == "AUD":
+            comm_score = get_china_pmi_fred(dt_str) * 20.0
+        elif curr == "EUR":
+            comm_score = get_ciss_index(dt_str) * 20.0
+        elif curr == "GBP":
+            comm_score = get_house_price_index(dt_str) * 50.0
+        elif curr == "JPY":
+            comm_score = get_trade_balance(dt_str) * 20.0
+            
+        scores["Risiko"] = np.clip(vix_score + comm_score, -100.0, 100.0)
+        
+        ca_val = get_historical_imf_value(curr, "BCA_NGDPD", dt_str)
+        debt_val = get_historical_imf_value(curr, "GGXWDG_NGDP", dt_str)
+        deficit_val = get_historical_imf_value(curr, "GGXCNL_NGDP", dt_str)
+        
+        ca_score = (ca_val / 3.0) * 100.0 if ca_val is not None else 0.0
+        debt_score = (80.0 - debt_val) / 40.0 * 100.0 if debt_val is not None else 0.0
+        deficit_score = (deficit_val + 3.0) / 3.0 * 100.0 if deficit_val is not None else 0.0
+        scores["Kapitalfluesse"] = np.clip((ca_score + debt_score + deficit_score) / 3.0, -100.0, 100.0)
+        
+    except Exception:
+        pass
+    return scores
+
+def compute_currency_professional_score_and_regime(curr, target_date=None):
+    regime = detect_market_regime(curr, target_date)
+    scores = compute_currency_details(curr, target_date)
+    
+    weights = {
+        "Normal": {"Geldpolitik": 0.30, "Inflation": 0.25, "Arbeitsmarkt": 0.20, "Wachstum": 0.15, "Risiko": 0.10},
+        "Inflation": {"Geldpolitik": 0.35, "Inflation": 0.35, "Arbeitsmarkt": 0.15, "Wachstum": 0.10, "Risiko": 0.05},
+        "Rezession": {"Geldpolitik": 0.20, "Inflation": 0.15, "Arbeitsmarkt": 0.35, "Wachstum": 0.20, "Risiko": 0.10},
+        "Risk-Off": {"Geldpolitik": 0.25, "Inflation": 0.20, "Arbeitsmarkt": 0.15, "Wachstum": 0.10, "Risiko": 0.30}
+    }
+    
+    regime_weights = weights.get(regime, weights["Normal"])
+    base_score = sum(scores[cat] * regime_weights[cat] for cat in regime_weights.keys())
+    
+    capital_overlay = scores.get("Kapitalfluesse", 0.0) * 0.10
+    final_score = np.clip(base_score + capital_overlay, -100.0, 100.0)
+    
+    return final_score, regime, regime_weights, scores
+
+def compute_currency_score_historical(curr, target_date):
+    try:
+        final_score, _, _, _ = compute_currency_professional_score_and_regime(curr, target_date)
+        mapped_score = (final_score + 100.0) / 2.0
+        return float(mapped_score)
+    except Exception:
+        return 50.0
 
 
 def load_backtest_decisions():
@@ -2862,109 +3004,11 @@ def get_country_rate(country_code, fred_key):
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
     try:
-        # 1. 2Y Yield (Zinserwartungen)
-        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], datetime.now().strftime("%Y-%m-%d"), fred_key)
-        if yield_val is None:
-            return None
-        yield_score = np.clip((yield_val / 6.0) * 100, 0, 100)
-        
-        # 2. CPI YoY
-        if curr == "USD":
-            df_cpi, _, _ = get_fred_data("CPIAUCSL", fred_key)
-            latest_cpi = None
-            if not df_cpi.empty and len(df_cpi) >= 13:
-                df_cpi_c = df_cpi.copy()
-                df_cpi_c["yoy"] = df_cpi_c["value"].pct_change(periods=12) * 100
-                latest_cpi = df_cpi_c.iloc[-1]["yoy"]
-        else:
-            code = CURRENCIES[curr]["wb_code"]
-            df_cpi, _, _ = get_worldbank_data(code, "FP.CPI.TOTL.ZG")
-            latest_cpi = df_cpi.iloc[-1]["value"] if not df_cpi.empty else None
-            
-        if latest_cpi is None:
-            return None
-        cpi_score = np.clip((latest_cpi / 5.0) * 100, 0, 100)
-        
-        # 3. Real Yield
-        real_yield = yield_val - latest_cpi
-        real_yield_score = np.clip(((real_yield + 5.0) / 10.0) * 100, 0, 100)
-        
-        # 4. Unemployment (Labor Market)
-        if curr == "USD":
-            df_unemp, _, _ = get_fred_data("UNRATE", fred_key)
-            latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else None
-        else:
-            code = CURRENCIES[curr]["wb_code"]
-            df_unemp, _, _ = get_worldbank_data(code, "SL.UEM.TOTL.ZG")
-            latest_unemp = df_unemp.iloc[-1]["value"] if not df_unemp.empty else None
-            
-        if latest_unemp is None:
-            return None
-        unemp_score = np.clip((10.0 - latest_unemp) / 8.0 * 100, 0, 100)
-        
-        # 5. GDP YoY
-        if curr == "USD":
-            df_gdp, _, _ = get_fred_data("GDPC1", fred_key)
-            latest_gdp = None
-            if not df_gdp.empty and len(df_gdp) >= 5:
-                df_gdp_c = df_gdp.copy()
-                df_gdp_c["yoy"] = df_gdp_c["value"].pct_change(periods=4) * 100
-                latest_gdp = df_gdp_c.iloc[-1]["yoy"]
-        else:
-            code = CURRENCIES[curr]["wb_code"]
-            df_gdp, _, _ = get_worldbank_data(code, "NY.GDP.MKTP.KD.ZG")
-            latest_gdp = df_gdp.iloc[-1]["value"] if not df_gdp.empty else None
-            
-        if latest_gdp is None:
-            return None
-        gdp_score = np.clip((latest_gdp + 2.0) / 6.0 * 100, 0, 100)
-        
-        # 6. PMI (Manufacturing & Services)
-        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY)
-        pmi_data = pmi_all.get(curr, {})
-        m_val = pmi_data.get("m_last")
-        s_val = pmi_data.get("s_last")
-        m_pmi_score = np.clip((m_val - 40.0) / 20.0 * 100, 0, 100) if m_val is not None else 50.0
-        s_pmi_score = np.clip((s_val - 40.0) / 20.0 * 100, 0, 100) if s_val is not None else 50.0
-        pmi_score = (m_pmi_score + s_pmi_score) / 2.0
-        base_score = (
-            0.25 * yield_score +
-            0.15 * real_yield_score +
-            0.20 * cpi_score +
-            0.20 * unemp_score +
-            0.15 * pmi_score +
-            0.05 * gdp_score
-        )
-        
-        # 8. Additive Correction Factors (±2 to ±5 points)
-        correction = 0.0
-        try:
-            val = 0.0
-            if curr == "USD":
-                val = float(get_yield_spread(None) or 0.0)
-            elif curr == "EUR":
-                val = float(get_ciss_index(None) or 0.0)
-            elif curr == "GBP":
-                val = float(get_house_price_index(None) or 0.0)
-            elif curr == "CAD":
-                val = float(get_oil_price(None) or 0.0)
-            elif curr == "AUD":
-                val = float(get_china_pmi_fred(None) or 0.0)
-            elif curr == "NZD":
-                pmi_val = float(get_china_pmi_fred(None) or 0.0)
-                milk_val = float(get_milk_price(None) or 0.0)
-                val = pmi_val * 0.8 + milk_val
-            elif curr == "JPY":
-                val = float(get_trade_balance(None) or 0.0)
-                
-            correction = float(val or 0.0)
-        except Exception:
-            correction = 0.0
-            
-        final_score = np.clip(base_score + correction, 0.0, 100.0)
-        return final_score
+        final_score, _, _, _ = compute_currency_professional_score_and_regime(curr, None)
+        mapped_score = (final_score + 100.0) / 2.0
+        return float(mapped_score)
     except Exception:
-        return None
+        return 50.0
 
 
 COT_SYMBOLS = {
@@ -3472,8 +3516,9 @@ def get_next_event_for_pair(base, quote, df_c):
     time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
     return f"{next_event['country']}: {next_event['event']} ({time_str})"
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab14 = st.tabs([
+tab1, tab_score, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab14 = st.tabs([
     "🏠 Übersicht & Checkliste",
+    "📊 Fundamental-Score",
     "📊 PMI-Daten",
     "🏦 Zinsdifferenz",
     "📊 Analysten-Konsens",
@@ -3596,6 +3641,179 @@ with tab1:
     html_table += "".join(rows) + "</tbody></table>"
     st.markdown(html_table, unsafe_allow_html=True)
     st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung (Risikodaten Quelle: IMF DataMapper)</div>", unsafe_allow_html=True)
+
+# ----------------- TAB: FUNDAMENTAL-SCORE -----------------
+with tab_score:
+    st.header("📊 Professioneller G10 Fundamental-Score")
+    st.caption("Dieses Modul zerlegt die wirtschaftliche Verfassung jedes G10-Landes in 6 standardisierte Makro-Kategorien. Die Gewichtung passt sich dynamisch an das Marktregime an.")
+    
+    # Calculate G8 professional scores
+    g8_prof = {}
+    for curr in CURRENCIES.keys():
+        f_score, regime, regime_w, cat_scores = compute_currency_professional_score_and_regime(curr)
+        g8_prof[curr] = {
+            "score": f_score,
+            "regime": regime,
+            "weights": regime_w,
+            "categories": cat_scores
+        }
+        
+    strongest_curr = max(g8_prof.keys(), key=lambda k: g8_prof[k]["score"])
+    weakest_curr = min(g8_prof.keys(), key=lambda k: g8_prof[k]["score"])
+    
+    col_str1, col_str2 = st.columns(2)
+    with col_str1:
+        st.metric(
+            label=f"🟢 Stärkste Währung ({strongest_curr})",
+            value=f"{g8_prof[strongest_curr]['score']:+.1f}",
+            delta=f"Regime: {g8_prof[strongest_curr]['regime']}"
+        )
+    with col_str2:
+        st.metric(
+            label=f"🔴 Schwächste Währung ({weakest_curr})",
+            value=f"{g8_prof[weakest_curr]['score']:+.1f}",
+            delta=f"Regime: {g8_prof[weakest_curr]['regime']}",
+            delta_color="inverse"
+        )
+        
+    # Table of Category Scores
+    st.subheader("📋 G10 Category Scores & Regime Matrix")
+    
+    rows_mat = []
+    for curr, data in g8_prof.items():
+        sc = data["score"]
+        reg = data["regime"]
+        cats = data["categories"]
+        
+        if sc > 0:
+            sc_color = "#10b981"
+            sc_sign = "+"
+        else:
+            sc_color = "#ef4444"
+            sc_sign = ""
+            
+        rows_mat.append(f"""
+        <tr style="border-bottom:1px solid #1f2026;">
+            <td style="padding:10px 8px; font-weight:600; color:#f0f0f5;">{CURRENCIES[curr]['flag']} {curr}</td>
+            <td style="padding:10px 8px; font-weight:700; color:{sc_color}; font-family:'Roboto Mono', monospace;">{sc_sign}{sc:.1f}</td>
+            <td style="padding:10px 8px; color:#e2b13c; font-weight:500;">{reg}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Geldpolitik'] > 0 else '#ef4444'}">{cats['Geldpolitik']:+.0f}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Inflation'] > 0 else '#ef4444'}">{cats['Inflation']:+.0f}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Arbeitsmarkt'] > 0 else '#ef4444'}">{cats['Arbeitsmarkt']:+.0f}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Wachstum'] > 0 else '#ef4444'}">{cats['Wachstum']:+.0f}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Risiko'] > 0 else '#ef4444'}">{cats['Risiko']:+.0f}</td>
+            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Kapitalfluesse'] > 0 else '#ef4444'}">{cats['Kapitalfluesse']:+.0f}</td>
+        </tr>
+        """)
+        
+    html_matrix = f"""
+    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
+    <thead>
+        <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
+            <th style="padding:10px 8px;">Währung</th>
+            <th style="padding:10px 8px;">Gesamt-Score</th>
+            <th style="padding:10px 8px;">Regime</th>
+            <th style="padding:10px 8px;">Geldpolitik</th>
+            <th style="padding:10px 8px;">Inflation</th>
+            <th style="padding:10px 8px;">Arbeitsmarkt</th>
+            <th style="padding:10px 8px;">Wachstum</th>
+            <th style="padding:10px 8px;">Risiko</th>
+            <th style="padding:10px 8px;">Kapitalflüsse</th>
+        </tr>
+    </thead>
+    <tbody>
+        {"".join(rows_mat)}
+    </tbody>
+    </table>
+    """
+    st.markdown(html_matrix, unsafe_allow_html=True)
+    
+    st.write("")
+    
+    st.subheader("🔍 FX-Paar Fundamental-Analyse")
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        base_sel = st.selectbox("Basis-Währung (Base)", list(CURRENCIES.keys()), index=0, key="base_sel_key")
+    with col_p2:
+        quote_sel = st.selectbox("Quote-Währung (Quote)", list(CURRENCIES.keys()), index=1, key="quote_sel_key")
+        
+    if base_sel == quote_sel:
+        st.warning("Bitte wählen Sie zwei unterschiedliche Währungen aus.")
+    else:
+        base_data = g8_prof[base_sel]
+        quote_data = g8_prof[quote_sel]
+        
+        diff = base_data["score"] - quote_data["score"]
+        
+        if diff > 0:
+            bias = f"🟢 Long {base_sel}/{quote_sel} (Stärke für {base_sel})"
+            bias_val = "Long"
+        else:
+            bias = f"🔴 Short {base_sel}/{quote_sel} (Stärke für {quote_sel})"
+            bias_val = "Short"
+            
+        abs_diff = abs(diff)
+        if abs_diff <= 5.0:
+            conf = "Niedrig"
+            conf_color = "#8b949e"
+        elif 5.0 < abs_diff <= 15.0:
+            conf = "Mittel"
+            conf_color = "#e2b13c"
+        elif 15.0 < abs_diff <= 30.0:
+            conf = "Hoch"
+            conf_color = "#34d399"
+        else:
+            conf = "Sehr hoch"
+            conf_color = "#10b981"
+            
+        col_c1, col_c2, col_c3 = st.columns(3)
+        with col_c1:
+            st.metric("Fundamental-Bias", bias_val)
+        with col_c2:
+            st.metric("Score-Differenz", f"{diff:+.1f} Pkt")
+        with col_c3:
+            st.markdown(f"<div style='padding: 10px; border-radius: 6px; border: 1px solid {conf_color}50; background-color: {conf_color}10; text-align: center;'><span style='color: #7d7d8a; font-size: 0.8rem; display: block;'>Konfidenz</span><span style='color: {conf_color}; font-size: 1.25rem; font-weight: 700;'>{conf}</span></div>", unsafe_allow_html=True)
+            
+        st.write("")
+        st.write("### 📝 Fundamental-Argumente:")
+        
+        bullets = []
+        
+        gp_diff = base_data["categories"]["Geldpolitik"] - quote_data["categories"]["Geldpolitik"]
+        if abs(gp_diff) > 10:
+            winner = base_sel if gp_diff > 0 else quote_sel
+            bullets.append(f"- **Geldpolitik**: {winner} hat bullischere Zinserwartungen/Realzins-Kombination (Differenz: {abs(gp_diff):.0f} Pkt).")
+            
+        inf_diff = base_data["categories"]["Inflation"] - quote_data["categories"]["Inflation"]
+        if abs(inf_diff) > 10:
+            winner = base_sel if inf_diff > 0 else quote_sel
+            bullets.append(f"- **Inflation**: {winner} hat stärkere Inflationabweichung/Zinshoch-Druck (Differenz: {abs(inf_diff):.0f} Pkt).")
+            
+        lab_diff = base_data["categories"]["Arbeitsmarkt"] - quote_data["categories"]["Arbeitsmarkt"]
+        if abs(lab_diff) > 10:
+            winner = base_sel if lab_diff > 0 else quote_sel
+            bullets.append(f"- **Arbeitsmarkt**: {winner} besitzt den robusteren Arbeitsmarkt (Differenz: {abs(lab_diff):.0f} Pkt).")
+            
+        wac_diff = base_data["categories"]["Wachstum"] - quote_data["categories"]["Wachstum"]
+        if abs(wac_diff) > 10:
+            winner = base_sel if wac_diff > 0 else quote_sel
+            bullets.append(f"- **Wachstum**: {winner} glänzt mit besserem Wirtschafts- & PMI-Wachstum (Differenz: {abs(wac_diff):.0f} Pkt).")
+            
+        ris_diff = base_data["categories"]["Risiko"] - quote_data["categories"]["Risiko"]
+        if abs(ris_diff) > 10:
+            winner = base_sel if ris_diff > 0 else quote_sel
+            bullets.append(f"- **Risiko & Sentiment**: Sentiment- & Safe-Haven-Dynamik stützt {winner} (Differenz: {abs(ris_diff):.0f} Pkt).")
+            
+        kap_diff = base_data["categories"]["Kapitalfluesse"] - quote_data["categories"]["Kapitalfluesse"]
+        if abs(kap_diff) > 10:
+            winner = base_sel if kap_diff > 0 else quote_sel
+            bullets.append(f"- **Kapitalflüsse**: {winner} zeigt solidere Schulden- & Leistungsbilanzdaten (Differenz: {abs(kap_diff):.0f} Pkt).")
+            
+        if not bullets:
+            st.write("Die fundamentalen Treiber beider Währungen liegen momentan sehr nah beieinander. Das Paar ist fundamental neutral.")
+        else:
+            for b in bullets:
+                st.write(b)
 
 # ----------------- TAB 2: PMI-DATEN -----------------
 with tab2:
