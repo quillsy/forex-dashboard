@@ -3705,28 +3705,11 @@ with tab1:
     # 2. Pairs table checklist
     st.subheader("📋 Währungspaare Checkliste")
     
-    # Create HTML table
-    html_table = """<table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
-<thead>
-<tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
-<th style="padding:12px 10px;">Währungspaar</th>
-<th style="padding:12px 10px;">Zins-Differenz (bps)</th>
-<th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
-<th style="padding:12px 10px; text-align:center;">Signal-Klassifikation</th>
-<th style="padding:12px 10px;">Analysten-Konsens</th>
-<th style="padding:12px 10px; text-align:center;">Sentiment</th>
-<th style="padding:12px 10px;">Staatsverschuldung</th>
-<th style="padding:12px 10px;">Leistungsbilanz</th>
-<th style="padding:12px 10px;">Nächstes Event</th>
-</tr>
-</thead>
-<tbody>"""
-    
     import itertools
     currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
     G8_PAIRS = list(itertools.permutations(currencies_list, 2))
     
-    rows = []
+    checklist_rows = []
     for base, quote in G8_PAIRS:
         p_name = f"{base}/{quote}"
         badge_name, badge_color, sig_val = get_pair_signal_and_badge(base, quote)
@@ -3744,42 +3727,55 @@ with tab1:
         buy_count = rec_data.get("buy", 0)
         hold_count = rec_data.get("hold", 0)
         sell_count = rec_data.get("sell", 0)
-        rec_str = f"<span style='color:#10b981; font-weight:600;'>B:{buy_count}</span> / <span style='color:#e2b13c;'>H:{hold_count}</span> / <span style='color:#ef4444;'>S:{sell_count}</span>"
+        rec_str = f"B:{buy_count} / H:{hold_count} / S:{sell_count}"
         
         sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
-        if sent_val >= 3.5:
-            sent_color = "#10b981"
-        elif sent_val <= -3.5:
-            sent_color = "#ef4444"
-        else:
-            sent_color = "#8b949e"
-        sent_str = f"<span style='color:{sent_color}; font-weight:600;'>{sent_val:+.1f}</span>"
+        sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
+        sent_str = f"{sent_val:+.1f} {sent_emoji}"
         
-        # New indicators from IMF
         debt_str = format_imf_indicator(base, quote, "GGXWDG_NGDP")
         ca_str = format_imf_indicator(base, quote, "BCA_NGDPD")
         
         next_ev = get_next_event_for_pair(base, quote, df_cal)
         
-        rows.append(f"""<tr style="border-bottom:1px solid #1f2026;">
-<td style="padding:12px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}</td>
-<td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{diff_str}</td>
-<td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{badge_color};">{sig_val:+.1f}</td>
-<td style="padding:12px 10px; text-align:center;">
-<span style="background-color:{badge_color}18; color:{badge_color}; border:1px solid {badge_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{badge_name}</span>
-</td>
-<td style="padding:12px 10px; font-family:'Roboto Mono', monospace;">{rec_str}</td>
-<td style="padding:12px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str}</td>
-<td style="padding:12px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{debt_str}</td>
-<td style="padding:12px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{ca_str}</td>
-<td style="padding:12px 10px; color:#8c8c9a; font-size:0.8rem;">{next_ev}</td>
-</tr>""")
+        if "BUY" in badge_name:
+            class_emoji = "🟢 " + badge_name
+        elif "SELL" in badge_name:
+            class_emoji = "🔴 " + badge_name
+        else:
+            class_emoji = "🟡 " + badge_name
+            
+        checklist_rows.append({
+            "Währungspaar": f"{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}",
+            "Zins-Differenz (bps)": diff_str,
+            "Signal-Wert": f"{sig_val:+.1f}",
+            "Signal-Klassifikation": class_emoji,
+            "Analysten-Konsens": rec_str,
+            "Sentiment": sent_str,
+            "Staatsverschuldung": debt_str,
+            "Leistungsbilanz": ca_str,
+            "Nächstes Event": next_ev
+        })
         
-    html_table += "".join(rows) + "</tbody></table>"
-    st.markdown(html_table, unsafe_allow_html=True)
+    df_checklist = pd.DataFrame(checklist_rows)
+    st.dataframe(df_checklist, hide_index=True, use_container_width=True)
     st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung (Risikodaten Quelle: IMF DataMapper)</div>", unsafe_allow_html=True)
 
 # ----------------- TAB: FUNDAMENTAL-SCORE -----------------
+def format_score_with_emoji(val):
+    if val is None:
+        return "0.0 🟡"
+    try:
+        val_f = float(val)
+        if val_f > 15.0:
+            return f"{val_f:+.1f} 🟢"
+        elif val_f < -15.0:
+            return f"{val_f:+.1f} 🔴"
+        else:
+            return f"{val_f:+.1f} 🟡"
+    except Exception:
+        return "0.0 🟡"
+
 def explain_currency_score_bullets(curr: str, target_date=None) -> list:
     bullets = []
     try:
@@ -3875,52 +3871,26 @@ with tab_score:
     # Table of Category Scores
     st.subheader("📋 G10 Category Scores & Regime Matrix")
     
-    rows_mat = []
-    for curr, data in g8_prof.items():
-        sc = data["score"]
-        reg = data["regime"]
-        cats = data["categories"]
+    matrix_rows = []
+    sorted_currencies = sorted(CURRENCIES.keys(), key=lambda k: g8_prof[k]["score"], reverse=True)
+    for curr in sorted_currencies:
+        sc = g8_prof[curr]["score"]
+        reg = g8_prof[curr]["regime"]
+        cats = g8_prof[curr]["categories"]
         
-        if sc > 0:
-            sc_color = "#10b981"
-            sc_sign = "+"
-        else:
-            sc_color = "#ef4444"
-            sc_sign = ""
-            
-        rows_mat.append(f"""
-        <tr style="border-bottom:1px solid #1f2026;">
-            <td style="padding:10px 8px; font-weight:600; color:#f0f0f5;">{CURRENCIES[curr]['flag']} {curr}</td>
-            <td style="padding:10px 8px; font-weight:700; color:{sc_color}; font-family:'Roboto Mono', monospace;">{sc_sign}{sc:.1f}</td>
-            <td style="padding:10px 8px; color:#e2b13c; font-weight:500;">{reg}</td>
-            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Geldpolitik'] > 0 else '#ef4444'}">{cats['Geldpolitik']:+.0f}</td>
-            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Inflation'] > 0 else '#ef4444'}">{cats['Inflation']:+.0f}</td>
-            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Arbeitsmarkt'] > 0 else '#ef4444'}">{cats['Arbeitsmarkt']:+.0f}</td>
-            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Wachstum'] > 0 else '#ef4444'}">{cats['Wachstum']:+.0f}</td>
-            <td style="padding:10px 8px; font-family:'Roboto Mono', monospace; color:{'#10b981' if cats['Risiko'] > 0 else '#ef4444'}">{cats['Risiko']:+.0f}</td>
-        </tr>
-        """)
+        matrix_rows.append({
+            "Currency": f"{CURRENCIES[curr]['flag']} {curr}",
+            "Overall Score": format_score_with_emoji(sc),
+            "Current Regime": reg,
+            "Monetary Policy": format_score_with_emoji(cats['Geldpolitik']),
+            "Inflation": format_score_with_emoji(cats['Inflation']),
+            "Labour Market": format_score_with_emoji(cats['Arbeitsmarkt']),
+            "Growth": format_score_with_emoji(cats['Wachstum']),
+            "Risk": format_score_with_emoji(cats['Risiko'])
+        })
         
-    html_matrix = f"""
-    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem; background-color:#0c0c0e; border:1px solid #1f2026; border-radius:6px; overflow:hidden;">
-    <thead>
-        <tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700; background-color:#070708;">
-            <th style="padding:10px 8px;">Währung</th>
-            <th style="padding:10px 8px;">Gesamt-Score</th>
-            <th style="padding:10px 8px;">Regime</th>
-            <th style="padding:10px 8px;">Geldpolitik</th>
-            <th style="padding:10px 8px;">Inflation</th>
-            <th style="padding:10px 8px;">Arbeitsmarkt</th>
-            <th style="padding:10px 8px;">Wachstum</th>
-            <th style="padding:10px 8px;">Risiko</th>
-        </tr>
-    </thead>
-    <tbody>
-        {"".join(rows_mat)}
-    </tbody>
-    </table>
-    """
-    st.markdown(html_matrix, unsafe_allow_html=True)
+    df_matrix = pd.DataFrame(matrix_rows)
+    st.dataframe(df_matrix, hide_index=True, use_container_width=True)
     
     st.write("")
     
@@ -4165,27 +4135,19 @@ with tab3:
     # Table comparing the rates + bps changes
     rates_rows = []
     for curr, data in rates_data.items():
-        color_class = "color:#10b981;" if data["bps_change"] > 0 else "color:#ef4444;" if data["bps_change"] < 0 else "color:#7d7d8a;"
-        rates_rows.append(f"""<tr style="border-bottom:1px solid #1f2026;">
-<td style="padding:10px 5px; font-weight:600;">{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})</td>
-<td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:600;">{data['rate']:.2f}%</td>
-<td style="padding:10px 5px; font-family:'Roboto Mono', monospace; font-weight:700; {color_class}">{data['bps_change']:+d} bps</td>
-<td style="padding:10px 5px; color:#8c8c9a; font-size:0.75rem;">{data['source']}</td>
-</tr>""")
+        change_val = data["bps_change"]
+        change_emoji = "🟢" if change_val > 0 else "🔴" if change_val < 0 else "🟡"
+        change_str = f"{change_val:+d} bps {change_emoji}"
         
-    rates_table_html = """<table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
-<thead>
-<tr style="border-bottom: 2px solid #1f2026; color:#7d7d8a; text-transform:uppercase; font-size:0.7rem; font-weight:700;">
-<th style="padding:10px 5px;">Zentralbank</th>
-<th style="padding:10px 5px;">Leitzins</th>
-<th style="padding:10px 5px;">Änderung zum Vormonat</th>
-<th style="padding:10px 5px;">Quelle</th>
-</tr>
-</thead>
-<tbody>
-""" + "".join(rates_rows) + """</tbody>
-</table>"""
-    st.markdown(rates_table_html, unsafe_allow_html=True)
+        rates_rows.append({
+            "Zentralbank": f"{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})",
+            "Leitzins": f"{data['rate']:.2f}%",
+            "Änderung zum Vormonat": change_str,
+            "Quelle": data['source']
+        })
+        
+    df_rates = pd.DataFrame(rates_rows)
+    st.dataframe(df_rates, hide_index=True, use_container_width=True)
     st.markdown("<div class='source-tag'>Quelle: FRED, ECB Portal, SNB Portal & Zins-Kontrollzentrum</div>", unsafe_allow_html=True)
 
 # ----------------- TAB 4: ANALYSTEN-KONSENS -----------------
@@ -4993,28 +4955,11 @@ with tab14:
                             )
                             st.plotly_chart(fig_scores_h, use_container_width=True)
                             
-                            html_table_h = """
-                            <div style="overflow-x:auto; margin-top:10px;">
-                            <table style="width:100%; border-collapse: collapse; font-size:0.85rem; border:1px solid #1f2026;">
-                            <thead>
-                            <tr style="background-color:#161b22; color:#8b949e; border-bottom:2px solid #1f2026; text-align:left;">
-                            <th style="padding:12px 10px;">Währungspaar</th>
-                            <th style="padding:12px 10px;">Zinsdifferenz</th>
-                            <th style="padding:12px 10px; text-align:center;">Signal-Wert</th>
-                            <th style="padding:12px 10px; text-align:center;">Handelssignal</th>
-                            <th style="padding:12px 10px;">Analysten-Konsens</th>
-                            <th style="padding:12px 10px; text-align:center;">Sentiment</th>
-                            <th style="padding:12px 10px;">Schulden (% BIP)</th>
-                            <th style="padding:12px 10px;">Leistungsbilanz</th>
-                            </tr>
-                            </thead>
-                            <tbody>"""
-                            
                             import itertools
                             currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
                             G8_PAIRS = list(itertools.permutations(currencies_list, 2))
                             
-                            rows_h = []
+                            hist_rows_checklist = []
                             for b_c_iter, q_c_iter in G8_PAIRS:
                                 b_score_iter = scores_h.get(b_c_iter)
                                 q_score_iter = scores_h.get(q_c_iter)
@@ -5027,20 +4972,22 @@ with tab14:
                                 
                                 if sig_val_iter >= 25.0:
                                     b_name = "STRONG BUY"
-                                    b_color = "#ef4444"
+                                    b_emoji = "🔴"
                                 elif 10.0 <= sig_val_iter < 25.0:
                                     b_name = "MID BUY"
-                                    b_color = "#f97316"
+                                    b_emoji = "🟠"
                                 elif -10.0 < sig_val_iter < 10.0:
                                     b_name = "NEUTRAL"
-                                    b_color = "#7d7d8a"
+                                    b_emoji = "🟡"
                                 elif -25.0 < sig_val_iter <= -10.0:
                                     b_name = "MID SELL"
-                                    b_color = "#3b82f6"
+                                    b_emoji = "🔵"
                                 else:
                                     b_name = "STRONG SELL"
-                                    b_color = "#34d399"
+                                    b_emoji = "🟢"
                                     
+                                class_val_iter = f"{b_emoji} {b_name}"
+                                
                                 b_rate_iter, _ = get_country_rate_historical(b_c_iter, target_date_str)
                                 q_rate_iter, _ = get_country_rate_historical(q_c_iter, target_date_str)
                                 if b_rate_iter is not None and q_rate_iter is not None:
@@ -5051,14 +4998,14 @@ with tab14:
                                     
                                 rec_data_h = get_historical_recommendations(f"{b_c_iter}/{q_c_iter}", target_date_str, FINNHUB_KEY)
                                 if rec_data_h:
-                                    rec_str_iter = f"<span style='color:#10b981; font-weight:600;'>B:{rec_data_h['buy']}</span> / <span style='color:#e2b13c;'>H:{rec_data_h['hold']}</span> / <span style='color:#ef4444;'>S:{rec_data_h['sell']}</span>"
+                                    rec_str_iter = f"B:{rec_data_h['buy']} / H:{rec_data_h['hold']} / S:{rec_data_h['sell']}"
                                 else:
                                     rec_str_iter = "N/A"
                                     
                                 sent_val_iter = get_historical_sentiment(f"{b_c_iter}/{q_c_iter}", target_date_str, STOCKDATA_KEY)
                                 if sent_val_iter is not None:
-                                    sent_color_iter = "#10b981" if sent_val_iter >= 3.0 else "#ef4444" if sent_val_iter <= -3.0 else "#8b949e"
-                                    sent_str_iter = f"<span style='color:{sent_color_iter}; font-weight:600;'>{sent_val_iter:+.1f}</span>"
+                                    sent_emoji = "🟢" if sent_val_iter >= 3.0 else "🔴" if sent_val_iter <= -3.0 else "🟡"
+                                    sent_str_iter = f"{sent_val_iter:+.1f} {sent_emoji}"
                                 else:
                                     sent_str_iter = "N/A"
                                     
@@ -5077,21 +5024,19 @@ with tab14:
                                 q_ca_str = f"{q_ca_h:+.1f}%" if q_ca_h is not None else "N/A"
                                 ca_str_iter = f"{b_ca_str} / {q_ca_str}"
                                 
-                                rows_h.append(f"""<tr style="border-bottom:1px solid #1f2026;">
-                                <td style="padding:10px 10px; font-weight:600; color:#f0f0f5;">{CURRENCIES[b_c_iter]['flag']} {b_c_iter} / {CURRENCIES[q_c_iter]['flag']} {q_c_iter}</td>
-                                <td style="padding:10px 10px; font-family:'Roboto Mono', monospace;">{diff_str_iter}</td>
-                                <td style="padding:10px 10px; text-align:center; font-family:'Roboto Mono', monospace; font-weight:700; color:{b_color};">{sig_val_iter:+.1f}</td>
-                                <td style="padding:10px 10px; text-align:center;">
-                                <span style="background-color:{b_color}18; color:{b_color}; border:1px solid {b_color}; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase;">{b_name}</span>
-                                </td>
-                                <td style="padding:10px 10px; font-family:'Roboto Mono', monospace;">{rec_str_iter}</td>
-                                <td style="padding:10px 10px; text-align:center; font-family:'Roboto Mono', monospace;">{sent_str_iter}</td>
-                                <td style="padding:10px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{debt_str_iter}</td>
-                                <td style="padding:10px 10px; font-family:'Roboto Mono', monospace; color:#b0b0bb; font-size:0.8rem;">{ca_str_iter}</td>
-                                </tr>""")
+                                hist_rows_checklist.append({
+                                    "Währungspaar": f"{CURRENCIES[b_c_iter]['flag']} {b_c_iter} / {CURRENCIES[q_c_iter]['flag']} {q_c_iter}",
+                                    "Zinsdifferenz": diff_str_iter,
+                                    "Signal-Wert": f"{sig_val_iter:+.1f}",
+                                    "Handelssignal": class_val_iter,
+                                    "Analysten-Konsens": rec_str_iter,
+                                    "Sentiment": sent_str_iter,
+                                    "Schulden (% BIP)": debt_str_iter,
+                                    "Leistungsbilanz": ca_str_iter
+                                })
                                 
-                            html_table_h += "".join(rows_h) + "</tbody></table></div>"
-                            st.markdown(html_table_h, unsafe_allow_html=True)
+                            df_hist_checklist = pd.DataFrame(hist_rows_checklist)
+                            st.dataframe(df_hist_checklist, hide_index=True, use_container_width=True)
                             st.markdown(f"<div class='source-tag'>Gesamte Suite-Zusammenfassung am {target_date_str} (Zinssatz- / Risikodaten Quelle: FRED / IMF / World Bank)</div>", unsafe_allow_html=True)
                             
                     # Subtab 1: PMI-Daten
