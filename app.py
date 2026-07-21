@@ -4434,7 +4434,7 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
     
     return capped_score, weighted_scores
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "🏠 Dashboard",
     "🌍 Currency Ranking",
     "📊 Fundamental Analysis",
@@ -4444,7 +4444,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📈 Historical & Quant Research",
     "🛠 Data Explorer",
     "📊 Backtesting",
-    "🧪 Model Lab"
+    "🧪 Model Lab",
+    "📓 Research Journal"
 ])
 
 # ----------------- TAB 1: DASHBOARD -----------------
@@ -6720,3 +6721,161 @@ with tab10:
             ]
             st.dataframe(pd.DataFrame(incremental_results), hide_index=True, use_container_width=True)
             st.info("💡 **Inkrementelle Erkenntnis:** Zukunftsgerichtete Forward Rates (Modell E) heben die Win Rate systematisch an (+2.7%).")
+
+# ----------------- TAB 11: RESEARCH JOURNAL -----------------
+def load_research_journal():
+    file_path = "research_journal.json"
+    if not os.path.exists(file_path):
+        default_journal = []
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(default_journal, f, indent=4)
+        return default_journal
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_research_entry(entry):
+    file_path = "research_journal.json"
+    journal = load_research_journal()
+    journal.append(entry)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(journal, f, indent=4)
+
+with tab11:
+    st.header("📓 Macro Research Journal & Experiment Log")
+    st.caption("Dokumentieren Sie Ihre quantitativen Hypothesen, Testergebnisse und systematischen Designentscheidungen.")
+    
+    journal_data = load_research_journal()
+    
+    # 1. Research Dashboard KPIs
+    st.markdown("### 📊 Research Dashboard")
+    tot_exp = len(journal_data)
+    confirmed = len([x for x in journal_data if x.get("status") == "Confirmed 🟢"])
+    rejected = len([x for x in journal_data if x.get("status") == "Rejected 🔴"])
+    inconclusive = len([x for x in journal_data if x.get("status") == "Inconclusive ⚪"])
+    in_progress = len([x for x in journal_data if x.get("status") == "In Progress 🔵"])
+    
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5 = st.columns(5)
+    with col_kpi1: st.metric("Gesamt-Experimente", f"{tot_exp}")
+    with col_kpi2: st.metric("Bestätigt 🟢", f"{confirmed}")
+    with col_kpi3: st.metric("Verworfen 🔴", f"{rejected}")
+    with col_kpi4: st.metric("Uneindeutig ⚪", f"{inconclusive}")
+    with col_kpi5: st.metric("In Progress 🔵", f"{in_progress}")
+    
+    st.markdown("---")
+    
+    # 2. Form to Create Research Entry
+    st.subheader("📝 Neuen Research-Eintrag anlegen")
+    
+    models_dict = load_saved_models()
+    
+    col_j1, col_j2 = st.columns(2)
+    with col_j1:
+        j_title = st.text_input("Titel des Experiments:", placeholder="z.B. Test OIS vs. 2Y Yield", key="j_title")
+        j_question = st.text_input("Research-Frage:", placeholder="z.B. Verbessert OIS die Performance?", key="j_question")
+        j_type = st.selectbox("Experiment-Typ:", [
+            "Factor Research", "Weighting Test", "Model Comparison", "Backtest",
+            "Out-of-Sample Test", "Walk-Forward Test", "Forward Test", "Regime Analysis",
+            "Data Quality Test", "Other"
+        ], key="j_type")
+    with col_j2:
+        j_hypo = st.text_input("Hypothese:", placeholder="z.B. OIS bietet zusätzlichen Informationswert", key="j_hypo")
+        j_model_link = st.selectbox("Modell verknüpfen:", list(models_dict.keys()), key="j_model")
+        j_evidence = st.selectbox("Evidence Level (Erwartet):", ["Low", "Medium", "High"], key="j_evidence")
+        
+    st.markdown("#### ⚙️ Experiment-Setup & Erwartung")
+    col_js1, col_js2 = st.columns(2)
+    with col_js1:
+        j_exp_res = st.text_area("Erwartetes Ergebnis (Vorab-Dokumentation):", key="j_exp_res")
+    with col_js2:
+        j_exp_dir = st.selectbox("Erwarteter Effekt-Trend:", ["Positive", "Neutral", "Negative"], key="j_exp_dir")
+        j_pit_status = st.selectbox("Point-in-Time Validierung:", ["🟢 Full Point-in-Time", "🟡 Partial Point-in-Time", "🔴 Not Point-in-Time Safe"], key="j_pit_status")
+        
+    st.markdown("#### 📊 Testergebnisse & Entscheidung")
+    col_jr1, col_jr2 = st.columns(2)
+    with col_jr1:
+        j_result_text = st.text_area("Tatsächliches Ergebnis / Fazit:", key="j_result_text")
+        j_status = st.selectbox("Hypothesen-Status:", [
+            "Untested 🟡", "In Progress 🔵", "Confirmed 🟢", "Partially Confirmed orange", "Rejected 🔴", "Inconclusive ⚪"
+        ], key="j_status")
+    with col_jr2:
+        j_decision = st.selectbox("Modell-Entscheidung (Decision):", [
+            "Keep Factor", "Remove Factor", "Increase Weight", "Decrease Weight",
+            "Keep as Research Factor", "Move to Correction Factor", "Move to CORE", "Do Not Use"
+        ], key="j_decision")
+        j_next = st.text_input("Nächster Schritt (Next Step):", key="j_next")
+        j_notes = st.text_area("Persönliche Beobachtungen & Notizen:", key="j_notes")
+
+    if st.button("💾 Experiment im Journal speichern", key="save_journal_btn"):
+        if not j_title:
+            st.error("Bitte einen Titel angeben.")
+        else:
+            linked_m_details = models_dict.get(j_model_link, {})
+            entry = {
+                "title": j_title,
+                "question": j_question,
+                "hypothesis": j_hypo,
+                "type": j_type,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "model_linked": j_model_link,
+                "model_weights": linked_m_details,
+                "evidence_level": j_evidence,
+                "expected_result": j_exp_res,
+                "expected_direction": j_exp_dir,
+                "pit_status": j_pit_status,
+                "result_text": j_result_text,
+                "status": j_status,
+                "decision": j_decision,
+                "next_step": j_next,
+                "notes": j_notes
+            }
+            save_research_entry(entry)
+            st.success("Research-Eintrag erfolgreich gespeichert!")
+            
+    st.markdown("---")
+    
+    # 3. Research Timeline & History
+    st.subheader("📚 Historische Experimente & Research-Timeline")
+    
+    if not journal_data:
+        st.info("Noch keine Research-Einträge im Journal gespeichert.")
+    else:
+        # Export Buttons
+        col_exp1, col_exp2 = st.columns(2)
+        with col_exp1:
+            json_str = json.dumps(journal_data, indent=4)
+            st.download_button(
+                label="📥 Research Journal als JSON exportieren",
+                data=json_str,
+                file_name="research_journal.json",
+                mime="application/json"
+            )
+        with col_exp2:
+            df_export = pd.DataFrame(journal_data)
+            csv_data = df_export.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Research Journal als CSV exportieren",
+                data=csv_data,
+                file_name="research_journal.csv",
+                mime="text/csv"
+            )
+            
+        st.write("")
+        for idx, entry in enumerate(reversed(journal_data)):
+            with st.expander(f"📅 {entry['date']} | {entry['title']} ({entry['type']}) - Status: {entry['status']}"):
+                st.markdown(f"**Research-Frage:** {entry['question']}")
+                st.markdown(f"**Hypothese:** {entry['hypothesis']}")
+                st.write(f"- **Verknüpftes Modell:** `{entry['model_linked']}`")
+                st.write(f"- **Point-in-Time Status:** `{entry['pit_status']}`")
+                st.write(f"- **Evidence Level:** `{entry['evidence_level']}`")
+                st.write(f"- **Erwarteter Trend:** `{entry['expected_direction']}`")
+                st.write(f"- **Erwartetes Ergebnis:** {entry['expected_result']}")
+                st.write(f"- **Tatsächliches Ergebnis:** {entry['result_text']}")
+                st.write(f"- **Entscheidung:** `{entry['decision']}`")
+                st.write(f"- **Nächster Schritt:** `{entry['next_step']}`")
+                st.write(f"- **Notizen:** {entry['notes']}")
+                
+                # Show weights at time of experiment
+                st.json(entry["model_weights"])
