@@ -2441,6 +2441,98 @@ GDP_SERIES = {
     "NZD": "NZLGDPRQPSMEI"
 }
 
+PMI_SERIES = {
+    "USD": "MANEMP",
+    "EUR": "BSPRTE01EZM661S",
+    "GBP": "BSPRTE01GBM661S",
+    "JPY": "BSPRTE01JPM661S",
+    "CHF": "BSPRTE01CHM661S",
+    "CAD": "BSPRTE01CAM661S",
+    "AUD": "BSPRTE01AUM661S",
+    "NZD": "BSPRTE01NZM661S"
+}
+
+def get_vix_value(target_date=None):
+    """Retrieves the VIX index value using FRED VIXCLS with fallbacks to APIFreaks and Tiingo."""
+    if target_date is None:
+        target_date = datetime.now().strftime("%Y-%m-%d")
+        
+    try:
+        val, _, _ = get_fred_data_historical("VIXCLS", target_date, FRED_KEY)
+        if val is not None and val > 0:
+            return float(val)
+    except Exception:
+        pass
+
+    try:
+        df_vix, _, _ = get_fred_data("VIXCLS", FRED_KEY)
+        if df_vix is not None and not df_vix.empty:
+            val = float(df_vix.iloc[-1]["value"])
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    try:
+        apifreaks_data = get_apifreaks_prices(APIFREAKS_KEY)
+        if apifreaks_data:
+            rates = apifreaks_data.get("rates", {})
+            vix_str = rates.get("VIX")
+            if vix_str is not None:
+                return float(vix_str)
+    except Exception:
+        pass
+
+    try:
+        if TIINGO_KEY:
+            tiingo_res = get_tiingo_prices("VIXY", TIINGO_KEY)
+            if tiingo_res and tiingo_res.get("close") is not None:
+                return float(tiingo_res.get("close"))
+    except Exception:
+        pass
+
+    return 15.0
+
+def explain_currency_score_bullets(curr: str, target_date=None) -> list:
+    bullets = []
+    try:
+        details = compute_currency_details(curr, target_date)
+        gp = details.get("Geldpolitik", 0)
+        inf = details.get("Inflation", 0)
+        lab = details.get("Arbeitsmarkt", 0)
+        pmi = details.get("PMI", 0)
+        gdp = details.get("GDP", 0)
+        
+        if gp > 15:
+            bullets.append("+ Hohe Renditen & steigende Zinserwartungen")
+        elif gp < -15:
+            bullets.append("- Niedrige Renditen & sinkende Zinserwartungen")
+            
+        if inf > 15:
+            bullets.append("+ Erhöhter Inflationsdruck über dem Target")
+        elif inf < -15:
+            bullets.append("- Niedriger Inflationsdruck")
+            
+        if lab > 15:
+            bullets.append("+ Starker & robuster Arbeitsmarkt")
+        elif lab < -15:
+            bullets.append("- Schwacher Arbeitsmarkt")
+            
+        if pmi > 15:
+            bullets.append("+ PMI-Frühindikatoren signalisieren Expansion")
+        elif pmi < -15:
+            bullets.append("- PMI-Frühindikatoren signalisieren Kontraktion")
+            
+        if gdp > 15:
+            bullets.append("+ Robustes Wirtschaftswachstum (GDP)")
+        elif gdp < -15:
+            bullets.append("- Schwaches Wirtschaftswachstum (GDP)")
+    except Exception:
+        pass
+    if not bullets:
+        bullets.append("⚪ Neutrale fundamentale Gesamtlage")
+    return bullets
+
 def get_cpi_yoy_value(curr: str, target_date=None) -> float:
     try:
         fred_key = FRED_KEY
