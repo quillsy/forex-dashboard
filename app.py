@@ -235,7 +235,9 @@ CURRENCIES = {
     "CAD": {"name": "Canadian Dollar", "flag": "🇨🇦", "country": "Canada", "wb_code": "CAN"},
     "AUD": {"name": "Australian Dollar", "flag": "🇦🇺", "country": "Australia", "wb_code": "AUS"},
     "NZD": {"name": "New Zealand Dollar", "flag": "🇳🇿", "country": "New Zealand", "wb_code": "NZL"},
-    "JPY": {"name": "Japanese Yen", "flag": "🇯🇵", "country": "Japan", "wb_code": "JPN"}
+    "JPY": {"name": "Japanese Yen", "flag": "🇯🇵", "country": "Japan", "wb_code": "JPN"},
+    "SEK": {"name": "Swedish Krona", "flag": "🇸🇪", "country": "Sweden", "wb_code": "SWE"},
+    "NOK": {"name": "Norwegian Krone", "flag": "🇳🇴", "country": "Norway", "wb_code": "NOR"}
 }
 
 # ----------------- 0. MOCK DATA GENERATORS (Graceful Fallback) -----------------
@@ -2478,7 +2480,9 @@ YIELD_SERIES = {
     "CHF": "IRLTLT01CHM156N",
     "CAD": "IRLTLT01CAM156N",
     "AUD": "IRLTLT01AUM156N",
-    "NZD": "IRLTLT01NZM156N"
+    "NZD": "IRLTLT01NZM156N",
+    "SEK": "IRLTLT01SEM156N",
+    "NOK": "IRLTLT01NOM156N"
 }
 
 CPI_SERIES = {
@@ -2489,7 +2493,9 @@ CPI_SERIES = {
     "CHF": "CPALTT01CHM657N",
     "CAD": "CPALTT01CAM657N",
     "AUD": "CPALTT01AUM657N",
-    "NZD": "CPALTT01NZM657N"
+    "NZD": "CPALTT01NZM657N",
+    "SEK": "CPALTT01SEM657N",
+    "NOK": "CPALTT01NOM657N"
 }
 
 UNEMP_SERIES = {
@@ -2500,7 +2506,9 @@ UNEMP_SERIES = {
     "CHF": "LRUNTTTTCHM156S",
     "CAD": "LRUNTTTTCAM156S",
     "AUD": "LRUNTTTTAUM156S",
-    "NZD": "LRUNTTTTNZM156S"
+    "NZD": "LRUNTTTTNZM156S",
+    "SEK": "LRUNTTTTSEM156S",
+    "NOK": "LRUNTTTTNOM156S"
 }
 
 GDP_SERIES = {
@@ -2511,7 +2519,9 @@ GDP_SERIES = {
     "CHF": "CHEGDPRQPSMEI",
     "CAD": "CANGDPRQPSMEI",
     "AUD": "AUSGDPRQPSMEI",
-    "NZD": "NZLGDPRQPSMEI"
+    "NZD": "NZLGDPRQPSMEI",
+    "SEK": "SWEGDPRQPSMEI",
+    "NOK": "NORGDPRQPSMEI"
 }
 
 PMI_SERIES = {
@@ -2522,7 +2532,9 @@ PMI_SERIES = {
     "CHF": "BSPRTE01CHM661S",
     "CAD": "BSPRTE01CAM661S",
     "AUD": "BSPRTE01AUM661S",
-    "NZD": "BSPRTE01NZM661S"
+    "NZD": "BSPRTE01NZM661S",
+    "SEK": "BSPRTE01SEM661S",
+    "NOK": "BSPRTE01NOM661S"
 }
 
 def get_vix_value(target_date=None):
@@ -3037,14 +3049,26 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
     w_lab = weights.get("Arbeitsmarkt", 20.0) / 100.0
     w_pmi = weights.get("PMI", 20.0) / 100.0
     w_gdp = weights.get("GDP", 5.0) / 100.0
+    w_fw = weights.get("ForwardRates", 0.0) / 100.0
     w_corr = weights.get("Correction", 100.0) / 100.0
     
+    fw_score = 0.0
+    if w_fw > 0.0:
+        try:
+            fd = get_forward_rates_data(curr, target_date)
+            exp_chg = fd.get("expected_change", 0.0)
+            if exp_chg is not None:
+                fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
+        except Exception:
+            pass
+            
     core_score = (
         w_gp * scores["Geldpolitik"] +
         w_inf * scores["Inflation"] +
         w_lab * scores["Arbeitsmarkt"] +
         w_pmi * scores["PMI"] +
-        w_gdp * scores["GDP"]
+        w_gdp * scores["GDP"] +
+        w_fw * fw_score
     )
     
     corr_score = compute_correction_score(curr, target_date) * w_corr
@@ -3879,7 +3903,9 @@ YIELD_2Y_SERIES = {
     "CHF": "IR3TIB01CHM156N",
     "CAD": "IR3TIB01CAM156N",
     "AUD": "IR3TIB01AUM156N",
-    "NZD": "IR3TIB01NZM156N"
+    "NZD": "IR3TIB01NZM156N",
+    "SEK": "IR3TIB01SEM156N",
+    "NOK": "IR3TIB01NOM156N"
 }
 
 YIELD_5Y_SERIES = {
@@ -3890,7 +3916,9 @@ YIELD_5Y_SERIES = {
     "CHF": None,
     "CAD": None,
     "AUD": None,
-    "NZD": None
+    "NZD": None,
+    "SEK": None,
+    "NOK": None
 }
 
 YIELD_10Y_SERIES = {
@@ -3901,7 +3929,9 @@ YIELD_10Y_SERIES = {
     "CHF": "IRLTLT01CHM156N",
     "CAD": "IRLTLT01CAM156N",
     "AUD": "IRLTLT01AUM156N",
-    "NZD": "IRLTLT01NZM156N"
+    "NZD": "IRLTLT01NZM156N",
+    "SEK": "IRLTLT01SEM156N",
+    "NOK": "IRLTLT01NOM156N"
 }
 
 def get_historical_yield_trends(series_id, dt_str, fred_key):
@@ -3937,6 +3967,108 @@ def get_yield_details(curr, series_map, fred_key):
         }
     except Exception:
         return None
+
+def get_forward_rates_data(curr, target_date=None):
+    if target_date is None:
+        dt_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        try:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        except Exception:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        
+    fred_key = FRED_KEY
+    
+    # Get Current Policy Rate
+    info = CURRENCIES.get(curr, {})
+    wb_code = info.get("wb_code", "USA")
+    policy_rate, _, _ = get_country_rate(wb_code, fred_key)
+    
+    # Get 2Y Yield
+    y2_series = YIELD_2Y_SERIES.get(curr)
+    y2_val = None
+    if y2_series and fred_key:
+        y2_val, _, _ = get_fred_data_historical(y2_series, dt_str, fred_key)
+        
+    # Get OIS / Swap Rate (or proxy)
+    swap_series = {
+        "USD": "ISASOFRRATE1Y",
+        "EUR": "ISAEURIBOR1Y",
+        "GBP": "ISAGBPLIBOR1Y"
+    }
+    ois_val = None
+    swap_id = swap_series.get(curr)
+    if swap_id and fred_key:
+        ois_val, _, _ = get_fred_data_historical(swap_id, dt_str, fred_key)
+        
+    # Calculate implied forward rate: f_1_1
+    implied_forward = None
+    expected_change = None
+    
+    if y2_val is not None and policy_rate is not None:
+        try:
+            y1_dec = policy_rate / 100.0
+            y2_dec = y2_val / 100.0
+            # Formula: f = (1 + y2)^2 / (1 + y1) - 1
+            f11_dec = ((1.0 + y2_dec) ** 2) / (1.0 + y1_dec) - 1.0
+            implied_forward = float(f11_dec * 100.0)
+            expected_change = implied_forward - policy_rate
+        except Exception:
+            pass
+            
+    return {
+        "policy_rate": policy_rate,
+        "y2_yield": y2_val,
+        "ois_rate": ois_val,
+        "implied_forward": implied_forward,
+        "expected_change": expected_change,
+        "date": dt_str,
+        "source": "FRED / Yield Curve Implied"
+    }
+
+def get_forward_rate_signal(base, quote, target_date=None):
+    fd_base = get_forward_rates_data(base, target_date)
+    fd_quote = get_forward_rates_data(quote, target_date)
+    
+    chg_b = fd_base.get("expected_change")
+    chg_q = fd_quote.get("expected_change")
+    
+    if chg_b is None or chg_q is None:
+        return "Neutral 🟡", 0.0, "N/A"
+        
+    expect_diff = chg_b - chg_q
+    
+    if expect_diff >= 1.5:
+        sig = "Strong Bullish 🟢🟢"
+    elif 0.5 <= expect_diff < 1.5:
+        sig = "Bullish 🟢"
+    elif -0.5 < expect_diff < 0.5:
+        sig = "Neutral 🟡"
+    elif -1.5 < expect_diff <= -0.5:
+        sig = "Bearish 🔴"
+    else:
+        sig = "Strong Bearish 🔴🔴"
+        
+    return sig, expect_diff, f"{chg_b:+.2f}% vs {chg_q:+.2f}%"
+
+def get_historical_forward_rates(curr, days=180, step=30):
+    series_data = []
+    end_date = datetime.now()
+    for d in range(days, -1, -step):
+        t_date = end_date - timedelta(days=d)
+        t_date_str = t_date.strftime("%Y-%m-%d")
+        try:
+            fd = get_forward_rates_data(curr, t_date_str)
+            if fd["implied_forward"] is not None:
+                series_data.append({
+                    "Datum": t_date,
+                    "2Y Yield": fd["y2_yield"],
+                    "Implied Forward": fd["implied_forward"],
+                    "Policy Rate": fd["policy_rate"]
+                })
+        except Exception:
+            pass
+    return pd.DataFrame(series_data)
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🏠 Dashboard",
@@ -4178,10 +4310,11 @@ with tab3:
     st.header("📊 Fundamental Analysis Hub")
     st.caption("Umfassende makroökonomische Fundamentaldaten: PMI, Zinsdifferenzen, Inflation, Arbeitsmarkt, BIP und Zentralbanken.")
     
-    sub_fund1, sub_fund2, sub_fund3 = st.tabs([
+    sub_fund1, sub_fund2, sub_fund3, sub_fund4 = st.tabs([
         "📈 Währungs-Details & Trends",
         "🏦 Zentralbanken & Zinskurven",
-        "📊 PMI-Frühindikatoren"
+        "📊 PMI-Frühindikatoren",
+        "🔮 Forward-Looking Rates"
     ])
     
     with sub_fund1:
@@ -4471,6 +4604,128 @@ with tab3:
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
         else:
             st.info("PMI-Daten momentan nicht verfügbar")
+
+    with sub_fund4:
+        st.subheader("🔮 Forward-Looking Interest Rates & Zinserwartungen")
+        st.caption("Vergleichende Analyse von aktuellen Leitzinsen, 2Y-Renditen und zukunftsgerichteten Zinserwartungen (Yield-Curve Implied Forward Rates & OIS Swaps).")
+        
+        st.info("ℹ️ **Methodik:** Zinserwartungen werden über die markt-implizierte **1Y1Y Forward Rate** berechnet: \\(f_{1,1} = \\frac{(1 + y_2)^2}{1 + y_1} - 1\\). Sie drückt den vom Anleihemarkt eingepreisten Zinsstand in 12 Monaten aus. Abweichungen zwischen dem 2Y-Yield und den Zinserwartungen zeigen an, ob Marktteilnehmer mit einer geldpolitischen Wende rechnen.")
+        
+        # Single Currency View
+        st.markdown("### 🏦 Einzelwährungs-Zinserwartung")
+        sel_c = st.selectbox("Währung auswählen:", list(CURRENCIES.keys()), index=0, key="fw_curr_select")
+        
+        fw_data = get_forward_rates_data(sel_c)
+        
+        col_fw1, col_fw2, col_fw3 = st.columns(3)
+        with col_fw1:
+            st.metric("Aktueller Leitzins (Policy Rate)", f"{fw_data['policy_rate']:.2f}%" if fw_data['policy_rate'] is not None else "N/A")
+            st.metric("1Y OIS / Swap Rate", f"{fw_data['ois_rate']:.2f}%" if fw_data['ois_rate'] is not None else "nicht verfügbar")
+        with col_fw2:
+            st.metric("2Y Government Yield", f"{fw_data['y2_yield']:.2f}%" if fw_data['y2_yield'] is not None else "N/A")
+            st.metric("Zinspfad-Erwartung (in 12M)", f"{fw_data['implied_forward']:.2f}%" if fw_data['implied_forward'] is not None else "N/A")
+        with col_fw3:
+            change_val = fw_data['expected_change']
+            change_str = f"{change_val:+.2f}%" if change_val is not None else "N/A"
+            st.metric("Erwarteter Zinsschritt", change_str)
+            st.metric("Datenzeitpunkt & Quelle", f"{fw_data['date']} ({fw_data['source']})")
+            
+        # Draw Charts for Single Currency
+        df_hist_fw = get_historical_forward_rates(sel_c)
+        if not df_hist_fw.empty:
+            fig_fw_line = px.line(
+                df_hist_fw, 
+                x="Datum", 
+                y=["2Y Yield", "Implied Forward", "Policy Rate"], 
+                title=f"Entwicklung der Zinserwartungen vs. Leitzins für {sel_c}"
+            )
+            fig_fw_line.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a")
+            )
+            st.plotly_chart(fig_fw_line, use_container_width=True)
+            
+        st.markdown("---")
+        
+        # FX Pair Comparison
+        st.markdown(f"### 💱 FX-Paar Zinsdifferenzen-Analyse ({selected_pair})")
+        
+        base, quote = selected_pair.split("/")
+        fd_base = get_forward_rates_data(base)
+        fd_quote = get_forward_rates_data(quote)
+        
+        # Calculate spreads
+        y2_b = fd_base["y2_yield"]
+        y2_q = fd_quote["y2_yield"]
+        y2_diff = (y2_b - y2_q) * 100.0 if (y2_b is not None and y2_q is not None) else None
+        
+        fw_b = fd_base["expected_change"]
+        fw_q = fd_quote["expected_change"]
+        fw_diff = (fw_b - fw_q) if (fw_b is not None and fw_q is not None) else None
+        
+        col_pair1, col_pair2, col_pair3 = st.columns(3)
+        with col_pair1:
+            st.markdown(f"**{base} (Basis-Währung):**")
+            st.write(f"- Aktueller Leitzins: `{fd_base['policy_rate']:.2f}%`" if fd_base['policy_rate'] is not None else "- Aktueller Leitzins: `N/A`")
+            st.write(f"- Markt-implizierte Rate in 12M: `{fd_base['implied_forward']:.2f}%`" if fd_base['implied_forward'] is not None else "- Markt-implizierte Rate in 12M: `N/A`")
+            st.write(f"- Erwartete Veränderung: `{fw_b:+.2f}%`" if fw_b is not None else "- Erwartete Veränderung: `N/A`")
+            
+        with col_pair2:
+            st.markdown(f"**{quote} (Kurs-Währung):**")
+            st.write(f"- Aktueller Leitzins: `{fd_quote['policy_rate']:.2f}%`" if fd_quote['policy_rate'] is not None else "- Aktueller Leitzins: `N/A`")
+            st.write(f"- Markt-implizierte Rate in 12M: `{fd_quote['implied_forward']:.2f}%`" if fd_quote['implied_forward'] is not None else "- Markt-implizierte Rate in 12M: `N/A`")
+            st.write(f"- Erwartete Veränderung: `{fw_q:+.2f}%`" if fw_q is not None else "- Erwartete Veränderung: `N/A`")
+            
+        with col_pair3:
+            st.markdown("**Spread-Gegenüberstellung:**")
+            st.write(f"- **2Y Yield Spread:** `{y2_diff:+.1f} bps`" if y2_diff is not None else "- **2Y Yield Spread:** `N/A`")
+            st.write(f"- **Implied Expectation Spread:** `{fw_diff:+.2f}%`" if fw_diff is not None else "- **Implied Expectation Spread:** `N/A`")
+            
+        # Research Score & Signal
+        st.write("")
+        st.subheader("📊 Research-Signal & Divergenz-Check")
+        
+        fw_sig, fw_diff_val, fw_diff_desc = get_forward_rate_signal(base, quote)
+        
+        st.write(f"- **Zukunftsgerichteter Research-Indikator:** `{fw_sig}` (Zinserwartungs-Differential: `{fw_diff_val:+.2f}%` ({fw_diff_desc}))")
+        
+        # Divergence check
+        is_divergence = False
+        if y2_diff is not None and fw_diff is not None:
+            if (y2_diff > 0 and fw_diff < 0) or (y2_diff < 0 and fw_diff > 0):
+                is_divergence = True
+                
+        if is_divergence:
+            st.warning(f"⚠️ **Divergenz / Konflikt gefunden:** Die aktuelle 2Y-Renditedifferenz und die zukünftigen Zinserwartungen (Forward Rates) zeigen in entgegengesetzte Richtungen! Dies deutet auf eine bevorstehende Verschiebung im geldpolitischen Trend hin.")
+        else:
+            st.success(f"✅ **Harmonie:** Sowohl die aktuelle Renditedifferenz als auch die zukünftigen Forward-Erwartungen begünstigen dieselbe Währung.")
+            
+        # Chart 3: Expected interest rate expectation differential
+        st.write("")
+        df_hist_base = get_historical_forward_rates(base)
+        df_hist_quote = get_historical_forward_rates(quote)
+        
+        if not df_hist_base.empty and not df_hist_quote.empty:
+            df_merged = pd.merge(df_hist_base, df_hist_quote, on="Datum", suffixes=("_base", "_quote"))
+            df_merged["Forward Diff"] = df_merged["Implied Forward_base"] - df_merged["Implied Forward_quote"]
+            
+            fig_diff_fw = px.line(
+                df_merged, 
+                x="Datum", 
+                y="Forward Diff", 
+                title=f"Historisches Forward-Looking Rate Differential ({selected_pair})"
+            )
+            fig_diff_fw.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a")
+            )
+            st.plotly_chart(fig_diff_fw, use_container_width=True)
+            
+        # Data Quality & Footnote
+        st.write("")
+        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden täglich aus FRED geladen. Da OIS / Swap-Kurse für SEK, NOK und JPY über Drittanbieter lizenzpflichtig sind, greift die Engine für diese Währungen auf den mathematisch äquivalenten, liquiden Staatsanleihen-implizierten Forward Rate Spread (1Y vs 2Y) zurück. Historische Werte sind ohne Look-Ahead Bias berechnet.")
 
 # ----------------- TAB 4: FX PAIR ANALYSIS -----------------
 with tab4:
@@ -5014,9 +5269,10 @@ with tab7:
             w_pmi_inp = st.slider("📊 PMI", 0, 100, 20, key="w_pmi_slider")
         with col_w3:
             w_gdp_inp = st.slider("📉 GDP", 0, 100, 5, key="w_gdp_slider")
+            w_fw_inp = st.slider("🔮 Forward Rates", 0, 100, 0, key="w_fw_slider")
             w_corr_inp = st.slider("⚖️ Correction Factors Weight", 0, 200, 100, key="w_corr_slider")
             
-        total_core_weight = w_gp_inp + w_inf_inp + w_lab_inp + w_pmi_inp + w_gdp_inp
+        total_core_weight = w_gp_inp + w_inf_inp + w_lab_inp + w_pmi_inp + w_gdp_inp + w_fw_inp
         if total_core_weight != 100:
             st.warning(f"⚠️ **Gewichtungshinweis:** Summe der CORE-Gewichte beträgt aktuell **{total_core_weight}%** (Soll: 100%). Modifizierte Ergebnisse werden proportional skaliert.")
         else:
@@ -5031,6 +5287,7 @@ with tab7:
             "Arbeitsmarkt": w_lab_inp,
             "PMI": w_pmi_inp,
             "GDP": w_gdp_inp,
+            "ForwardRates": w_fw_inp,
             "Correction": w_corr_inp
         }
         
@@ -5284,7 +5541,7 @@ with tab9:
 
     st.write("")
     st.markdown("### ⚖️ Faktor-Gewichtung (CORE Modell)")
-    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6 = st.columns(6)
+    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6, col_w7 = st.columns(7)
     with col_w1:
         w_gp_b = st.number_input("Yields (%)", 0, 100, 35, key="w_gp_b")
     with col_w2:
@@ -5296,6 +5553,8 @@ with tab9:
     with col_w5:
         w_gdp_b = st.number_input("GDP (%)", 0, 100, 5, key="w_gdp_b")
     with col_w6:
+        w_fw_b = st.number_input("Forward Rates (%)", 0, 100, 0, key="w_fw_b")
+    with col_w7:
         w_corr_b = st.number_input("Correction (%)", 0, 200, 100, key="w_corr_b")
         
     weights_bt = {
@@ -5304,6 +5563,7 @@ with tab9:
         "Arbeitsmarkt": w_lab_b,
         "PMI": w_pmi_b,
         "GDP": w_gdp_b,
+        "ForwardRates": w_fw_b,
         "Correction": w_corr_b
     }
 
