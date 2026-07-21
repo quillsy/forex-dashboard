@@ -2818,8 +2818,7 @@ def compute_correction_score(curr: str, target_date=None) -> float:
     
     # 1. COT Percentile correction
     try:
-        from app import get_latest_cot_percentile
-        cot_val = get_latest_cot_percentile(curr)
+        cot_val = get_latest_cot_percentile(curr, dt_str)
         if cot_val > 80.0:
             corr -= 2.0
         elif cot_val < 20.0:
@@ -3402,8 +3401,13 @@ def get_cot_signal(symbol_code, target_date):
     except Exception:
         return 50.0
 
-
-
+def get_latest_cot_percentile(curr, target_date=None):
+    if not target_date:
+        target_date = datetime.now().strftime("%Y-%m-%d")
+    code = COT_SYMBOLS.get(curr)
+    if not code:
+        return 50.0
+    return get_cot_signal(code, target_date)
 
 # ----------------- UI RENDERERS -----------------
 def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig):
@@ -3457,7 +3461,7 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
         border: 1px solid {border_color};
         border-radius: 6px;
         padding: 20px 24px;
-        margin: 10px 0 25px 0;
+        margin: 10px 0 0px 0;
     ">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <span style="
