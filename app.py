@@ -3933,9 +3933,7 @@ with tab1:
             for bullet in bullets:
                 st.write(bullet)
                 
-    st.write("")
-    
-    # Decisions checklist table at the bottom - permanently visible
+    # Decisions checklist table at the bottom - permanently visible directly below header
     st.subheader("📋 G10 Währungspaare Gesamtübersicht (Trading-Checkliste)")
     import itertools
     currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
@@ -3979,9 +3977,14 @@ with tab1:
             "Leistungsbilanz": ca_str,
             "Momentum (Base/Quote)": mom_str
         })
+        
     if checklist_rows:
         df_checklist = pd.DataFrame(checklist_rows)
-        st.dataframe(df_checklist, hide_index=True, use_container_width=True)
+        # Dynamically fit container height to exact row count to eliminate vertical empty space
+        dynamic_height = min(750, (len(checklist_rows) + 1) * 35 + 3)
+        st.dataframe(df_checklist, hide_index=True, use_container_width=True, height=dynamic_height)
+    else:
+        st.info("ℹ️ Aktuell liegen keine aktiven BUY/SELL-Signale für G10-Paare vor. Aktivieren Sie 'Alle Paare anzeigen (inkl. Neutral)' in der Sidebar, um die gesamte Matrix inklusive aller neutralen Paare zu sehen.")
 
 # ----------------- TAB 2: CURRENCY RANKING -----------------
 with tab2:
