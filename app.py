@@ -2681,6 +2681,105 @@ def detect_market_regime(curr: str, target_date=None) -> str:
         pass
     return "Normal"
 
+def compute_macro_momentum(curr: str, target_date=None) -> float:
+    try:
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+            
+        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
+        pmi_data = pmi_all.get(curr, {})
+        m_val = pmi_data.get("m_last")
+        m_prev = pmi_data.get("m_prev")
+        
+        pmi_change = (m_val - m_prev) if m_val is not None and m_prev is not None else 0.0
+        
+        unemp_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
+        gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
+        
+        momentum_score = 0.0
+        if pmi_change > 0:
+            momentum_score += 1.0
+        elif pmi_change < 0:
+            momentum_score -= 1.0
+            
+        if unemp_trend > 0:
+            momentum_score += 1.0
+        elif unemp_trend < 0:
+            momentum_score -= 1.0
+            
+        if gdp_trend > 0:
+            momentum_score += 1.0
+        elif gdp_trend < 0:
+            momentum_score -= 1.0
+            
+        return np.clip(momentum_score, -2.5, 2.5)
+    except Exception:
+        return 0.0
+
+def compute_correction_score(curr: str, target_date=None) -> float:
+    corr = 0.0
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date else datetime.now().strftime("%Y-%m-%d")
+    
+    # 1. COT Percentile correction
+    try:
+        from app import get_latest_cot_percentile
+        cot_val = get_latest_cot_percentile(curr)
+        if cot_val > 80.0:
+            corr -= 2.0
+        elif cot_val < 20.0:
+            corr += 2.0
+        elif cot_val > 60.0:
+            corr += 1.5
+        elif cot_val < 40.0:
+            corr -= 1.5
+    except Exception:
+        pass
+        
+    # 2. Risk-On / Risk-Off correction
+    try:
+        vix = get_vix_value(dt_str)
+        if vix > 22.0:
+            if curr in ["USD", "CHF", "JPY"]:
+                corr += 3.0
+            else:
+                corr -= 3.0
+        elif vix < 14.0:
+            if curr in ["USD", "CHF", "JPY"]:
+                corr -= 2.0
+            else:
+                corr += 3.0
+    except Exception:
+        pass
+        
+    # 3. Commodity Score correction
+    try:
+        if curr == "CAD":
+            oil_price = get_oil_price(dt_str)
+            if oil_price > 75.0:
+                corr += 2.0
+            else:
+                corr -= 2.0
+        elif curr == "NZD":
+            milk = get_milk_price(dt_str)
+            if milk > 0.0:
+                corr += 1.5
+        elif curr == "AUD":
+            cn_pmi = get_china_pmi_fred(dt_str)
+            if cn_pmi > 50.0:
+                corr += 2.0
+            else:
+                corr -= 2.0
+    except Exception:
+        pass
+        
+    # 4. Macro Momentum correction
+    corr += compute_macro_momentum(curr, target_date)
+    
+    return np.clip(corr, -10.0, 10.0)
+
 def compute_currency_details(curr: str, target_date=None) -> dict:
     fred_key = FRED_KEY
     if target_date is None:
@@ -2692,84 +2791,57 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         "Geldpolitik": 0.0,
         "Inflation": 0.0,
         "Arbeitsmarkt": 0.0,
-        "Wachstum": 0.0,
-        "Risiko": 0.0
+        "PMI": 0.0,
+        "GDP": 0.0
     }
     
     try:
-        # 1. Geldpolitik
+        # 1. Geldpolitik (Interest Rate / Yield)
         yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], dt_str, fred_key)
         if yield_val is None:
             yield_val = 3.0
+            
         cpi = get_cpi_yoy_value(curr, dt_str)
         real_yield = yield_val - cpi
         
-        gp_yield_score = (yield_val - 3.0) / 3.0 * 50.0
-        gp_real_score = real_yield / 3.0 * 50.0
+        gp_yield_score = (yield_val - 3.0) / 3.0 * 100.0
+        gp_real_score = real_yield / 3.0 * 100.0
         gp_trend = get_series_trend_points(YIELD_SERIES[curr], dt_str)
         gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
-        scores["Geldpolitik"] = np.clip(gp_yield_score + gp_real_score + gp_trend + gp_surprise, -100.0, 100.0)
+        
+        scores["Geldpolitik"] = np.clip(0.70 * gp_yield_score + 0.30 * gp_real_score + gp_trend + gp_surprise, -100.0, 100.0)
         
         # 2. Inflation
-        cpi_dev = (cpi - 2.0) * 35.0
+        cpi_dev = (cpi - 2.0) * 50.0
         cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
         cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
         scores["Inflation"] = np.clip(cpi_dev + cpi_trend + cpi_surprise, -100.0, 100.0)
         
         # 3. Arbeitsmarkt
         unrate = get_unemployment_value(curr, dt_str)
-        lab_dev = (5.0 - unrate) / 3.0 * 50.0
+        lab_dev = (5.0 - unrate) / 3.0 * 100.0
         lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
         lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
         scores["Arbeitsmarkt"] = np.clip(lab_dev + lab_trend + lab_surprise, -100.0, 100.0)
         
-        # 4. Wachstum
+        # 4. PMI
         pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
         pmi_data = pmi_all.get(curr, {})
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
         pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
         pmi_avg = np.mean(pmi_vals) if pmi_vals else 50.0
-        w_pmi_score = (pmi_avg - 50.0) / 10.0 * 50.0
+        pmi_score = (pmi_avg - 50.0) / 10.0 * 100.0
         
+        pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
+        pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
+        scores["PMI"] = np.clip(pmi_score + pmi_trend + pmi_surprise, -100.0, 100.0)
+        
+        # 5. GDP
         gdp = get_gdp_yoy_value(curr, dt_str)
-        w_gdp_score = (gdp - 1.5) / 1.5 * 30.0
-        
-        cli_score = 0.0
-        cli_res = get_historical_oecd_cli(curr, dt_str)
-        if cli_res is not None:
-            cli_val = cli_res[0]
-            cli_score = (cli_val - 100.0) / 2.0 * 20.0
-            
-        w_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
-        w_surprise = get_surprise_points(curr, "Wachstum", dt_str)
-        scores["Wachstum"] = np.clip(w_pmi_score + w_gdp_score + cli_score + w_trend + w_surprise, -100.0, 100.0)
-        
-        # 5. Risiko
-        vix = get_vix_value(dt_str)
-        vix_score = (18.0 - vix) / 10.0 * 50.0
-        
-        align_score = 0.0
-        if vix > 20.0:
-            align_score = 50.0 if curr in ["USD", "CHF", "JPY"] else -50.0
-        elif vix < 15.0:
-            align_score = -20.0 if curr in ["USD", "CHF", "JPY"] else 30.0
-            
-        comm_score = 0.0
-        if curr == "CAD":
-            comm_score = get_oil_price(dt_str) * 20.0
-        elif curr == "NZD":
-            comm_score = (get_china_pmi_fred(dt_str) * 0.8 + get_milk_price(dt_str)) * 15.0
-        elif curr == "AUD":
-            comm_score = get_china_pmi_fred(dt_str) * 20.0
-        elif curr == "EUR":
-            comm_score = get_ciss_index(dt_str) * 20.0
-        elif curr == "GBP":
-            comm_score = get_house_price_index(dt_str) * 50.0
-        elif curr == "JPY":
-            comm_score = get_trade_balance(dt_str) * 20.0
-            
-        scores["Risiko"] = np.clip(vix_score + align_score + comm_score, -100.0, 100.0)
+        gdp_score = (gdp - 1.5) / 1.5 * 100.0
+        gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
+        scores["GDP"] = np.clip(gdp_score + gdp_trend, -100.0, 100.0)
         
     except Exception:
         pass
@@ -2779,24 +2851,22 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
     regime = detect_market_regime(curr, target_date)
     scores = compute_currency_details(curr, target_date)
     
-    weights = {
-        "Normal": {"Geldpolitik": 0.30, "Inflation": 0.25, "Arbeitsmarkt": 0.20, "Wachstum": 0.15, "Risiko": 0.10},
-        "Inflation": {"Geldpolitik": 0.30, "Inflation": 0.40, "Arbeitsmarkt": 0.15, "Wachstum": 0.10, "Risiko": 0.05},
-        "Risk-Off": {"Geldpolitik": 0.20, "Inflation": 0.10, "Arbeitsmarkt": 0.10, "Wachstum": 0.20, "Risiko": 0.40},
-        "Risk-On": {"Geldpolitik": 0.20, "Inflation": 0.10, "Arbeitsmarkt": 0.15, "Wachstum": 0.25, "Risiko": 0.30},
-        "Monetary Policy": {"Geldpolitik": 0.40, "Inflation": 0.25, "Arbeitsmarkt": 0.15, "Wachstum": 0.10, "Risiko": 0.10},
-        "Labour Market": {"Geldpolitik": 0.20, "Inflation": 0.15, "Arbeitsmarkt": 0.40, "Wachstum": 0.15, "Risiko": 0.10},
-        "Growth": {"Geldpolitik": 0.20, "Inflation": 0.10, "Arbeitsmarkt": 0.20, "Wachstum": 0.40, "Risiko": 0.10}
-    }
+    core_score = (
+        0.35 * scores["Geldpolitik"] +
+        0.20 * scores["Inflation"] +
+        0.20 * scores["Arbeitsmarkt"] +
+        0.20 * scores["PMI"] +
+        0.05 * scores["GDP"]
+    )
     
-    regime_weights = weights.get(regime, weights["Normal"])
-    final_score = sum(scores[cat] * regime_weights[cat] for cat in regime_weights.keys())
+    corr_score = compute_correction_score(curr, target_date)
+    final_score = np.clip(core_score + corr_score, -100.0, 100.0)
     
-    return np.clip(final_score, -100.0, 100.0), regime, regime_weights, scores
+    return final_score, regime, core_score, corr_score, scores
 
 def compute_currency_score_historical(curr: str, target_date) -> float:
     try:
-        final_score, _, _, _ = compute_currency_professional_score_and_regime(curr, target_date)
+        final_score, _, _, _, _ = compute_currency_professional_score_and_regime(curr, target_date)
         mapped_score = (final_score + 100.0) / 2.0
         return float(mapped_score)
     except Exception:
@@ -3141,7 +3211,7 @@ def get_country_rate(country_code, fred_key):
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
     try:
-        final_score, _, _, _ = compute_currency_professional_score_and_regime(curr, None)
+        final_score, _, _, _, _ = compute_currency_professional_score_and_regime(curr, None)
         mapped_score = (final_score + 100.0) / 2.0
         return float(mapped_score)
     except Exception:
@@ -3597,7 +3667,7 @@ st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live
 def get_pair_signal_and_badge(base, quote):
     b_score = compute_currency_score(base, FRED_KEY)
     q_score = compute_currency_score(quote, FRED_KEY)
-    r_diff = q_score - b_score
+    r_diff = b_score - q_score
     sig_val = r_diff / 2.0
     sig_val = max(-50.0, min(50.0, sig_val))
     
@@ -3624,720 +3694,721 @@ def get_pair_signal_and_badge(base, quote):
         
     return b, c, sig_val
 
-def get_next_event_for_pair(base, quote, df_c):
-    curr_to_countries = {
-        "USD": ["USA", "US"],
-        "EUR": ["EUR", "DEU", "FRA", "ITA", "EMU"],
-        "GBP": ["GBR", "UK", "GB"],
-        "CHF": ["CHE", "CH", "SUI"],
-        "CAD": ["CAN", "CA"],
-        "AUD": ["AUS", "AU"],
-        "NZD": ["NZL", "NZ"],
-        "JPY": ["JPN", "JP"]
-    }
-    base_match = curr_to_countries.get(base, [base])
-    quote_match = curr_to_countries.get(quote, [quote])
-    pair_cal = df_c[df_c["country"].isin(base_match + quote_match)].copy()
-    if pair_cal.empty:
-        return "Keine Events"
-    pair_cal["parsed_time"] = pd.to_datetime(pair_cal["time"], errors="coerce")
-    pair_cal = pair_cal.dropna(subset=["parsed_time"])
-    if pair_cal.empty:
-        return "Keine Events"
-    now_dt = datetime.now()
-    future_events = pair_cal[pair_cal["parsed_time"] >= now_dt]
-    if not future_events.empty:
-        next_event = future_events.sort_values("parsed_time").iloc[0]
-    else:
-        next_event = pair_cal.sort_values("parsed_time", ascending=False).iloc[0]
-    time_str = next_event["parsed_time"].strftime("%d.%m %H:%M")
-    return f"{next_event['country']}: {next_event['event']} ({time_str})"
+def get_historical_indicator_values(series_id, dt_str, fred_key):
+    try:
+        val_now, _, _ = get_fred_data_historical(series_id, dt_str, fred_key)
+        dt_1m = (pd.to_datetime(dt_str) - timedelta(days=30)).strftime("%Y-%m-%d")
+        val_1m, _, _ = get_fred_data_historical(series_id, dt_1m, fred_key)
+        dt_3m = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+        val_3m, _, _ = get_fred_data_historical(series_id, dt_3m, fred_key)
+        dt_6m = (pd.to_datetime(dt_str) - timedelta(days=180)).strftime("%Y-%m-%d")
+        val_6m, _, _ = get_fred_data_historical(series_id, dt_6m, fred_key)
+        return val_now, val_1m, val_3m, val_6m
+    except Exception:
+        return None, None, None, None
 
-tab1, tab_score, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab14 = st.tabs([
-    "🏠 Übersicht & Checkliste",
-    "📊 Fundamental-Score",
-    "📊 PMI-Daten",
-    "🏦 Zinsdifferenz",
-    "📊 Analysten-Konsens",
-    "🧠 Sentiment-Score",
-    "🧮 Korrelationsmatrix",
-    "📈 Langfristige Historie",
-    "🛍️ Rohstoffe & Märkte",
-    "🇺🇸 US-Arbeitsmarkt (BLS)",
-    "⚠️ Risikoindikatoren (IMF)",
-    "📰 News & Research Hub",
-    "🛡️ Risk-On/Off",
-    "📊 Historische Daten"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "🏠 Dashboard",
+    "🌍 Currency Ranking",
+    "📊 Fundamental Analysis",
+    "💱 FX Pair Analysis",
+    "🌐 Market Regime",
+    "📍 Positioning & Sentiment",
+    "📈 Historical & Quant Research",
+    "🛠 Data Explorer"
 ])
 
-# ----------------- TAB 1: ÜBERSICHT & CHECKLISTE -----------------
+# ----------------- TAB 1: DASHBOARD -----------------
 with tab1:
-    st.header("🏠 G8 Fundamental-Checkliste")
-    st.caption("Auf einen Blick die makroökonomischen Scores und Handelssignale für alle Währungspaare vergleichen.")
+    st.header("🏠 Divergence Trading Dashboard")
+    st.caption("Vergleichende quantitative Analyse, fundamentaler Bias und Signale für das gewählte Währungspaar.")
     
-    # 1. Macro scores comparison chart
-    scores = {curr: compute_currency_score(curr, FRED_KEY) for curr in CURRENCIES.keys()}
-    df_scores = pd.DataFrame(list(scores.items()), columns=["Currency", "Score"])
-    currency_order = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
-    df_scores['Currency'] = pd.Categorical(df_scores['Currency'], categories=currency_order, ordered=True)
-    df_scores = df_scores.sort_values('Currency')
+    # Calculate professional scores
+    base_score, base_reg, base_core, base_corr, base_details = compute_currency_professional_score_and_regime(base_curr)
+    quote_score, quote_reg, quote_core, quote_corr, quote_details = compute_currency_professional_score_and_regime(quote_curr)
     
-    fig_all_scores = px.bar(
-        df_scores,
-        x="Currency",
-        y="Score",
-        color="Score",
-        color_continuous_scale="Viridis",
-        text_auto=".1f"
-    )
-    fig_all_scores.update_layout(
-        title="Wirtschaftsscores der G8 Länder im Vergleich",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#7d7d8a", size=10),
-        xaxis=dict(showgrid=False, linecolor="#1f2026"),
-        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026", range=[0, 100]),
-        height=320,
-        margin=dict(l=10, r=10, t=40, b=10)
-    )
-    st.plotly_chart(fig_all_scores, use_container_width=True)
+    # Calculate pair signal and badge
+    badge_name, badge_color, sig_val = get_pair_signal_and_badge(base_curr, quote_curr)
     
-    # 2. Pairs table checklist
-    st.subheader("📋 Währungspaare Checkliste")
+    sig_code = "NT"
+    if badge_name == "STRONG BUY": sig_code = "SB"
+    elif badge_name == "MID BUY": sig_code = "MB"
+    elif badge_name == "NEUTRAL": sig_code = "NT"
+    elif badge_name == "MID SELL": sig_code = "MS"
+    elif badge_name == "STRONG SELL": sig_code = "SS"
     
-    import itertools
-    currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
-    G8_PAIRS = list(itertools.permutations(currencies_list, 2))
+    render_bias_box(sig_val, base_curr, quote_curr, base_score, quote_score, sig_code)
     
-    checklist_rows = []
-    for base, quote in G8_PAIRS:
-        p_name = f"{base}/{quote}"
-        badge_name, badge_color, sig_val = get_pair_signal_and_badge(base, quote)
+    # Global market regime detection
+    vix = get_vix_value()
+    cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+    gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+    
+    if vix > 22.0:
+        global_regime = "Risk-Off 🛡️"
+    elif vix < 14.0 and gdp_us > 1.5:
+        global_regime = "Risk-On / Inflationary Growth 🚀"
+    elif cpi_us > 3.0 and gdp_us < 1.0:
+        global_regime = "Stagflation ⚠️"
+    elif cpi_us < 1.5 and gdp_us < 1.0:
+        global_regime = "Deflationary Slowdown 📉"
+    else:
+        global_regime = "Normales Marktregime 🟡"
         
-        # Filter out neutral signals if the option is not checked
-        if badge_name == "NEUTRAL" and not show_all_pairs:
-            continue
+    # Strongest/Weakest currency
+    scores_dict = {}
+    for curr in CURRENCIES.keys():
+        scores_dict[curr] = compute_currency_professional_score_and_regime(curr)[0]
+    strongest_c = max(scores_dict.keys(), key=lambda k: scores_dict[k])
+    weakest_c = min(scores_dict.keys(), key=lambda k: scores_dict[k])
+    
+    # Overview metrics
+    col_dash1, col_dash2, col_dash3, col_dash4 = st.columns(4)
+    with col_dash1:
+        st.metric("Globale Marktphase", global_regime)
+    with col_dash2:
+        gp_diff = base_details["Geldpolitik"] - quote_details["Geldpolitik"]
+        inf_diff = base_details["Inflation"] - quote_details["Inflation"]
+        lab_diff = base_details["Arbeitsmarkt"] - quote_details["Arbeitsmarkt"]
+        pmi_diff = base_details["PMI"] - quote_details["PMI"]
+        gdp_diff = base_details["GDP"] - quote_details["GDP"]
+        diff = base_score - quote_score
         
-        base_rate, _, _ = get_country_rate(CURRENCIES[base]["wb_code"], FRED_KEY)
-        quote_rate, _, _ = get_country_rate(CURRENCIES[quote]["wb_code"], FRED_KEY)
-        diff_bps = int((quote_rate - base_rate) * 100)
-        diff_str = f"{base_rate:.2f}% vs {quote_rate:.2f}% ({diff_bps:+d} bps)"
-        
-        rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
-        buy_count = rec_data.get("buy", 0)
-        hold_count = rec_data.get("hold", 0)
-        sell_count = rec_data.get("sell", 0)
-        rec_str = f"B:{buy_count} / H:{hold_count} / S:{sell_count}"
-        
-        sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
-        sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
-        sent_str = f"{sent_val:+.1f} {sent_emoji}"
-        
-        debt_str = format_imf_indicator(base, quote, "GGXWDG_NGDP")
-        ca_str = format_imf_indicator(base, quote, "BCA_NGDPD")
-        
-        next_ev = get_next_event_for_pair(base, quote, df_cal)
-        
-        if "BUY" in badge_name:
-            class_emoji = "🟢 " + badge_name
-        elif "SELL" in badge_name:
-            class_emoji = "🔴 " + badge_name
+        matching_cats = []
+        if diff > 0:
+            if gp_diff > 0: matching_cats.append("Monetary Policy")
+            if inf_diff > 0: matching_cats.append("Inflation")
+            if lab_diff > 0: matching_cats.append("Labour Market")
+            if pmi_diff > 0: matching_cats.append("PMI")
+            if gdp_diff > 0: matching_cats.append("GDP")
         else:
-            class_emoji = "🟡 " + badge_name
-            
-        checklist_rows.append({
-            "Währungspaar": f"{CURRENCIES[base]['flag']} {base} / {CURRENCIES[quote]['flag']} {quote}",
-            "Zins-Differenz (bps)": diff_str,
-            "Signal-Wert": f"{sig_val:+.1f}",
-            "Signal-Klassifikation": class_emoji,
-            "Analysten-Konsens": rec_str,
-            "Sentiment": sent_str,
-            "Staatsverschuldung": debt_str,
-            "Leistungsbilanz": ca_str,
-            "Nächstes Event": next_ev
-        })
+            if gp_diff < 0: matching_cats.append("Monetary Policy")
+            if inf_diff < 0: matching_cats.append("Inflation")
+            if lab_diff < 0: matching_cats.append("Labour Market")
+            if pmi_diff < 0: matching_cats.append("PMI")
+            if gdp_diff < 0: matching_cats.append("GDP")
+        confidence = int((len(matching_cats) / 5.0) * 100)
+        st.metric("Signal-Konfidenz", f"{confidence}%")
+    with col_dash3:
+        st.metric("🟢 Stärkste Währung", f"{strongest_c} ({scores_dict[strongest_c]:+.1f})")
+    with col_dash4:
+        st.metric("🔴 Schwächste Währung", f"{weakest_c} ({scores_dict[weakest_c]:+.1f})")
         
-    df_checklist = pd.DataFrame(checklist_rows)
-    st.dataframe(df_checklist, hide_index=True, use_container_width=True)
-    st.markdown("<div class='source-tag'>Gesamte Suite-Zusammenfassung (Risikodaten Quelle: IMF DataMapper)</div>", unsafe_allow_html=True)
-
-# ----------------- TAB: FUNDAMENTAL-SCORE -----------------
-def format_score_with_emoji(val):
-    if val is None:
-        return "0.0 🟡"
-    try:
-        val_f = float(val)
-        if val_f > 15.0:
-            return f"{val_f:+.1f} 🟢"
-        elif val_f < -15.0:
-            return f"{val_f:+.1f} 🔴"
-        else:
-            return f"{val_f:+.1f} 🟡"
-    except Exception:
-        return "0.0 🟡"
-
-def explain_currency_score_bullets(curr: str, target_date=None) -> list:
-    bullets = []
-    try:
-        details = compute_currency_details(curr, target_date)
-        gp = details["Geldpolitik"]
-        inf = details["Inflation"]
-        lab = details["Arbeitsmarkt"]
-        gro = details["Wachstum"]
-        ris = details["Risiko"]
-        
-        if gp > 15:
-            bullets.append("+ steigende Zinserwartungen / hohe Realrenditen")
-        elif gp < -15:
-            bullets.append("- sinkende Zinserwartungen / negative Realrenditen")
-            
-        if inf > 15:
-            bullets.append("+ hohe Inflationsabweichung (Zinshoch-Druck)")
-        elif inf < -15:
-            bullets.append("- niedrige Inflation / Deflationsdruck")
-            
-        if lab > 15:
-            bullets.append("+ starker/robuster Arbeitsmarkt")
-        elif lab < -15:
-            bullets.append("- schwacher Arbeitsmarkt (steigende Arbeitslosigkeit)")
-            
-        if gro > 15:
-            bullets.append("+ expandierende PMI- & BIP-Wachstumsdaten")
-        elif gro < -15:
-            bullets.append("- kontrahierende PMI- & BIP-Daten")
-            
-        if ris > 15:
-            bullets.append("+ stützende Sentiment- & Safe-Haven-Dynamik")
-        elif ris < -15:
-            bullets.append("- belastende Sentiment- & Risk-Sensitive-Dynamik")
-            
-        surp_gp = get_surprise_points(curr, "Geldpolitik", target_date)
-        if surp_gp > 0:
-            bullets.append("+ positive Zinsüberraschung (Hawkish Surprise)")
-        elif surp_gp < 0:
-            bullets.append("- negative Zinsüberraschung (Dovish Surprise)")
-            
-        surp_inf = get_surprise_points(curr, "Inflation", target_date)
-        if surp_inf > 0:
-            bullets.append("+ positive Inflations-Überraschung (Actual > Forecast)")
-        elif surp_inf < 0:
-            bullets.append("- negative Inflations-Überraschung (Actual < Forecast)")
-            
-        surp_lab = get_surprise_points(curr, "Arbeitsmarkt", target_date)
-        if surp_lab > 0:
-            bullets.append("+ positive Arbeitsmarkt-Überraschung (Actual NFP > Forecast)")
-        elif surp_lab < 0:
-            bullets.append("- negative Arbeitsmarkt-Überraschung (Actual NFP < Forecast)")
-            
-    except Exception:
-        pass
-    if not bullets:
-        bullets.append("⚪ Neutrale fundamentale Gesamtlage")
-    return bullets
-
-with tab_score:
-    st.header("📊 Professioneller G10 Fundamental-Score")
-    st.caption("Dieses Modul zerlegt die wirtschaftliche Verfassung jedes G10-Landes in 5 standardisierte Makro-Kategorien. Die Gewichtung passt sich dynamisch an das Marktregime an.")
+    st.write("")
     
-    # Calculate G8 professional scores
+    # Summary & Drivers
+    col_summary, col_drivers = st.columns([1.2, 1.0])
+    with col_summary:
+        st.subheader("📰 Zusammenfassung des Tages")
+        summary_text = f"""
+        Der Markt befindet sich heute im Regime **{global_regime}** (VIX: {vix:.1f}). 
+        Die stärkste Währung im G10-Raum ist heute **{strongest_c}** mit einem Score von **{scores_dict[strongest_c]:+.1f}**, 
+        während **{weakest_c}** mit einem Score von **{scores_dict[weakest_c]:+.1f}** die größte Schwäche zeigt.
+        
+        Für das ausgewählte Paar **{base_curr}/{quote_curr}** liegt ein **{badge_name}** vor. 
+        Dieses Signal wird von **{len(matching_cats)} von 5** makroökonomischen Kategorien gestützt.
+        """
+        st.markdown(summary_text)
+    with col_drivers:
+        st.subheader("📝 Wichtigste Gründe")
+        bullets = []
+        winner_gp = base_curr if gp_diff > 0 else quote_curr
+        bullets.append(f"- **Yield/Geldpolitik**: {winner_gp} im Vorteil (Differenz: {abs(gp_diff):.1f} Pkt)")
+        winner_lab = base_curr if lab_diff > 0 else quote_curr
+        bullets.append(f"- **Arbeitsmarkt**: {winner_lab} stärker (Differenz: {abs(lab_diff):.1f} Pkt)")
+        winner_pmi = base_curr if pmi_diff > 0 else quote_curr
+        bullets.append(f"- **PMI**: {winner_pmi} stärker (Differenz: {abs(pmi_diff):.1f} Pkt)")
+        winner_gdp = base_curr if gdp_diff > 0 else quote_curr
+        bullets.append(f"- **GDP**: {winner_gdp} stärker (Differenz: {abs(gdp_diff):.1f} Pkt)")
+        for bullet in bullets:
+            st.write(bullet)
+            
+    st.write("")
+    
+    # Decisions checklist table at the bottom
+    with st.expander("📋 G10 Währungspaare Gesamtübersicht (Trading-Checkliste)", expanded=False):
+        import itertools
+        currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+        G8_PAIRS = list(itertools.permutations(currencies_list, 2))
+        
+        checklist_rows = []
+        for b, q in G8_PAIRS:
+            p_name = f"{b}/{q}"
+            b_name_p, b_color_p, sig_val_p = get_pair_signal_and_badge(b, q)
+            if b_name_p == "NEUTRAL" and not show_all_pairs:
+                continue
+            b_rate, _, _ = get_country_rate(CURRENCIES[b]["wb_code"], FRED_KEY)
+            q_rate, _, _ = get_country_rate(CURRENCIES[q]["wb_code"], FRED_KEY)
+            diff_bps = int((q_rate - b_rate) * 100)
+            diff_str = f"{b_rate:.2f}% vs {q_rate:.2f}% ({diff_bps:+d} bps)"
+            
+            rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
+            rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
+            
+            sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
+            sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
+            sent_str = f"{sent_val:+.1f} {sent_emoji}"
+            
+            debt_str = format_imf_indicator(b, q, "GGXWDG_NGDP")
+            ca_str = format_imf_indicator(b, q, "BCA_NGDPD")
+            
+            b_mom = compute_macro_momentum(b)
+            q_mom = compute_macro_momentum(q)
+            mom_str = f"{b_mom:+.1f} / {q_mom:+.1f}"
+            
+            class_emoji = "🟢 " + b_name_p if "BUY" in b_name_p else "🔴 " + b_name_p if "SELL" in b_name_p else "🟡 " + b_name_p
+            
+            checklist_rows.append({
+                "Währungspaar": f"{CURRENCIES[b]['flag']} {b} / {CURRENCIES[q]['flag']} {q}",
+                "Zins-Differenz (bps)": diff_str,
+                "Signal-Wert": f"{sig_val_p:+.1f}",
+                "Signal-Klassifikation": class_emoji,
+                "Analysten-Konsens": rec_str,
+                "Sentiment": sent_str,
+                "Staatsverschuldung": debt_str,
+                "Leistungsbilanz": ca_str,
+                "Momentum (Base/Quote)": mom_str
+            })
+        if checklist_rows:
+            df_checklist = pd.DataFrame(checklist_rows)
+            st.dataframe(df_checklist, hide_index=True, use_container_width=True)
+
+# ----------------- TAB 2: CURRENCY RANKING -----------------
+with tab2:
+    st.header("🌍 G10 Währungs-Fundamental-Ranking")
+    st.caption("Vergleichendes Ranking aller G10-Währungen basierend auf Core- und Korrektur-Scores.")
+    
+    def format_score_with_emoji(val):
+        if val is None:
+            return "0.0 🟡"
+        try:
+            val_f = float(val)
+            if val_f > 15.0:
+                return f"{val_f:+.1f} 🟢"
+            elif val_f < -15.0:
+                return f"{val_f:+.1f} 🔴"
+            else:
+                return f"{val_f:+.1f} 🟡"
+        except Exception:
+            return "0.0 🟡"
+
     g8_prof = {}
     for curr in CURRENCIES.keys():
-        f_score, regime, regime_w, cat_scores = compute_currency_professional_score_and_regime(curr)
+        f_score, regime, core_score, corr_score, cat_scores = compute_currency_professional_score_and_regime(curr)
         g8_prof[curr] = {
             "score": f_score,
             "regime": regime,
-            "weights": regime_w,
+            "core": core_score,
+            "corr": corr_score,
             "categories": cat_scores
         }
         
-    strongest_curr = max(g8_prof.keys(), key=lambda k: g8_prof[k]["score"])
-    weakest_curr = min(g8_prof.keys(), key=lambda k: g8_prof[k]["score"])
-    
-    col_str1, col_str2 = st.columns(2)
-    with col_str1:
-        st.metric(
-            label=f"🟢 Stärkste Währung ({strongest_curr})",
-            value=f"{g8_prof[strongest_curr]['score']:+.1f}",
-            delta=f"Regime: {g8_prof[strongest_curr]['regime']}"
-        )
-    with col_str2:
-        st.metric(
-            label=f"🔴 Schwächste Währung ({weakest_curr})",
-            value=f"{g8_prof[weakest_curr]['score']:+.1f}",
-            delta=f"Regime: {g8_prof[weakest_curr]['regime']}",
-            delta_color="inverse"
-        )
-        
-    # Table of Category Scores
-    st.subheader("📋 G10 Category Scores & Regime Matrix")
-    
     matrix_rows = []
     sorted_currencies = sorted(CURRENCIES.keys(), key=lambda k: g8_prof[k]["score"], reverse=True)
     for curr in sorted_currencies:
         sc = g8_prof[curr]["score"]
+        core_sc = g8_prof[curr]["core"]
+        corr_sc = g8_prof[curr]["corr"]
         reg = g8_prof[curr]["regime"]
-        cats = g8_prof[curr]["categories"]
+        
+        _, bps_chg, _ = get_country_rate(CURRENCIES[curr]["wb_code"], FRED_KEY)
+        trend_emoji = "▲" if bps_chg > 0 else "▼" if bps_chg < 0 else "▬"
+        
+        mom = compute_macro_momentum(curr)
+        mom_emoji = "🟢" if mom > 0 else "🔴" if mom < 0 else "🟡"
         
         matrix_rows.append({
-            "Currency": f"{CURRENCIES[curr]['flag']} {curr}",
-            "Overall Score": format_score_with_emoji(sc),
-            "Current Regime": reg,
-            "Monetary Policy": format_score_with_emoji(cats['Geldpolitik']),
-            "Inflation": format_score_with_emoji(cats['Inflation']),
-            "Labour Market": format_score_with_emoji(cats['Arbeitsmarkt']),
-            "Growth": format_score_with_emoji(cats['Wachstum']),
-            "Risk": format_score_with_emoji(cats['Risiko'])
+            "Ranking": f"{sorted_currencies.index(curr) + 1}",
+            "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+            "Gesamt-Score": format_score_with_emoji(sc),
+            "CORE Score": format_score_with_emoji(core_sc),
+            "Correction Score": f"{corr_sc:+.1f}",
+            "Marktregime": reg,
+            "Macro Momentum": f"{mom:+.1f} {mom_emoji}",
+            "Zinstrend (1M)": f"{bps_chg:+d} bps {trend_emoji}"
         })
         
     df_matrix = pd.DataFrame(matrix_rows)
     st.dataframe(df_matrix, hide_index=True, use_container_width=True)
-    
-    st.write("")
-    
-    # Currency Detail explainer card
-    st.subheader("💡 Währungs-Fundamental-Analyse")
-    sel_explain_curr = st.selectbox("Wähle eine Währung zur Analyse:", list(CURRENCIES.keys()), index=0, key="explain_curr_key")
-    if sel_explain_curr:
-        sc_val = g8_prof[sel_explain_curr]["score"]
-        bias_str = "Bullish" if sc_val > 10 else ("Bearish" if sc_val < -10 else "Neutral")
-        st.markdown(f"**Gesamt-Score:** `{sc_val:+.1f}` | **Bias:** `{bias_str}`")
-        st.write("**Gründe für die fundamentale Bewertung:**")
-        for b in explain_currency_score_bullets(sel_explain_curr):
-            st.write(b)
-            
-    st.write("")
-    
-    st.subheader("🔍 FX-Paar Relative Analyse")
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        base_sel = st.selectbox("Basis-Währung (Base)", list(CURRENCIES.keys()), index=0, key="base_sel_key")
-    with col_p2:
-        quote_sel = st.selectbox("Quote-Währung (Quote)", list(CURRENCIES.keys()), index=1, key="quote_sel_key")
-        
-    if base_sel == quote_sel:
-        st.warning("Bitte wählen Sie zwei unterschiedliche Währungen aus.")
-    else:
-        base_data = g8_prof[base_sel]
-        quote_data = g8_prof[quote_sel]
-        
-        diff = base_data["score"] - quote_data["score"]
-        
-        # Calculate category differences
-        gp_diff = base_data["categories"]["Geldpolitik"] - quote_data["categories"]["Geldpolitik"]
-        inf_diff = base_data["categories"]["Inflation"] - quote_data["categories"]["Inflation"]
-        lab_diff = base_data["categories"]["Arbeitsmarkt"] - quote_data["categories"]["Arbeitsmarkt"]
-        gro_diff = base_data["categories"]["Wachstum"] - quote_data["categories"]["Wachstum"]
-        ris_diff = base_data["categories"]["Risiko"] - quote_data["categories"]["Risiko"]
-        
-        if diff > 0:
-            bias_val = "Long"
-            matching_cats = []
-            if gp_diff > 0: matching_cats.append("Monetary Policy")
-            if inf_diff > 0: matching_cats.append("Inflation")
-            if lab_diff > 0: matching_cats.append("Labour Market")
-            if gro_diff > 0: matching_cats.append("Growth")
-            if ris_diff > 0: matching_cats.append("Risk")
-        else:
-            bias_val = "Short"
-            matching_cats = []
-            if gp_diff < 0: matching_cats.append("Monetary Policy")
-            if inf_diff < 0: matching_cats.append("Inflation")
-            if lab_diff < 0: matching_cats.append("Labour Market")
-            if gro_diff < 0: matching_cats.append("Growth")
-            if ris_diff < 0: matching_cats.append("Risk")
-            
-        matching_count = len(matching_cats)
-        confidence = int((matching_count / 5.0) * 100)
-        
-        conf_color = "#8b949e"
-        if confidence >= 80:
-            conf_color = "#10b981"
-        elif confidence >= 60:
-            conf_color = "#34d399"
-        elif confidence >= 40:
-            conf_color = "#e2b13c"
-            
-        col_c1, col_c2, col_c3 = st.columns(3)
-        with col_c1:
-            st.metric("Fundamental-Bias", bias_val)
-        with col_c2:
-            st.metric("Score-Differenz", f"{diff:+.1f} Pkt")
-        with col_c3:
-            st.markdown(f"<div style='padding: 10px; border-radius: 6px; border: 1px solid {conf_color}50; background-color: {conf_color}10; text-align: center;'><span style='color: #7d7d8a; font-size: 0.8rem; display: block;'>Konfidenz</span><span style='color: {conf_color}; font-size: 1.25rem; font-weight: 700;'>{confidence}%</span></div>", unsafe_allow_html=True)
-            
-        st.write("")
-        st.write("**Bestätigende Kategorien:**")
-        all_cats = ["Monetary Policy", "Inflation", "Labour Market", "Growth", "Risk"]
-        for cat in all_cats:
-            checked = "✓" if cat in matching_cats else "✗"
-            st.write(f"{checked} {cat}")
-            
-        st.write("")
-        st.write("### 📝 Fundamental-Argumente:")
-        bullets = []
-        
-        winner_gp = base_sel if gp_diff > 0 else quote_sel
-        bullets.append(f"- {winner_gp} Monetary Policy stärker (Differenz: {abs(gp_diff):.0f} Pkt)")
-        
-        winner_lab = base_sel if lab_diff > 0 else quote_sel
-        bullets.append(f"- {winner_lab} Labour stärker (Differenz: {abs(lab_diff):.0f} Pkt)")
-        
-        loser_gro = base_sel if gro_diff < 0 else quote_sel
-        bullets.append(f"- {loser_gro} Growth schwächer (Differenz: {abs(gro_diff):.0f} Pkt)")
-        
-        winner_ris = base_sel if ris_diff > 0 else quote_sel
-        bullets.append(f"- Risk unterstützt {winner_ris} (Differenz: {abs(ris_diff):.0f} Pkt)")
-        
-        for b in bullets:
-            st.write(b)
 
-# ----------------- TAB 2: PMI-DATEN -----------------
-with tab2:
-    st.header("📊 PMI-Daten (Einkaufsmanagerindex)")
-    st.caption("PMI-Werte (Manufacturing & Services) als Frühindikatoren der wirtschaftlichen Aktivität (Expansion > 50 / Kontraktion < 50).")
-    
-    with st.spinner("Lade PMI-Daten..."):
-        pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
-        
-    if pmi_data:
-        code_to_name = {
-            "USD": "🇺🇸 USA",
-            "EUR": "🇪🇺 Euro",
-            "GBP": "🇬🇧 UK",
-            "CHF": "🇨🇭 Schweiz",
-            "CAD": "🇨🇦 Kanada",
-            "AUD": "🇦🇺 Australien",
-            "NZD": "🇳🇿 Neuseeland",
-            "JPY": "🇯🇵 Japan"
-        }
-        
-        rows = []
-        for code, data in pmi_data.items():
-            m_val = data["m_last"]
-            m_prev = data["m_prev"]
-            s_val = data["s_last"]
-            s_prev = data["s_prev"]
-            
-            m_chg = m_val - m_prev if (m_val is not None and m_prev is not None) else None
-            s_chg = s_val - s_prev if (s_val is not None and s_prev is not None) else None
-            
-            # Manufacturing cell string
-            if m_val is not None:
-                m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
-                m_arrow = "▲" if (m_chg is not None and m_chg > 0) else "▼" if (m_chg is not None and m_chg < 0) else "▬"
-                m_str = f"{m_val:.1f} {m_arrow} {m_status}"
-            else:
-                m_str = "N/A"
-                
-            # Services cell string
-            if s_val is not None:
-                s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
-                s_arrow = "▲" if (s_chg is not None and s_chg > 0) else "▼" if (s_chg is not None and s_chg < 0) else "▬"
-                s_str = f"{s_val:.1f} {s_arrow} {s_status}"
-            else:
-                s_str = "N/A"
-                
-            # MoM Change
-            changes = []
-            if m_chg is not None:
-                changes.append(m_chg)
-            if s_chg is not None:
-                changes.append(s_chg)
-                
-            if changes:
-                avg_chg = sum(changes) / len(changes)
-                c_arrow = "▲" if avg_chg > 0 else "▼" if avg_chg < 0 else "▬"
-                c_str = f"{c_arrow} {avg_chg:+.1f}"
-            else:
-                c_str = "N/A"
-                
-            # Reference date
-            m_ref = data["m_ref"] or "N/A"
-            s_ref = data["s_ref"] or "N/A"
-            ref_str = m_ref if m_ref != "N/A" else s_ref
-            
-            rows.append({
-                "Land": code_to_name.get(code, code),
-                "Manufacturing PMI": m_str,
-                "Services PMI": s_str,
-                "Veränderung zum Vormonat": c_str,
-                "Letzte Aktualisierung": ref_str,
-                "m_sort_val": m_val if m_val is not None else -999.0
-            })
-            
-        df_pmi = pd.DataFrame(rows)
-        
-        # Sort standardly by Manufacturing PMI (highest first)
-        df_pmi = df_pmi.sort_values(by="m_sort_val", ascending=False)
-        df_render = df_pmi.drop(columns=["m_sort_val"]).reset_index(drop=True)
-        
-        # Styling function for Pandas Styler
-        def apply_colors(val):
-            val_str = str(val)
-            if "Expansion" in val_str or "▲" in val_str:
-                return "color: #10b981; font-weight: bold;"
-            elif "Kontraktion" in val_str or "▼" in val_str:
-                return "color: #ef4444; font-weight: bold;"
-            return ""
-            
-        styled_df = df_render.style
-        try:
-            styled_df = styled_df.map(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
-        except AttributeError:
-            styled_df = styled_df.applymap(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
-            
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Daten momentan nicht verfügbar")
-
-# ----------------- TAB 3: ZINSDIFFERENZ -----------------
+# ----------------- TAB 3: FUNDAMENTAL ANALYSIS -----------------
 with tab3:
-    st.header("🏦 Zinsdifferenz & Notenbanken")
-    st.caption("Vergleich der aktuellen Leitzinsen der 8 Haupt-Zentralbanken.")
+    st.header("📊 Fundamental Analysis Hub")
+    st.caption("Umfassende makroökonomische Fundamentaldaten: PMI, Zinsdifferenzen, Inflation, Arbeitsmarkt, BIP und Zentralbanken.")
     
-    # Fetch all rates
-    rates_data = {}
-    for curr, info in CURRENCIES.items():
-        r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
-        rates_data[curr] = {
-            "rate": r_val,
-            "bps_change": bps_chg,
-            "source": src
-        }
-        
-    df_rates_plot = pd.DataFrame([
-        {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
-        for curr, data in rates_data.items()
+    sub_fund1, sub_fund2, sub_fund3 = st.tabs([
+        "📈 Währungs-Details & Trends",
+        "🏦 Zentralbanken & Zinskurven",
+        "📊 PMI-Frühindikatoren"
     ])
     
-    fig_rates_g8 = go.Figure()
-    fig_rates_g8.add_trace(go.Bar(
-        x=df_rates_plot["Zentralbank"],
-        y=df_rates_plot["Zinssatz"],
-        marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
-        text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
-        textposition='auto',
-        name="Zinssatz"
-    ))
-    fig_rates_g8.update_layout(
-        title="Leitzinsen der G8 im Vergleich",
-        yaxis_title="Zinssatz (%)",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#7d7d8a", size=10),
-        xaxis=dict(showgrid=False, linecolor="#1f2026"),
-        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
-        height=320,
-        margin=dict(l=10, r=10, t=40, b=10)
-    )
-    st.plotly_chart(fig_rates_g8, use_container_width=True)
-    
-    # Table comparing the rates + bps changes
-    rates_rows = []
-    for curr, data in rates_data.items():
-        change_val = data["bps_change"]
-        change_emoji = "🟢" if change_val > 0 else "🔴" if change_val < 0 else "🟡"
-        change_str = f"{change_val:+d} bps {change_emoji}"
+    with sub_fund1:
+        sel_curr = st.selectbox("Wähle eine Währung zur Detailanalyse:", list(CURRENCIES.keys()), index=0, key="fund_analysis_curr")
+        details = compute_currency_details(sel_curr)
         
-        rates_rows.append({
-            "Zentralbank": f"{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})",
-            "Leitzins": f"{data['rate']:.2f}%",
-            "Änderung zum Vormonat": change_str,
-            "Quelle": data['source']
-        })
+        st.write(f"### Detaillierte Kennzahlen für {CURRENCIES[sel_curr]['flag']} {sel_curr} ({CURRENCIES[sel_curr]['name']})")
         
-    df_rates = pd.DataFrame(rates_rows)
-    st.dataframe(df_rates, hide_index=True, use_container_width=True)
-    st.markdown("<div class='source-tag'>Quelle: FRED, ECB Portal, SNB Portal & Zins-Kontrollzentrum</div>", unsafe_allow_html=True)
+        col_cat1, col_cat2, col_cat3, col_cat4, col_cat5 = st.columns(5)
+        with col_cat1:
+            st.metric("Geldpolitik", format_score_with_emoji(details["Geldpolitik"]))
+        with col_cat2:
+            st.metric("Inflation", format_score_with_emoji(details["Inflation"]))
+        with col_cat3:
+            st.metric("Arbeitsmarkt", format_score_with_emoji(details["Arbeitsmarkt"]))
+        with col_cat4:
+            st.metric("PMI", format_score_with_emoji(details["PMI"]))
+        with col_cat5:
+            st.metric("GDP", format_score_with_emoji(details["GDP"]))
+            
+        st.subheader("📊 Zeitreihen & Entwicklungs-Trend")
+        
+        macro_series = {
+            "2Y Rendite": YIELD_SERIES[sel_curr],
+            "Verbraucherpreise (CPI)": CPI_SERIES.get(sel_curr, "CPIAUCSL"),
+            "Arbeitslosenquote": UNEMP_SERIES.get(sel_curr, "UNRATE"),
+            "BIP (GDP)": GDP_SERIES.get(sel_curr, "GDPC1")
+        }
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        trend_rows = []
+        for name, series_id in macro_series.items():
+            v_now, v_1m, v_3m, v_6m = get_historical_indicator_values(series_id, today_str, FRED_KEY)
+            
+            if v_now is not None and v_1m is not None:
+                diff_1m = v_now - v_1m
+                trend_str = "Verbessert 🟢" if diff_1m > 0 else "Verschlechtert 🔴" if diff_1m < 0 else "Neutral 🟡"
+                if "Arbeitslosenquote" in name:
+                    trend_str = "Verbessert 🟢" if diff_1m < 0 else "Verschlechtert 🔴" if diff_1m > 0 else "Neutral 🟡"
+            else:
+                trend_str = "N/A"
+                
+            def fmt_val(v):
+                return f"{v:.2f}%" if v is not None else "N/A"
+                
+            trend_rows.append({
+                "Indikator": name,
+                "Aktuell": fmt_val(v_now),
+                "Vor 1 Monat": fmt_val(v_1m),
+                "Vor 3 Monaten": fmt_val(v_3m),
+                "Vor 6 Monaten": fmt_val(v_6m),
+                "Trend (MoM)": trend_str
+            })
+            
+        df_trends = pd.DataFrame(trend_rows)
+        st.dataframe(df_trends, hide_index=True, use_container_width=True)
 
-# ----------------- TAB 4: ANALYSTEN-KONSENS -----------------
-with tab4:
-    st.header("📊 Analysten-Konsens & Kursziele")
-    st.caption(f"Konsens-Ratings und Kursziele für das Währungspaar **{selected_pair}**.")
-    
-    # Fetch Finnhub data
-    finnhub_data, t_finnhub, is_live_finnhub = get_finnhub_data(selected_pair, FINNHUB_KEY)
-    st.sidebar.caption(f"**Finnhub:** {format_freshness(t_finnhub)} ({'Live' if is_live_finnhub else 'Demo'})")
-    
-    c_col1, c_col2 = st.columns([1, 1.2])
-    with c_col1:
-        st.subheader("Ratings-Verteilung")
-        labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
-        counts = [
-            finnhub_data.get("strongBuy", 0),
-            finnhub_data.get("buy_only", 0) or finnhub_data.get("buy", 0),
-            finnhub_data.get("hold", 0),
-            finnhub_data.get("sell_only", 0) or finnhub_data.get("sell", 0),
-            finnhub_data.get("strongSell", 0)
-        ]
+    with sub_fund2:
+        st.subheader("🏦 Zentralbank-Zinssätze & Zinsdifferenz")
         
-        fig_finnhub = go.Figure(data=[go.Bar(
-            x=labels,
-            y=counts,
-            marker_color=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
-            text=counts,
-            textposition='auto'
-        )])
-        fig_finnhub.update_layout(
+        rates_data = {}
+        for curr, info in CURRENCIES.items():
+            r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
+            rates_data[curr] = {
+                "rate": r_val,
+                "bps_change": bps_chg,
+                "source": src
+            }
+            
+        df_rates_plot = pd.DataFrame([
+            {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
+            for curr, data in rates_data.items()
+        ])
+        
+        fig_rates_g8 = go.Figure()
+        fig_rates_g8.add_trace(go.Bar(
+            x=df_rates_plot["Zentralbank"],
+            y=df_rates_plot["Zinssatz"],
+            marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
+            text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
+            textposition='auto',
+            name="Zinssatz"
+        ))
+        fig_rates_g8.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(color="#7d7d8a", size=10),
             xaxis=dict(showgrid=False, linecolor="#1f2026"),
             yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
-            height=280,
+            height=320,
             margin=dict(l=10, r=10, t=10, b=10)
         )
-        st.plotly_chart(fig_finnhub, use_container_width=True)
+        st.plotly_chart(fig_rates_g8, use_container_width=True)
         
-    with c_col2:
-        st.subheader("Konsens-Kursziele")
-        avg_t = finnhub_data["target_mean"]
-        high_t = finnhub_data["target_high"]
-        low_t = finnhub_data["target_low"]
-        
-        t_col1, t_col2 = st.columns(2)
-        with t_col1:
-            st.metric("Mittleres Kursziel", f"{avg_t:.4f}" if avg_t else "N/A")
-            st.metric("Höchstes Kursziel", f"{high_t:.4f}" if high_t else "N/A")
-        with t_col2:
-            st.metric("Aktueller Kurs (iTick)", f"{latest_close:.4f}" if latest_close else "N/A")
-            st.metric("Tiefstes Kursziel", f"{low_t:.4f}" if low_t else "N/A")
+        rates_rows = []
+        for curr, data in rates_data.items():
+            change_val = data["bps_change"]
+            change_emoji = "🟢" if change_val > 0 else "🔴" if change_val < 0 else "🟡"
+            change_str = f"{change_val:+d} bps {change_emoji}"
             
-    st.subheader("Letzte Ratings-Änderungen")
-    df_ratings = pd.DataFrame(finnhub_data["history"])
-    if not df_ratings.empty:
-        st.dataframe(df_ratings, use_container_width=True, hide_index=True)
-    else:
-        st.info("Keine Rating-Historie verfügbar.")
-        
-    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_finnhub else ''}'>Quelle: Finnhub</div>", unsafe_allow_html=True)
+            rates_rows.append({
+                "Zentralbank": f"{CURRENCIES[curr]['flag']} {curr} ({CURRENCIES[curr]['name']})",
+                "Leitzins": f"{data['rate']:.2f}%",
+                "Änderung zum Vormonat": change_str,
+                "Quelle": data['source']
+            })
+            
+        df_rates = pd.DataFrame(rates_rows)
+        st.dataframe(df_rates, hide_index=True, use_container_width=True)
 
-# ----------------- TAB 5: SENTIMENT-SCORE -----------------
-with tab5:
-    st.header("🧠 Markt-Sentiment (News Tonalität)")
-    st.caption(f"Berechnetes News-Sentiment (-10 bis +10) für das Paar **{selected_pair}** basierend auf künstlicher Intelligenz.")
-    
-    sent_val, t_sent, is_live_sent = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
-    st.sidebar.caption(f"**StockData:** {format_freshness(t_sent)} ({'Live' if is_live_sent else 'Demo'})")
-    
-    fig_gauge = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = sent_val,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': f"Sentiment Score: {selected_pair}", 'font': {'size': 16, 'color': "#f0f0f5"}},
-        gauge = {
-            'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
-            'bar': {'color': "#1f2026"},
-            'bgcolor': "rgba(0,0,0,0)",
-            'borderwidth': 1,
-            'bordercolor': "#1f2026",
-            'steps': [
-                {'range': [-10, -3.5], 'color': 'rgba(239, 68, 68, 0.15)'},
-                {'range': [-3.5, 3.5], 'color': 'rgba(226, 177, 60, 0.1)'},
-                {'range': [3.5, 10], 'color': 'rgba(16, 185, 129, 0.15)'}
-            ],
-            'threshold': {
-                'line': {'color': "#ffd166", 'width': 3},
-                'thickness': 0.75,
-                'value': sent_val
+    with sub_fund3:
+        st.subheader("📊 Einkaufsmanagerindizes (PMI)")
+        st.caption("PMI-Werte (Manufacturing & Services) als Frühindikatoren der wirtschaftlichen Aktivität.")
+        
+        with st.spinner("Lade PMI-Daten..."):
+            pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
+            
+        if pmi_data:
+            code_to_name = {
+                "USD": "🇺🇸 USA",
+                "EUR": "🇪🇺 Euro",
+                "GBP": "🇬🇧 UK",
+                "CHF": "🇨🇭 Schweiz",
+                "CAD": "🇨🇦 Kanada",
+                "AUD": "🇦🇺 Australien",
+                "NZD": "🇳🇿 Neuseeland",
+                "JPY": "🇯🇵 Japan"
             }
-        }
-    ))
-    fig_gauge.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#7d7d8a"),
-        height=320,
-        margin=dict(l=20, r=20, t=50, b=20)
-    )
-    st.plotly_chart(fig_gauge, use_container_width=True)
-    
-    st.markdown("#### Sentiment-Einordnung:")
-    if sent_val >= 3.5:
-        st.success(f"🟢 **Bullish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend positiv für das Währungspaar.")
-    elif sent_val <= -3.5:
-        st.error(f"🔴 **Bearish ({sent_val:+.1f})** – Die News-Berichterstattung ist überwiegend negativ für das Währungspaar.")
-    else:
-        st.warning(f"🟡 **Neutral ({sent_val:+.1f})** – Ausgeglichene Tonalität im News-Umfeld.")
-        
-    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_sent else ''}'>Quelle: StockData.org</div>", unsafe_allow_html=True)
-
-# ----------------- TAB 6: KORRELATIONSMATRIX -----------------
-with tab6:
-    st.header("🧮 30-Tage Korrelationsmatrix")
-    st.caption("Vergleichende Korrelations-Heatmap aller Major-Währungspaare (berechnet aus FCS API-Preishistorien).")
-    
-    df_corr, t_corr, is_live_corr = get_fcs_correlation_data(FCS_KEY)
-    st.sidebar.caption(f"**FCS API:** {format_freshness(t_corr)} ({'Live' if is_live_corr else 'Demo'})")
-    
-    fig_heatmap = px.imshow(
-        df_corr,
-        text_auto=".2f",
-        aspect="auto",
-        color_continuous_scale=px.colors.diverging.RdBu_r,
-        range_color=[-1, 1]
-    )
-    fig_heatmap.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#7d7d8a", size=10),
-        height=400,
-        margin=dict(l=10, r=10, t=10, b=10)
-    )
-    st.plotly_chart(fig_heatmap, use_container_width=True)
-    
-    st.info("💡 Werte nahe +1.0 bedeuten starke Gleichlauf-Korrelation. Werte nahe -1.0 bedeuten starke Gegenlauf-Korrelation.")
-    st.markdown(f"<div class='source-tag {'source-tag-live' if is_live_corr else ''}'>Quelle: FCS API</div>", unsafe_allow_html=True)
-
-# ----------------- TAB 7: LANGFRISTIGE HISTORIE -----------------
-with tab7:
-    st.header("📈 Langfristige Historie & Zyklen (seit 1995)")
-    st.caption(f"Langfristiger Kursverlauf ab 1995 zur Analyse übergeordneter wirtschaftlicher Zyklen.")
-    
-    major_pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
-    
-    hist_pair = st.selectbox("Historisches Paar wählen", options=major_pairs, index=major_pairs.index(selected_pair) if selected_pair in major_pairs else 0, key="hist_pair_select")
-        
-    df_hist = pd.DataFrame()
-    is_live_hist = False
-    source_label = "FCS API"
-    
-    df_hist, t_hist, is_live_hist = get_fcs_history_data(hist_pair, FCS_KEY)
             
-    if df_hist is not None and not df_hist.empty:
-        fig_hist = go.Figure()
-        fig_hist.add_trace(go.Scatter(
-            x=df_hist["date"], y=df_hist["close"],
-            line=dict(color="#e2b13c", width=2),
-            name="Schlusskurs"
+            rows = []
+            for code, data in pmi_data.items():
+                m_val = data["m_last"]
+                m_prev = data["m_prev"]
+                s_val = data["s_last"]
+                s_prev = data["s_prev"]
+                
+                m_chg = m_val - m_prev if (m_val is not None and m_prev is not None) else None
+                s_chg = s_val - s_prev if (s_val is not None and s_prev is not None) else None
+                
+                if m_val is not None:
+                    m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
+                    m_arrow = "▲" if (m_chg is not None and m_chg > 0) else "▼" if (m_chg is not None and m_chg < 0) else "▬"
+                    m_str = f"{m_val:.1f} {m_arrow} {m_status}"
+                else:
+                    m_str = "N/A"
+                    
+                if s_val is not None:
+                    s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
+                    s_arrow = "▲" if (s_chg is not None and s_chg > 0) else "▼" if (s_chg is not None and s_chg < 0) else "▬"
+                    s_str = f"{s_val:.1f} {s_arrow} {s_status}"
+                else:
+                    s_str = "N/A"
+                    
+                changes = []
+                if m_chg is not None: changes.append(m_chg)
+                if s_chg is not None: changes.append(s_chg)
+                    
+                if changes:
+                    avg_chg = sum(changes) / len(changes)
+                    c_arrow = "▲" if avg_chg > 0 else "▼" if avg_chg < 0 else "▬"
+                    c_str = f"{c_arrow} {avg_chg:+.1f}"
+                else:
+                    c_str = "N/A"
+                    
+                m_ref = data["m_ref"] or "N/A"
+                s_ref = data["s_ref"] or "N/A"
+                ref_str = m_ref if m_ref != "N/A" else s_ref
+                
+                rows.append({
+                    "Land": code_to_name.get(code, code),
+                    "Manufacturing PMI": m_str,
+                    "Services PMI": s_str,
+                    "Veränderung zum Vormonat": c_str,
+                    "Letzte Aktualisierung": ref_str,
+                    "m_sort_val": m_val if m_val is not None else -999.0
+                })
+                
+            df_pmi = pd.DataFrame(rows)
+            df_pmi = df_pmi.sort_values(by="m_sort_val", ascending=False)
+            df_render = df_pmi.drop(columns=["m_sort_val"]).reset_index(drop=True)
+            
+            def apply_colors(val):
+                val_str = str(val)
+                if "Expansion" in val_str or "▲" in val_str:
+                    return "color: #10b981; font-weight: bold;"
+                elif "Kontraktion" in val_str or "▼" in val_str:
+                    return "color: #ef4444; font-weight: bold;"
+                return ""
+                
+            styled_df = df_render.style
+            try:
+                styled_df = styled_df.map(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+            except AttributeError:
+                styled_df = styled_df.applymap(apply_colors, subset=["Manufacturing PMI", "Services PMI", "Veränderung zum Vormonat"])
+                
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("PMI-Daten momentan nicht verfügbar")
+
+# ----------------- TAB 4: FX PAIR ANALYSIS -----------------
+with tab4:
+    st.header("💱 FX Pair Analysis")
+    st.caption("Vergleichende Analyse und detailreicher Stärken-Schwächen-Report.")
+    
+    col_pa1, col_pa2 = st.columns(2)
+    with col_pa1:
+        base_sel = st.selectbox("Basis-Währung (Base)", list(CURRENCIES.keys()), index=0, key="base_pair_sel")
+    with col_pa2:
+        quote_sel = st.selectbox("Quote-Währung (Quote)", list(CURRENCIES.keys()), index=1, key="quote_pair_sel")
+        
+    if base_sel == quote_sel:
+        st.warning("Bitte zwei unterschiedliche Währungen auswählen.")
+    else:
+        b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime(base_sel)
+        q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime(quote_sel)
+        
+        diff = b_score - q_score
+        
+        st.write(f"### relative Stärken & Schwächen: {base_sel} vs {quote_sel}")
+        
+        col_pb1, col_pb2 = st.columns(2)
+        with col_pb1:
+            st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Details")
+            st.metric("Gesamt-Score", f"{b_score:+.1f}", delta=f"Regime: {b_reg}")
+            st.markdown("**Stärken:**")
+            for b in explain_currency_score_bullets(base_sel):
+                if b.startswith("+"):
+                    st.write(b)
+            st.markdown("**Belastende Faktoren:**")
+            for b in explain_currency_score_bullets(base_sel):
+                if b.startswith("-"):
+                    st.write(b)
+        with col_pb2:
+            st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Details")
+            st.metric("Gesamt-Score", f"{q_score:+.1f}", delta=f"Regime: {q_reg}")
+            st.markdown("**Stärken:**")
+            for b in explain_currency_score_bullets(quote_sel):
+                if b.startswith("+"):
+                    st.write(b)
+            st.markdown("**Belastende Faktoren:**")
+            for b in explain_currency_score_bullets(quote_sel):
+                if b.startswith("-"):
+                    st.write(b)
+
+# ----------------- TAB 5: MARKET REGIME -----------------
+with tab5:
+    st.header("🌐 Market Regime & Risikoindikatoren")
+    st.caption("Globale Marktphase, Volatilität (VIX), Rohstoffe und Risikosensitivität.")
+    
+    # Global market regime detection
+    vix = get_vix_value()
+    cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+    gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+    
+    if vix > 22.0:
+        current_regime = "Risk-Off 🛡️"
+        regime_desc = "Erhöhte Volatilität und Risikoaversion. Sichere Häfen (USD, CHF, JPY) tendieren zur Stärke."
+    elif vix < 14.0 and gdp_us > 1.5:
+        current_regime = "Risk-On / Inflationary Growth 🚀"
+        regime_desc = "Risikobereitschaft am Markt ist hoch. Wachstums- und Rohstoffwährungen (AUD, NZD, CAD) sind gefragt."
+    elif cpi_us > 3.0 and gdp_us < 1.0:
+        current_regime = "Stagflation ⚠️"
+        regime_desc = "Hohe Inflation bei stagnierendem Wirtschaftswachstum. Schwieriges Umfeld für Risikoanlagen."
+    elif cpi_us < 1.5 and gdp_us < 1.0:
+        current_regime = "Deflationary Slowdown 📉"
+        regime_desc = "Niedrige Inflation und abkühlende Wirtschaft. Deflationsrisiko; Zinsen sinken tendenziell."
+    else:
+        current_regime = "Normales Marktregime 🟡"
+        regime_desc = "Standard-Marktumfeld ohne extreme Risikoverteilungen."
+        
+    col_reg1, col_reg2 = st.columns([1, 2])
+    with col_reg1:
+        st.markdown(f"""
+        <div style="background-color:#14161d; border:1px solid #1f2026; padding:30px; border-radius:8px; text-align:center;">
+            <span style="color:#7d7d8a; font-size:0.9rem; text-transform:uppercase; font-weight:600;">Aktuelles Regime</span>
+            <div style="font-size:1.8rem; font-weight:700; color:#e2b13c; margin:15px 0;">{current_regime}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_reg2:
+        st.markdown("### Regime-Interpretation")
+        st.write(regime_desc)
+        st.write(f"- **VIX Index:** `{vix:.2f}`")
+        st.write(f"- **US CPI YoY:** `{cpi_us:.2f}%`")
+        st.write(f"- **US GDP YoY:** `{gdp_us:.2f}%`")
+        
+    st.write("")
+    st.subheader("🛍️ Rohstoffpreise & Marktindizes")
+    
+    apifreaks_data = get_apifreaks_prices(APIFREAKS_KEY)
+    
+    def resolve_commodity(ticker_apifreaks, ticker_tiingo):
+        if apifreaks_data:
+            rates = apifreaks_data.get("rates", {})
+            rate_val = rates.get(ticker_apifreaks)
+            if rate_val is not None:
+                try:
+                    val = float(rate_val)
+                    return {"close": val, "high": val, "low": val, "date": datetime.now().strftime("%Y-%m-%d"), "source": "APIFreaks"}
+                except Exception:
+                    pass
+        if TIINGO_KEY:
+            tiingo_res = get_tiingo_prices(ticker_tiingo, TIINGO_KEY)
+            if tiingo_res:
+                return {"close": tiingo_res.get("close"), "high": tiingo_res.get("high"), "low": tiingo_res.get("low"), "date": tiingo_res.get("date", ""), "source": "Tiingo"}
+        return None
+
+    gld_data = resolve_commodity("XAU", "GLD")
+    slv_data = resolve_commodity("XAG", "SLV")
+    uso_data = resolve_commodity("WTIOIL-SPOT", "USO")
+    vix_data = resolve_commodity("VIX", "VIXY")
+    
+    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+    def render_simple_card(col, name, data, emoji):
+        with col:
+            if data:
+                close = data.get("close")
+                st.metric(f"{emoji} {name}", f"${close:.2f}")
+            else:
+                st.metric(f"{emoji} {name}", "N/A")
+                
+    render_simple_card(col_c1, "Gold", gld_data, "🟡")
+    render_simple_card(col_c2, "Silber", slv_data, "⚪")
+    render_simple_card(col_c3, "WTI Öl", uso_data, "🛢️")
+    render_simple_card(col_c4, "VIX Index", vix_data, "📈")
+    
+    st.write("")
+    st.subheader("⚖️ Währungs-Rating bezüglich Rohstoffen & Risiko")
+    
+    risk_ratings = []
+    vix_val = vix_data.get("close", 15.0) if vix_data else 15.0
+    for curr in CURRENCIES.keys():
+        if vix_val > 22.0:
+            rating = "Positiv 🟢 (Safe Haven)" if curr in ["USD", "CHF", "JPY"] else "Negativ 🔴 (Risk-Off)"
+        else:
+            rating = "Positiv 🟢 (Risk-On / Rohstoffe)" if curr in ["AUD", "NZD", "CAD"] else "Neutral 🟡"
+        risk_ratings.append({"Währung": f"{CURRENCIES[curr]['flag']} {curr}", "Zustand / Rating": rating})
+        
+    df_ratings = pd.DataFrame(risk_ratings)
+    st.dataframe(df_ratings, hide_index=True, use_container_width=True)
+
+# ----------------- TAB 6: POSITIONING & SENTIMENT -----------------
+with tab6:
+    st.header("📍 Positioning & Sentiment")
+    st.caption("Netto-Spekulanten-Positionierung der G10-Währungen aus dem Commitment of Traders Report und sentimentanalytische Indikatoren.")
+    
+    st.subheader("🛍️ COT Netto-Positionierung (Percentile)")
+    cot_rows = []
+    for curr in CURRENCIES.keys():
+        try:
+            percentile = get_latest_cot_percentile(curr)
+            warning_str = ""
+            if percentile > 80.0:
+                warning_str = "⚠️ Extrem bullish (Überkauft)"
+            elif percentile < 20.0:
+                warning_str = "⚠️ Extrem bearish (Überverkauft)"
+            else:
+                warning_str = "Gesund"
+                
+            cot_rows.append({
+                "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
+                "Status / Warnung": warning_str
+            })
+        except Exception:
+            pass
+            
+    if cot_rows:
+        df_cot = pd.DataFrame(cot_rows)
+        st.dataframe(df_cot, hide_index=True, use_container_width=True)
+    else:
+        st.info("COT Daten zur Zeit nicht geladen.")
+        
+    st.write("")
+    st.subheader("🧠 Sentiment-Entwicklung")
+    sent_val, _, _ = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
+    
+    col_sent1, col_sent2 = st.columns([1.5, 1])
+    with col_sent1:
+        fig_gauge = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = sent_val,
+            domain = {'x': [0, 1], 'y': [0, 1]},
+            title = {'text': f"Sentiment Score: {selected_pair}", 'font': {'size': 16, 'color': "#f0f0f5"}},
+            gauge = {
+                'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
+                'bar': {'color': "#1f2026"},
+                'bgcolor': "rgba(0,0,0,0)",
+                'borderwidth': 1,
+                'bordercolor': "#1f2026",
+                'steps': [
+                    {'range': [-10, -3.5], 'color': 'rgba(239, 68, 68, 0.15)'},
+                    {'range': [-3.5, 3.5], 'color': 'rgba(226, 177, 60, 0.1)'},
+                    {'range': [3.5, 10], 'color': 'rgba(16, 185, 129, 0.15)'}
+                ],
+                'threshold': {
+                    'line': {'color': "#ffd166", 'width': 3},
+                    'thickness': 0.75,
+                    'value': sent_val
+                }
+            }
         ))
-        fig_hist.update_layout(
-            title=f"Historischer Langzeit-Kurs ({hist_pair})",
-            xaxis_title="Datum",
-            yaxis_title="Kurs",
-            xaxis=dict(
-                rangeslider=dict(visible=True),
-                type="date",
-                linecolor="#1f2026",
-                showgrid=True,
-                gridcolor='rgba(128,128,128,0.04)'
-            ),
-            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.04)', linecolor="#1f2026"),
+        fig_gauge.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color="#7d7d8a"),
+            height=280,
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        st.plotly_chart(fig_gauge, use_container_width=True)
+    with col_sent2:
+        st.write("")
+        st.write("")
+        st.markdown("#### Tonalitätseinordnung:")
+        if sent_val >= 3.5:
+            st.success(f"🟢 **Bullish ({sent_val:+.1f})** – Tonalität im News-Umfeld vorwiegend positiv.")
+        elif sent_val <= -3.5:
+            st.error(f"🔴 **Bearish ({sent_val:+.1f})** – Tonalität im News-Umfeld vorwiegend negativ.")
+        else:
+            st.warning(f"🟡 **Neutral ({sent_val:+.1f})** – Ausgeglichenes Sentiment.")
+
+# ----------------- TAB 7: HISTORICAL & QUANT RESEARCH -----------------
+with tab7:
+    st.header("📈 Historical & Quant Research")
+    st.caption("Research-Umgebung zur Evaluierung historischer Markt-Divergenzen und statistischer Korrelationen.")
+    
+    st.subheader("Score-Verlauf & Divergenz-Analyse")
+    
+    hist_col1, hist_col2, hist_col3 = st.columns(3)
+    with hist_col1:
+        hist_base = st.selectbox("Basiswährung (Base)", options=list(CURRENCIES.keys()), index=0, key="hist_base_research")
+    with hist_col2:
+        hist_quote = st.selectbox("Quote-Währung (Quote)", options=list(CURRENCIES.keys()), index=1, key="hist_quote_research")
+    with hist_col3:
+        hist_date = st.date_input("Forschungs-Datum", value=datetime.now().date() - timedelta(days=180), key="hist_date_research")
+        
+    if st.button("🔍 Historischen Kontext abrufen"):
+        target_date_str = hist_date.strftime("%Y-%m-%d")
+        base_score_h = compute_currency_score_historical(hist_base, target_date_str)
+        quote_score_h = compute_currency_score_historical(hist_quote, target_date_str)
+        
+        col_res1, col_res2 = st.columns(2)
+        with col_res1:
+            st.metric(f"{hist_base} Score am {target_date_str}", f"{base_score_h:.1f}")
+        with col_res2:
+            st.metric(f"{hist_quote} Score am {target_date_str}", f"{quote_score_h:.1f}")
+            
+    st.write("")
+    st.subheader("🧮 Preiskorrelationen der Major-Währungspaare (30 Tage)")
+    df_corr, _, _ = get_fcs_correlation_data(FCS_KEY)
+    if df_corr is not None:
+        fig_heatmap = px.imshow(
+            df_corr,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale=px.colors.diverging.RdBu_r,
+            range_color=[-1, 1]
+        )
+        fig_heatmap.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(color="#7d7d8a", size=10),
-            height=450,
-            margin=dict(l=10, r=10, t=40, b=10)
+            height=380,
+            margin=dict(l=10, r=10, t=10, b=10)
         )
-        st.plotly_chart(fig_hist, use_container_width=True)
-    else:
-        st.warning("Keine langfristigen Historien-Daten verfügbar.")
+        st.plotly_chart(fig_heatmap, use_container_width=True)
         
-    st.markdown(f"<div class='source-tag'>Quelle: {source_label}</div>", unsafe_allow_html=True)
-    
+    st.write("")
     st.subheader("📊 Länder-Fundamentaldaten (World Bank)")
     
-    # Map currencies to correct ISO codes for World Bank:
     wb_iso_map = {
         "USD": "USA",
         "EUR": "DEU",
@@ -4383,1072 +4454,98 @@ with tab7:
     if has_any_data:
         df_macro_eod = pd.DataFrame(rows_macro)
         st.dataframe(df_macro_eod, use_container_width=True, hide_index=True)
-    else:
-        st.info("Daten momentan nicht verfügbar")
 
-# ----------------- TAB 8: ROHSTOFFE & MÄRKTE -----------------
+# ----------------- TAB 8: DATA EXPLORER -----------------
 with tab8:
-    st.header("🛍️ Rohstoffe & Märkte")
-    st.caption("Aktuelle Rohstoffpreise und Volatilität (VIX) geladen über APIFreaks (primär) oder Tiingo (Fallback).")
+    st.header("🛠 Data Explorer & API Status")
+    st.caption("Technische Diagnose der geladenen Datenreihen, API-Verbindungen und Analysten-Konsens.")
     
-    if not APIFREAKS_KEY and not TIINGO_KEY:
-        st.warning("Bitte konfigurieren Sie APIFREAKS_API_KEY oder TIINGO_API_KEY in den Streamlit Secrets oder der .env-Datei.")
-    else:
-        if not APIFREAKS_KEY:
-            st.warning("⚠️ **APIFreaks API-Key fehlt:** Fügen Sie `APIFREAKS_API_KEY` in den Streamlit Cloud Secrets hinzu, um Spot-Preise zu nutzen. Aktuell wird Tiingo (ETF-Preise) als Fallback genutzt.")
-        # 1. Fetch APIFreaks data
-        apifreaks_data = get_apifreaks_prices(APIFREAKS_KEY)
-        
-        # 2. Extract or fall back for each commodity
-        def resolve_commodity(ticker_apifreaks, ticker_tiingo):
-            if apifreaks_data:
-                rates = apifreaks_data.get("rates", {})
-                rate_val = rates.get(ticker_apifreaks)
-                if rate_val is not None:
-                    try:
-                        val = float(rate_val)
-                        return {
-                            "close": val,
-                            "high": val,
-                            "low": val,
-                            "date": apifreaks_data.get("date", "") or datetime.now().strftime("%Y-%m-%d"),
-                            "source": "APIFreaks",
-                            "is_etf": False
-                        }
-                    except (ValueError, TypeError):
-                        pass
-            
-            if TIINGO_KEY:
-                tiingo_res = get_tiingo_prices(ticker_tiingo, TIINGO_KEY)
-                if tiingo_res:
-                    return {
-                        "close": tiingo_res.get("close"),
-                        "high": tiingo_res.get("high"),
-                        "low": tiingo_res.get("low"),
-                        "date": tiingo_res.get("date", ""),
-                        "source": "Tiingo",
-                        "is_etf": True
-                    }
-            return None
-
-        gld_data = resolve_commodity("XAU", "GLD")
-        slv_data = resolve_commodity("XAG", "SLV")
-        uso_data = resolve_commodity("WTIOIL-SPOT", "USO")
-        bno_data = resolve_commodity("BRENTOIL-SPOT", "BNO")
-        vix_data = resolve_commodity("VIX", "VIXY")
-
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        def display_commodity_card(col, name, data, flag):
-            with col:
-                if data:
-                    close = data.get("close")
-                    high = data.get("high")
-                    low = data.get("low")
-                    date_str = data.get("date", "")[:10]
-                    src = data.get("source", "Tiingo")
-                    suffix = " (ETF)" if data.get("is_etf", False) else " (Spot)"
-                    
-                    # Formatting values safely
-                    close_str = f"${close:.2f}" if close is not None else "Daten momentan nicht verfügbar"
-                    high_str = f"${high:.2f}" if high is not None else "N/A"
-                    low_str = f"${low:.2f}" if low is not None else "N/A"
-                    
-                    st.markdown(f"""
-                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                        <span class="metric-label">{flag} {name}{suffix}</span>
-                        <div class="metric-value">{close_str}</div>
-                        <div style="font-size:0.8rem; color:#7d7d8a; margin-top:5px;">
-                            High: {high_str} | Low: {low_str}<br>
-                            Datum: {date_str}
-                        </div>
-                        <div class="source-tag">Quelle: {src}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="metric-card-custom" style="border-left: 4px solid #ef4444;">
-                        <span class="metric-label">{flag} {name}</span>
-                        <div class="metric-value" style="font-size: 0.95rem; color:#7d7d8a;">Daten momentan nicht verfügbar</div>
-                        <div class="source-tag">Quelle: APIFreaks / Tiingo</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-        display_commodity_card(col1, "Gold", gld_data, "🟡")
-        display_commodity_card(col2, "Silber", slv_data, "⚪")
-        display_commodity_card(col3, "WTI Öl", uso_data, "🛢️")
-        display_commodity_card(col4, "Brent Öl", bno_data, "🛢️")
-        display_commodity_card(col5, "VIX Index", vix_data, "📈")
-
-# ----------------- TAB 9: US-ARBEITSMARKT (BLS) -----------------
-with tab9:
-    st.header("🇺🇸 US-Arbeitsmarkt (BLS)")
-    st.caption("Detaillierte US-Arbeitsmarktdaten geladen direkt von der Bureau of Labor Statistics (BLS) Public Data API.")
+    api_health = [
+        {"API / Datenquelle": "FRED API", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (Fallback Demodaten)"},
+        {"API / Datenquelle": "Finnhub API", "Status": "Aktiv 🟢" if FINNHUB_KEY else "Inaktiv 🔴 (Fallback Demodaten)"},
+        {"API / Datenquelle": "StockData Sentiment", "Status": "Aktiv 🟢" if STOCKDATA_KEY else "Inaktiv 🔴 (Fallback Demodaten)"},
+        {"API / Datenquelle": "FCS Price Data", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (Fallback Demodaten)"},
+        {"API / Datenquelle": "IMF DataMapper", "Status": "Aktiv 🟢 (Direktverbindung)"},
+        {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
+        {"API / Datenquelle": "OECD Leading Indicators", "Status": "Aktiv 🟢 (Direktverbindung)"}
+    ]
     
-    if not BLS_KEY:
-        st.warning("BLS API-Key fehlt in der .env-Datei. Bitte konfigurieren Sie BLS_API_KEY.")
-    else:
-        bls_json = get_bls_data(BLS_KEY)
-        if not bls_json:
-            st.error("Daten momentan nicht verfügbar")
-        else:
-            df_nfp = parse_bls_series(bls_json, "CES0000000001")
-            df_wage = parse_bls_series(bls_json, "CES0500000003")
-            df_part = parse_bls_series(bls_json, "LNS11300000")
-            
-            if df_nfp.empty or df_wage.empty or df_part.empty:
-                st.error("Daten momentan nicht verfügbar")
-            else:
-                latest_nfp = df_nfp.iloc[-1]["value"]
-                nfp_change = 0.0
-                if len(df_nfp) > 1:
-                    nfp_change = latest_nfp - df_nfp.iloc[-2]["value"]
-                
-                latest_wage = df_wage.iloc[-1]["value"]
-                wage_change_pct = 0.0
-                if len(df_wage) > 1:
-                    wage_change_pct = ((latest_wage - df_wage.iloc[-2]["value"]) / df_wage.iloc[-2]["value"]) * 100
-                    
-                latest_part = df_part.iloc[-1]["value"]
-                part_change = 0.0
-                if len(df_part) > 1:
-                    part_change = latest_part - df_part.iloc[-2]["value"]
-                    
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown(f"""
-                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                        <span class="metric-label">Non-Farm Payrolls</span>
-                        <div class="metric-value">{latest_nfp:,.1f}K</div>
-                        <div style="font-size:0.85rem; color:{'#10b981' if nfp_change >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                            Change: {nfp_change:+.1f}K (Jobs)
-                        </div>
-                        <div class="source-tag">Quelle: BLS API</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col2:
-                    st.markdown(f"""
-                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                        <span class="metric-label">Durchschnittlicher Stundenlohn</span>
-                        <div class="metric-value">${latest_wage:.2f}</div>
-                        <div style="font-size:0.85rem; color:{'#10b981' if wage_change_pct >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                            MoM: {wage_change_pct:+.2f}%
-                        </div>
-                        <div class="source-tag">Quelle: BLS API</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col3:
-                    st.markdown(f"""
-                    <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                        <span class="metric-label">Erwerbsquote (Participation Rate)</span>
-                        <div class="metric-value">{latest_part:.1f}%</div>
-                        <div style="font-size:0.85rem; color:{'#10b981' if part_change >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                            Change: {part_change:+.2f}%
-                        </div>
-                        <div class="source-tag">Quelle: BLS API</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                df_nfp_12 = df_nfp.tail(12).copy()
-                df_nfp_12["MoM_Change"] = df_nfp_12["value"].diff()
-                df_nfp_12["MoM_Change"] = df_nfp_12["MoM_Change"].fillna(0.0)
-                
-                st.subheader("📈 Entwicklung der letzten 12 Monate")
-                
-                fig_nfp = px.bar(
-                    df_nfp_12,
-                    x="date",
-                    y="MoM_Change",
-                    title="NFP Monatliche Veränderung (in Tausend)",
-                    labels={"MoM_Change": "Netto-Stellenschaffung (k)", "date": "Datum"},
-                    color="MoM_Change",
-                    color_continuous_scale="RdYlGn",
-                    text_auto=".1f"
-                )
-                fig_nfp.update_layout(
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color="#7d7d8a", size=10),
-                    xaxis=dict(showgrid=False),
-                    yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
-                    height=300
-                )
-                st.plotly_chart(fig_nfp, use_container_width=True)
-                
-                col_c1, col_c2 = st.columns(2)
-                with col_c1:
-                    fig_wages = px.line(
-                        df_wage.tail(12),
-                        x="date",
-                        y="value",
-                        title="Stundenlöhne ($/Std)",
-                        labels={"value": "Durchschnittlicher Stundenlohn ($)", "date": "Datum"},
-                        markers=True
-                    )
-                    fig_wages.update_traces(line_color="#10b981")
-                    fig_wages.update_layout(
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color="#7d7d8a", size=10),
-                        xaxis=dict(showgrid=False),
-                        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
-                        height=250
-                    )
-                    st.plotly_chart(fig_wages, use_container_width=True)
-                with col_c2:
-                    fig_part = px.line(
-                        df_part.tail(12),
-                        x="date",
-                        y="value",
-                        title="Erwerbsquote (%)",
-                        labels={"value": "Quote (%)", "date": "Datum"},
-                        markers=True
-                    )
-                    fig_part.update_traces(line_color="#34d399")
-                    fig_part.update_layout(
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color="#7d7d8a", size=10),
-                        xaxis=dict(showgrid=False),
-                        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
-                        height=250
-                    )
-                    st.plotly_chart(fig_part, use_container_width=True)
-
-# ----------------- TAB 10: RISIKOINDIKATOREN (IMF) -----------------
-with tab10:
-    st.header("⚠️ Risikoindikatoren (IMF, World Bank & OECD)")
-    st.caption("Vergleich von Staatsverschuldung, Haushaltsdefizit, Leistungsbilanz (IMF DataMapper), Handelsbilanz (World Bank) und Composite Leading Indicators (OECD) für alle G8 Währungen.")
+    df_health = pd.DataFrame(api_health)
+    st.dataframe(df_health, hide_index=True, use_container_width=True)
     
-    rows_risk = []
-    for curr, info in CURRENCIES.items():
-        debt = get_latest_imf_value(curr, "GGXWDG_NGDP")
-        deficit = get_latest_imf_value(curr, "GGXCNL_NGDP")
-        ca = get_latest_imf_value(curr, "BCA_NGDPD")
-        tb = get_latest_worldbank_trade_balance(info["wb_code"])
-        
-        # Fetch OECD CLI
-        cli_data = get_latest_oecd_cli(curr)
-        if cli_data:
-            cli_val, cli_date = cli_data
-            if -15.0 <= cli_val <= 15.0:
-                cli_val = 100.0 + cli_val
-            trend_str = "über Trend" if cli_val > 100.0 else ("unter Trend" if cli_val < 100.0 else "auf Trend")
-            cli_str = f"{cli_val:.2f} ({trend_str}, {cli_date})"
-        else:
-            cli_str = "N/A"
-            
-        debt_str = f"{debt:.1f}%" if debt is not None else "Daten momentan nicht verfügbar"
-        deficit_str = f"{deficit:+.1f}%" if deficit is not None else "Daten momentan nicht verfügbar"
-        ca_str = f"{ca:+.1f}%" if ca is not None else "Daten momentan nicht verfügbar"
-        tb_str = f"{tb:+.1f}%" if tb is not None else "Daten momentan nicht verfügbar"
-        
-        rows_risk.append({
-            "Währung": f"{info['flag']} {curr}",
-            "Land/Region": info["country"],
-            "Staatsverschuldung (% BIP)": debt_str,
-            "Haushaltsdefizit (% BIP)": deficit_str,
-            "Leistungsbilanz (% BIP)": ca_str,
-            "Handelsbilanz (% BIP)": tb_str,
-            "OECD Leading Indicator (CLI)": cli_str
-        })
-        
-    df_risk = pd.DataFrame(rows_risk)
-    st.dataframe(df_risk, use_container_width=True, hide_index=True)
+    st.write("")
+    st.subheader("📋 Rohdaten & Aktualisierungsstand")
+    st.caption("Zuletzt gelesene Makro-Zeitreihen aus FRED:")
     
-    plot_data = []
-    for curr in CURRENCIES.keys():
-        debt = get_latest_imf_value(curr, "GGXWDG_NGDP")
-        if debt is not None:
-            plot_data.append({"Currency": curr, "Debt": debt})
-    if plot_data:
-        df_plot = pd.DataFrame(plot_data)
-        fig_debt = px.bar(
-            df_plot,
-            x="Currency",
-            y="Debt",
-            title="Staatsverschuldung im Vergleich (% des BIP)",
-            labels={"Debt": "Schuldenquote (% BIP)", "Currency": "Währung"},
-            color="Debt",
-            color_continuous_scale="Reds",
-            text_auto=".1f"
-        )
-        fig_debt.update_layout(
+    fred_series_list = []
+    for curr, s_id in YIELD_SERIES.items():
+        fred_series_list.append({"Kategorie": "2Y Rendite", "Währung": curr, "FRED Series ID": s_id})
+    for curr, s_id in CPI_SERIES.items():
+        fred_series_list.append({"Kategorie": "Inflation (CPI)", "Währung": curr, "FRED Series ID": s_id})
+    for curr, s_id in UNEMP_SERIES.items():
+        fred_series_list.append({"Kategorie": "Arbeitslosigkeit", "Währung": curr, "FRED Series ID": s_id})
+        
+    df_fred_series = pd.DataFrame(fred_series_list)
+    st.dataframe(df_fred_series, hide_index=True, use_container_width=True)
+    
+    st.write("")
+    st.subheader("📊 Analysten-Konsens & Kursziele")
+    st.caption("Analystenmeinungen und Ratings-Verteilung als Ergänzung (nicht in fundamentaler Score-Berechnung berücksichtigt).")
+    
+    finnhub_data, t_finnhub, is_live_finnhub = get_finnhub_data(selected_pair, FINNHUB_KEY)
+    
+    c_col1, c_col2 = st.columns([1, 1.2])
+    with c_col1:
+        st.write("**Ratings-Verteilung**")
+        labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
+        counts = [
+            finnhub_data.get("strongBuy", 0),
+            finnhub_data.get("buy_only", 0) or finnhub_data.get("buy", 0),
+            finnhub_data.get("hold", 0),
+            finnhub_data.get("sell_only", 0) or finnhub_data.get("sell", 0),
+            finnhub_data.get("strongSell", 0)
+        ]
+        
+        fig_finnhub = go.Figure(data=[go.Bar(
+            x=labels,
+            y=counts,
+            marker_color=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
+            text=counts,
+            textposition='auto'
+        )])
+        fig_finnhub.update_layout(
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(color="#7d7d8a", size=10),
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)'),
-            height=300
+            xaxis=dict(showgrid=False, linecolor="#1f2026"),
+            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
+            height=280,
+            margin=dict(l=10, r=10, t=10, b=10)
         )
-        st.plotly_chart(fig_debt, use_container_width=True)
+        st.plotly_chart(fig_finnhub, use_container_width=True)
         
-    st.markdown("<div class='source-tag'>Quelle: IMF DataMapper (Debt/Deficit/Current Account), World Bank (Trade Balance)</div>", unsafe_allow_html=True)
-
-# ----------------- TAB 11: NEWS & RESEARCH HUB -----------------
-with tab11:
-    st.header("📰 News & Research Hub")
-    st.caption(f"Aktuelle fundamentale Marktnachrichten für das Paar **{selected_pair}** mit thematischer Gruppierung.")
-    
-    default_q = get_default_query(base_curr, quote_curr)
-    search_q = st.text_input("🔍 Nachrichten durchsuchen", value=default_q, help="Nutze Stichworte wie Inflation, Leitzins, Fed, EZB etc.", key="news_search_query_input")
-    
-    if search_q:
-        with st.spinner("Suche aktuelle Nachrichten..."):
-            raw_articles, news_source, is_news_live, t_news, news_debug_logs = get_news_data_search(search_q, NEWSDATA_KEY, NEWSAPI_KEY)
-            st.sidebar.caption(f"**News Hub:** {format_freshness(t_news)} ({'Live' if is_news_live else 'Demo'})")
-            
-            news_articles = deduplicate_articles(raw_articles)
-            
-        with st.expander("🛠️ API-Verbindungsdetails & Debug-Logs", expanded=True):
-            for log in news_debug_logs:
-                if "erfolgreich" in log or "geladen" in log or "Zusammenfassung" in log or "vorhanden" in log:
-                    st.success(log)
-                elif "Fehler" in log or "fehlgeschlagen" in log or "fehlt" in log or "keine Daten" in log:
-                    st.error(log)
-                else:
-                    st.info(log)
-            
-        if not is_news_live:
-            st.warning(f"News-APIs momentan nicht verfügbar ({news_source}) – zeige Demo-Daten.")
-        elif news_articles:
-            st.info(f"Es wurden {len(news_articles)} relevante und einzigartige Artikel gefunden. (Aktiv: {news_source})")
-            
-            grouped_articles = {
-                "🏦 Geldpolitik & Zinsen": [],
-                "🚢 Import & Export": [],
-                "🌍 Länder-Analysen": [],
-                "📊 Sonstige Makro-News": []
-            }
-            
-            for art in news_articles:
-                cat = categorize_article(art)
-                grouped_articles[cat].append(art)
-                
-            sub_tabs = st.tabs([
-                "📋 Alle News", 
-                "🏦 Geldpolitik & Zinsen", 
-                "🚢 Import & Export", 
-                "🌍 Länder-Analysen", 
-                "📊 Sonstige Makro-News"
-            ])
-            
-            with sub_tabs[0]:
-                render_articles_grid(news_articles[:10])
-            with sub_tabs[1]:
-                render_articles_grid(grouped_articles["🏦 Geldpolitik & Zinsen"][:10])
-            with sub_tabs[2]:
-                render_articles_grid(grouped_articles["🚢 Import & Export"][:10])
-            with sub_tabs[3]:
-                render_articles_grid(grouped_articles["🌍 Länder-Analysen"][:10])
-            with sub_tabs[4]:
-                render_articles_grid(grouped_articles["📊 Sonstige Makro-News"][:10])
-        else:
-            st.warning("Keine aktuellen Nachrichten zu diesem Suchbegriff gefunden.")
-            
-    st.markdown("<div class='source-tag'>Quelle: NewsData.io & NewsAPI.org</div>", unsafe_allow_html=True)
-
-
-# ----------------- TAB 12: RISK-ON/OFF -----------------
-with tab12:
-    st.header("🛡️ Risk-On / Risk-Off Sentiment-Indikator")
-    st.caption("Visualisierung des FRED Risk-On/Risk-Off Index (KCRORO) zur Einschätzung des globalen Markt-Risikos.")
-    
-    if not APIFREAKS_KEY:
-        st.warning("""
-        ⚠️ **APIFreaks API-Key fehlt:**
-        Für Echtzeit-Volatilitätsdaten (VIX) wird der APIFreaks-Key benötigt.
-        Tragen Sie den Key in Ihren **Streamlit Secrets** ein:
-        1. Gehen Sie im Streamlit Cloud Dashboard zu **Settings** -> **Secrets**.
-        2. Fügen Sie folgende Zeile hinzu:
-           ```toml
-           APIFREAKS_API_KEY = "Ihr_APIFreaks_Key"
-           ```
-        3. Klicken Sie auf **Save**.
+    with c_col2:
+        st.write("**Konsens-Kursziele**")
+        avg_t = finnhub_data["target_mean"]
+        high_t = finnhub_data["target_high"]
+        low_t = finnhub_data["target_low"]
         
-        *Die App weicht aktuell automatisch auf Tiingo (VIXY) aus.*
-        """)
-    
-    with st.spinner("Lade RORO-Index..."):
-        roro_val, roro_dt, active_ind, debug_logs = get_roro_index(FRED_KEY, TIINGO_KEY, APIFREAKS_KEY)
-        
-    with st.expander("🛠️ API-Verbindungsdetails & Debug-Logs", expanded=True):
-        for log in debug_logs:
-            if "erfolgreich" in log or "geladen" in log or "vorhanden" in log:
-                st.success(log)
-            elif "Fehler" in log or "fehlgeschlagen" in log or "fehlt" in log or "nicht" in log:
-                st.error(log)
-            else:
-                st.info(log)
-                
-    if roro_val is not None:
-        is_risk_off = False
-        if active_ind == "FRED Risk-On/Risk-Off (KCRORO)":
-            is_risk_off = (roro_val > 0.0)
-        elif active_ind == "FRED 10Y-2Y Spread (DGS10 - DGS2)":
-            is_risk_off = (roro_val < 0.0)
-        elif "VIX" in active_ind:
-            is_risk_off = (roro_val > 20.0)
-        elif active_ind == "USD/JPY Proxy (Tagesänderung)":
-            is_risk_off = (roro_val <= 0.0)
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            st.metric("Mittleres Kursziel", f"{avg_t:.4f}" if avg_t else "N/A")
+            st.metric("Höchstes Kursziel", f"{high_t:.4f}" if high_t else "N/A")
+        with t_col2:
+            st.metric("Aktueller Kurs (iTick)", f"{latest_close:.4f}" if latest_close else "N/A")
+            st.metric("Tiefstes Kursziel", f"{low_t:.4f}" if low_t else "N/A")
             
-        if is_risk_off:
-            status_text = "🛡️ Risk-Off – Sichere Häfen bevorzugt"
-            status_color = "#34d399"
-            desc = f"Der Risikoindikator ({active_ind}) deutet auf Risikoaversion im globalen Markt hin. Sichere Häfen wie USD, CHF und JPY tendieren in dieser Marktphase zur Stärke, während risikoreichere Währungen (AUD, NZD, CAD) unter Druck geraten können."
-        else:
-            status_text = "🚀 Risk-On – Riskante Anlagen bevorzugt"
-            status_color = "#ef4444"
-            desc = f"Der Risikoindikator ({active_ind}) deutet auf Risikofreude im globalen Markt hin. Risikoaktiva und Hochzinswährungen wie AUD, NZD und CAD tendieren in dieser Phase zur Stärke, während klassische sichere Häfen (USD, CHF, JPY) tendenziell schwächer notieren."
-            
-        if "Proxy" in active_ind:
-            val_str = f"{roro_val:+.2%}"
-        elif "Spread" in active_ind:
-            val_str = f"{roro_val:+.2f}%"
-        elif "VIX" in active_ind:
-            val_str = f"{roro_val:.2f}"
-        else:
-            val_str = f"{roro_val:+.2f}"
-
-        col_metric, col_desc = st.columns([1, 2])
-        with col_metric:
-            st.markdown(f"""
-            <div style="background-color:#14161d; border:1px solid #1f2026; padding:25px; border-radius:8px; text-align:center;">
-                <div style="font-size:0.9rem; color:#7d7d8a; text-transform:uppercase; font-weight:600;">Wert ({active_ind})</div>
-                <div style="font-size:2.8rem; font-weight:700; color:{status_color}; margin:10px 0;">{val_str}</div>
-                <div style="background-color:{status_color}1a; color:{status_color}; border:1px solid {status_color}; padding:6px 12px; border-radius:4px; font-size:0.85rem; font-weight:700; display:inline-block; text-transform:uppercase;">
-                    {status_text}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_desc:
-            st.markdown(f"### Marktanalyse & Interpretation")
-            st.write(desc)
-            if isinstance(roro_dt, datetime):
-                dt_str = roro_dt.strftime("%d.%m.%Y")
-            else:
-                dt_str = str(roro_dt)
-            st.markdown(f"**Indikator:** `{active_ind}` | **Letzte Aktualisierung:** `{dt_str}`")
+    st.write("**Letzte Ratings-Änderungen**")
+    df_ratings = pd.DataFrame(finnhub_data["history"])
+    if not df_ratings.empty:
+        st.dataframe(df_ratings, use_container_width=True, hide_index=True)
     else:
-        st.error("Daten momentan nicht verfügbar")
+        st.info("Keine Rating-Historie verfügbar.")
 
-
-# ----------------- TAB 14: HISTORISCHE DATEN -----------------
-with tab14:
-    st.header("📊 Historische Fundamental-Analyse")
-    st.caption("Analysiere das gesamte Fundamental-Dashboard für jeden beliebigen Tag in der Vergangenheit, um historische Marktkontexte zu evaluieren.")
-    
-    b_col1, b_col2, b_col3 = st.columns(3)
-    g8_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
-    with b_col1:
-        hist_base = st.selectbox("Basiswährung (Base)", options=g8_list, index=0, key="hist_base_select_v2")
-    with b_col2:
-        hist_quote = st.selectbox("Quote-Währung (Quote)", options=g8_list, index=1, key="hist_quote_select_v2")
-    with b_col3:
-        hist_analysis_date = st.date_input(
-            "Historisches Datum wählen", 
-            value=datetime.now().date() - timedelta(days=365), 
-            min_value=datetime(2005, 1, 1).date(),
-            max_value=datetime.now().date(),
-            key="hist_analysis_date_select_v2"
-        )
-
-    hist_analysis_pair = f"{hist_base}/{hist_quote}"
-    
-    if hist_base == hist_quote:
-        st.warning("⚠️ Basis- und Quote-Währung sind identisch.")
-    else:
-        fetch_button = st.button("🔍 Historische Daten laden", key="hist_analysis_fetch_btn_v2")
-        
-        if fetch_button or st.session_state.get("hist_analysis_active_v2", False):
-            st.session_state["hist_analysis_active_v2"] = True
-            
-            target_date_str = hist_analysis_date.strftime("%Y-%m-%d")
-            base_c = hist_base
-            quote_c = hist_quote
-            
-            st.markdown("---")
-            st.subheader(f"📊 Historische Analyse für {hist_analysis_pair} am {hist_analysis_date.strftime('%d.%m.%Y')}")
-            
-            with st.spinner("Berechne fundamentales Signal..."):
-                base_score_h = compute_currency_score_historical(base_c, target_date_str)
-                quote_score_h = compute_currency_score_historical(quote_c, target_date_str)
-                
-                if base_score_h is None or quote_score_h is None:
-                    st.warning("⚠️ Historische Fundamental-Daten für dieses Währungspaar/Datum unvollständig oder nicht verfügbar (Fehlende API-Daten).")
-                else:
-                    raw_diff_h = quote_score_h - base_score_h
-                    signal_value_h = raw_diff_h / 2.0
-                    signal_value_h = max(-50.0, min(50.0, signal_value_h))
-                    
-                    if signal_value_h >= 25.0:
-                        sig_h = "SB"
-                    elif 10.0 <= signal_value_h < 25.0:
-                        sig_h = "MB"
-                    elif -10.0 < signal_value_h < 10.0:
-                        sig_h = "NT"
-                    elif -25.0 < signal_value_h <= -10.0:
-                        sig_h = "MS"
-                    else:
-                        sig_h = "SS"
-                        
-                    # 1. Bias Banner and Scores
-                    render_bias_box(signal_value_h, base_c, quote_c, base_score_h, quote_score_h, sig_h)
-                    
-                    col_score_b, col_score_q = st.columns(2)
-                    with col_score_b:
-                        st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                    <span class="metric-label">{CURRENCIES[base_c]['flag']} {base_c} Wirtschaftsscore (Historisch)</span>
-                    <div class="metric-value">{base_score_h:.1f} / 100</div>
-                    <div class="source-tag">Zusammengesetzter Score am {target_date_str}</div>
-                    </div>""", unsafe_allow_html=True)
-                    with col_score_q:
-                        st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #444c56;">
-                    <span class="metric-label">{CURRENCIES[quote_c]['flag']} {quote_c} Wirtschaftsscore (Historisch)</span>
-                    <div class="metric-value">{quote_score_h:.1f} / 100</div>
-                    <div class="source-tag">Zusammengesetzter Score am {target_date_str}</div>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    st.markdown("### 🗂️ Detaillierte historische Analysedaten")
-                    
-                    hist_sub_tabs = st.tabs([
-                        "🏠 Übersicht & Checkliste",
-                        "📊 PMI-Daten",
-                        "🏦 Zinsdifferenz",
-                        "📊 Analysten-Konsens",
-                        "🧠 Sentiment-Score",
-                        "🧮 Korrelationsmatrix",
-                        "📈 Langfristige Historie",
-                        "🛍️ Rohstoffe & Märkte",
-                        "🇺🇸 US-Arbeitsmarkt (BLS)",
-                        "⚠️ Risikoindikatoren (IMF)",
-                        "📰 News & Research Hub"
-                    ])
-                    
-                    # Subtab 0: Übersicht & Checkliste
-                    with hist_sub_tabs[0]:
-                        st.markdown("#### 🏠 G8 Fundamental-Checkliste (Historisch)")
-                        st.caption(f"Vergleich der makroökonomischen Scores und Handelssignale für alle G8-Paare am {target_date_str}.")
-                        
-                        scores_h = {curr: compute_currency_score_historical(curr, target_date_str) for curr in CURRENCIES.keys()}
-                        scores_h_valid = {k: v for k, v in scores_h.items() if v is not None}
-                        
-                        if not scores_h_valid:
-                            st.warning("Keine Fundamental-Scores für dieses Datum verfügbar.")
-                        else:
-                            fig_scores_h = go.Figure()
-                            fig_scores_h.add_trace(go.Bar(
-                                x=list(scores_h_valid.keys()),
-                                y=list(scores_h_valid.values()),
-                                marker_color=['#10b981' if s >= 55.0 else '#e2b13c' if s >= 45.0 else '#ef4444' for s in scores_h_valid.values()],
-                                text=[f"{s:.1f}" for s in scores_h_valid.values()],
-                                textposition='auto'
-                            ))
-                            fig_scores_h.update_layout(
-                                xaxis_title="Währung",
-                                yaxis_title="Wirtschaftsscore",
-                                paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)',
-                                font=dict(color="#7d7d8a"),
-                                height=300,
-                                margin=dict(l=10, r=10, t=10, b=10)
-                            )
-                            st.plotly_chart(fig_scores_h, use_container_width=True)
-                            
-                            import itertools
-                            currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
-                            G8_PAIRS = list(itertools.permutations(currencies_list, 2))
-                            
-                            hist_rows_checklist = []
-                            for b_c_iter, q_c_iter in G8_PAIRS:
-                                b_score_iter = scores_h.get(b_c_iter)
-                                q_score_iter = scores_h.get(q_c_iter)
-                                if b_score_iter is None or q_score_iter is None:
-                                    continue
-                                    
-                                r_diff_iter = q_score_iter - b_score_iter
-                                sig_val_iter = r_diff_iter / 2.0
-                                sig_val_iter = max(-50.0, min(50.0, sig_val_iter))
-                                
-                                if sig_val_iter >= 25.0:
-                                    b_name = "STRONG BUY"
-                                    b_emoji = "🔴"
-                                elif 10.0 <= sig_val_iter < 25.0:
-                                    b_name = "MID BUY"
-                                    b_emoji = "🟠"
-                                elif -10.0 < sig_val_iter < 10.0:
-                                    b_name = "NEUTRAL"
-                                    b_emoji = "🟡"
-                                elif -25.0 < sig_val_iter <= -10.0:
-                                    b_name = "MID SELL"
-                                    b_emoji = "🔵"
-                                else:
-                                    b_name = "STRONG SELL"
-                                    b_emoji = "🟢"
-                                    
-                                class_val_iter = f"{b_emoji} {b_name}"
-                                
-                                b_rate_iter, _ = get_country_rate_historical(b_c_iter, target_date_str)
-                                q_rate_iter, _ = get_country_rate_historical(q_c_iter, target_date_str)
-                                if b_rate_iter is not None and q_rate_iter is not None:
-                                    diff_bps_iter = int((q_rate_iter - b_rate_iter) * 100)
-                                    diff_str_iter = f"{b_rate_iter:.2f}% vs {q_rate_iter:.2f}% ({diff_bps_iter:+d} bps)"
-                                else:
-                                    diff_str_iter = "N/A"
-                                    
-                                rec_data_h = get_historical_recommendations(f"{b_c_iter}/{q_c_iter}", target_date_str, FINNHUB_KEY)
-                                if rec_data_h:
-                                    rec_str_iter = f"B:{rec_data_h['buy']} / H:{rec_data_h['hold']} / S:{rec_data_h['sell']}"
-                                else:
-                                    rec_str_iter = "N/A"
-                                    
-                                sent_val_iter = get_historical_sentiment(f"{b_c_iter}/{q_c_iter}", target_date_str, STOCKDATA_KEY)
-                                if sent_val_iter is not None:
-                                    sent_emoji = "🟢" if sent_val_iter >= 3.0 else "🔴" if sent_val_iter <= -3.0 else "🟡"
-                                    sent_str_iter = f"{sent_val_iter:+.1f} {sent_emoji}"
-                                else:
-                                    sent_str_iter = "N/A"
-                                    
-                                b_iso = CURRENCIES[b_c_iter]["wb_code"]
-                                q_iso = CURRENCIES[q_c_iter]["wb_code"]
-                                
-                                b_debt_h, _, _ = get_worldbank_data_historical(b_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-                                q_debt_h, _, _ = get_worldbank_data_historical(q_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-                                b_debt_str = f"{b_debt_h:.1f}%" if b_debt_h is not None else "N/A"
-                                q_debt_str = f"{q_debt_h:.1f}%" if q_debt_h is not None else "N/A"
-                                debt_str_iter = f"{b_debt_str} / {q_debt_str}"
-                                
-                                b_ca_h, _, _ = get_worldbank_data_historical(b_iso, "BCA_NGDPD", target_date_str)
-                                q_ca_h, _, _ = get_worldbank_data_historical(q_iso, "BCA_NGDPD", target_date_str)
-                                b_ca_str = f"{b_ca_h:+.1f}%" if b_ca_h is not None else "N/A"
-                                q_ca_str = f"{q_ca_h:+.1f}%" if q_ca_h is not None else "N/A"
-                                ca_str_iter = f"{b_ca_str} / {q_ca_str}"
-                                
-                                hist_rows_checklist.append({
-                                    "Währungspaar": f"{CURRENCIES[b_c_iter]['flag']} {b_c_iter} / {CURRENCIES[q_c_iter]['flag']} {q_c_iter}",
-                                    "Zinsdifferenz": diff_str_iter,
-                                    "Signal-Wert": f"{sig_val_iter:+.1f}",
-                                    "Handelssignal": class_val_iter,
-                                    "Analysten-Konsens": rec_str_iter,
-                                    "Sentiment": sent_str_iter,
-                                    "Schulden (% BIP)": debt_str_iter,
-                                    "Leistungsbilanz": ca_str_iter
-                                })
-                                
-                            df_hist_checklist = pd.DataFrame(hist_rows_checklist)
-                            st.dataframe(df_hist_checklist, hide_index=True, use_container_width=True)
-                            st.markdown(f"<div class='source-tag'>Gesamte Suite-Zusammenfassung am {target_date_str} (Zinssatz- / Risikodaten Quelle: FRED / IMF / World Bank)</div>", unsafe_allow_html=True)
-                            
-                    # Subtab 1: PMI-Daten
-                    with hist_sub_tabs[1]:
-                        st.markdown("#### 📊 Historische PMI-Daten (Einkaufsmanagerindex)")
-                        st.caption(f"Wirtschafts-PMI für alle 8 Währungsräume am {target_date_str} (Expansion > 50 / Kontraktion < 50).")
-                        
-                        code_to_name = {
-                            "USD": "🇺🇸 USA",
-                            "EUR": "🇪🇺 Euro",
-                            "GBP": "🇬🇧 UK",
-                            "CHF": "🇨🇭 Schweiz",
-                            "CAD": "🇨🇦 Kanada",
-                            "AUD": "🇦🇺 Australien",
-                            "NZD": "🇳🇿 Neuseeland",
-                            "JPY": "🇯🇵 Japan"
-                        }
-                        
-                        pmi_h_all = get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=target_date_str)
-                        pmi_rows = []
-                        for code_iter, name_iter in code_to_name.items():
-                            pmi_h = pmi_h_all.get(code_iter, {})
-                            if pmi_h and pmi_h.get("m_last") is not None:
-                                m_val = pmi_h["m_last"]
-                                m_prev = pmi_h["m_prev"]
-                                m_ref = pmi_h["m_ref"] or "N/A"
-                                m_chg = m_val - m_prev if m_prev is not None else 0.0
-                                m_status = "Expansion" if m_val >= 50.0 else "Kontraktion"
-                                m_arrow = "▲" if m_chg > 0 else "▼" if m_chg < 0 else "▬"
-                                m_str = f"{m_val:.1f} {m_arrow} {m_status}"
-                            else:
-                                m_str = "N/A"
-                                m_chg = 0.0
-                                m_ref = "N/A"
-                                
-                            if pmi_h and pmi_h.get("s_last") is not None:
-                                s_val = pmi_h["s_last"]
-                                s_prev = pmi_h["s_prev"]
-                                s_ref = pmi_h["s_ref"] or "N/A"
-                                s_chg = s_val - s_prev if s_prev is not None else 0.0
-                                s_status = "Expansion" if s_val >= 50.0 else "Kontraktion"
-                                s_arrow = "▲" if s_chg > 0 else "▼" if s_chg < 0 else "▬"
-                                s_str = f"{s_val:.1f} {s_arrow} {s_status}"
-                            else:
-                                s_str = "N/A"
-                                s_chg = 0.0
-                                s_ref = "N/A"
-                                
-                            avg_chg = (m_chg + s_chg) / 2.0 if (m_str != "N/A" and s_str != "N/A") else m_chg if m_str != "N/A" else s_chg if s_str != "N/A" else 0.0
-                            c_arrow = "▲" if avg_chg > 0 else "▼" if avg_chg < 0 else "▬"
-                            c_str = f"{c_arrow} {avg_chg:+.1f}"
-                            
-                            ref_str = m_ref if m_ref != "N/A" else s_ref
-                            pmi_rows.append({
-                                "Land": name_iter,
-                                "Manufacturing PMI": m_str,
-                                "Services PMI": s_str,
-                                "Veränderung zum Vormonat": c_str,
-                                "Letzte Aktualisierung": ref_str
-                            })
-                        df_pmi_h = pd.DataFrame(pmi_rows)
-                        st.dataframe(df_pmi_h, use_container_width=True)
-                        st.markdown("<div class='source-tag'>Quelle: FRED API</div>", unsafe_allow_html=True)
-                        
-                    # Subtab 2: Zinsdifferenz
-                    with hist_sub_tabs[2]:
-                        st.markdown("#### 🏦 Zentralbank-Zinssätze & Zinsdifferenz (Historisch)")
-                        st.caption(f"Vergleich der Leitzinsen am {target_date_str} (Quelle: FRED / ECB / SNB).")
-                        
-                        cb_rates_h = {}
-                        for code_iter in g8_list:
-                            rate, _ = get_country_rate_historical(code_iter, target_date_str)
-                            cb_rates_h[code_iter] = rate
-                            
-                        df_rates_plot_h = pd.DataFrame([
-                            {"Zentralbank": f"{curr_iter} ({CURRENCIES[curr_iter]['name']})", "Zinssatz": r_val, "Quelle": src}
-                            for curr_iter in g8_list
-                            for r_val, src in [get_country_rate_historical(curr_iter, target_date_str)]
-                            if r_val is not None
-                        ])
-                        
-                        fig_rates_g8_h = go.Figure()
-                        fig_rates_g8_h.add_trace(go.Bar(
-                            x=df_rates_plot_h["Zentralbank"],
-                            y=df_rates_plot_h["Zinssatz"],
-                            marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot_h["Zinssatz"]],
-                            text=[f"{r:.2f}%" for r in df_rates_plot_h["Zinssatz"]],
-                            textposition='auto',
-                            name="Zinssatz"
-                        ))
-                        fig_rates_g8_h.update_layout(
-                            xaxis_title="Zentralbank",
-                            yaxis_title="Leitzins (%)",
-                            paper_bgcolor='rgba(0,0,0,0)',
-                            plot_bgcolor='rgba(0,0,0,0)',
-                            font=dict(color="#7d7d8a"),
-                            height=300,
-                            margin=dict(l=10, r=10, t=10, b=10)
-                        )
-                        st.plotly_chart(fig_rates_g8_h, use_container_width=True)
-                        st.table(df_rates_plot_h)
-                        
-                        base_rate_h = cb_rates_h.get(base_c)
-                        quote_rate_h = cb_rates_h.get(quote_c)
-                        if base_rate_h is not None and quote_rate_h is not None:
-                            diff_bps_h = int((quote_rate_h - base_rate_h) * 100)
-                            st.metric("Zinsdifferenz (Quote - Base)", f"{diff_bps_h:+.0f} bps", help="Positive Werte bedeuten, dass die Quote-Währung höhere Zinsen hat.")
-                            
-                    # Subtab 3: Analysten-Konsens
-                    with hist_sub_tabs[3]:
-                        st.markdown("#### 📊 Historischer Analysten-Konsens (Finnhub)")
-                        consensus_h = get_historical_recommendations(hist_analysis_pair, target_date_str, FINNHUB_KEY)
-                        
-                        if not consensus_h:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            c_col1, c_col2 = st.columns(2)
-                            with c_col1:
-                                labels = ["Buy/Strong Buy", "Hold", "Sell/Strong Sell"]
-                                values = [consensus_h["buy"], consensus_h["hold"], consensus_h["sell"]]
-                                if sum(values) == 0:
-                                    st.warning("Keine Analystenempfehlungen für dieses Datum vorhanden.")
-                                else:
-                                    fig_cons_h = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.4, marker=dict(colors=["#34d399", "#7d7d8a", "#ef4444"]))])
-                                    fig_cons_h.update_layout(
-                                        paper_bgcolor='rgba(0,0,0,0)',
-                                        plot_bgcolor='rgba(0,0,0,0)',
-                                        font=dict(color="#7d7d8a"),
-                                        height=280,
-                                        margin=dict(l=10, r=10, t=10, b=10)
-                                    )
-                                    st.plotly_chart(fig_cons_h, use_container_width=True)
-                                    
-                            with c_col2:
-                                st.markdown(f"**Gesamtempfehlungen:** `{sum(values)}`")
-                                st.markdown(f"- **Kauf-Einstufungen:** `{consensus_h['buy']}`")
-                                st.markdown(f"- **Halten-Einstufungen:** `{consensus_h['hold']}`")
-                                st.markdown(f"- **Verkauf-Einstufungen:** `{consensus_h['sell']}`")
-                                st.markdown("---")
-                                st.markdown("<div class='source-tag'>Quelle: Finnhub API</div>", unsafe_allow_html=True)
-                                
-                    # Subtab 4: Sentiment-Score
-                    with hist_sub_tabs[4]:
-                        st.markdown("#### 🧠 Historischer Sentiment-Score (StockData)")
-                        sentiment_h = get_historical_sentiment(hist_analysis_pair, target_date_str, STOCKDATA_KEY)
-                        
-                        if sentiment_h is None:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            fig_gauge_h = go.Figure(go.Indicator(
-                                mode="gauge+number",
-                                value=sentiment_h,
-                                domain={'x': [0, 1], 'y': [0, 1]},
-                                title={'text': "Sentiment-Score (-10 bis +10)", 'font': {'color': "#7d7d8a", 'size': 14}},
-                                gauge={
-                                    'axis': {'range': [-10, 10], 'tickwidth': 1, 'tickcolor': "#7d7d8a"},
-                                    'bar': {'color': "#e2b13c"},
-                                    'bgcolor': "#14161d",
-                                    'borderwidth': 1,
-                                    'bordercolor': "#1f2026",
-                                    'steps': [
-                                        {'range': [-10, -3], 'color': 'rgba(239, 68, 68, 0.15)'},
-                                        {'range': [-3, 3], 'color': 'rgba(125, 125, 138, 0.15)'},
-                                        {'range': [3, 10], 'color': 'rgba(52, 211, 153, 0.15)'}
-                                    ]
-                                }
-                            ))
-                            fig_gauge_h.update_layout(
-                                paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)',
-                                font=dict(color="#7d7d8a"),
-                                height=250,
-                                margin=dict(l=20, r=20, t=40, b=20)
-                            )
-                            st.plotly_chart(fig_gauge_h, use_container_width=True)
-                            st.markdown("<div class='source-tag'>Quelle: StockData API</div>", unsafe_allow_html=True)
-                            
-                    # Subtab 5: Korrelationsmatrix
-                    with hist_sub_tabs[5]:
-                        st.markdown("#### 🧮 30-Tage Historische Pearson-Korrelation")
-                        corr_df_h, is_live_corr_h = get_historical_correlation_matrix(target_date_str)
-                        
-                        if corr_df_h is None:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            fig_heatmap_h = go.Figure(data=go.Heatmap(
-                                z=corr_df_h.values,
-                                x=corr_df_h.columns,
-                                y=corr_df_h.index,
-                                colorscale="RdBu",
-                                zmin=-1.0, zmax=1.0,
-                                text=np.round(corr_df_h.values, 2),
-                                texttemplate="%{text}",
-                                showscale=True
-                            ))
-                            fig_heatmap_h.update_layout(
-                                paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)',
-                                font=dict(color="#7d7d8a", size=9),
-                                height=380,
-                                margin=dict(l=10, r=10, t=10, b=10)
-                            )
-                            st.plotly_chart(fig_heatmap_h, use_container_width=True)
-                            st.caption("Quelle: CurrencyArchiveAPI / Timeseries data")
-                            
-                    # Subtab 6: Langfristige Historie
-                    with hist_sub_tabs[6]:
-                        st.markdown("#### 📈 Kursverlauf bis zu diesem Datum")
-                        df_hist_all, is_live = get_fcs_history_data_historical(hist_analysis_pair, target_date_str, FCS_KEY)
-                        
-                        if df_hist_all is not None and not df_hist_all.empty:
-                            fig_hist_h = go.Figure()
-                            fig_hist_h.add_trace(go.Scatter(
-                                x=df_hist_all["date"], y=df_hist_all["close"],
-                                line=dict(color="#e2b13c", width=2),
-                                name="Schlusskurs"
-                            ))
-                            fig_hist_h.update_layout(
-                                xaxis_title="Datum",
-                                yaxis_title="Kurs",
-                                paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)',
-                                font=dict(color="#7d7d8a", size=10),
-                                height=350,
-                                margin=dict(l=10, r=10, t=10, b=10)
-                            )
-                            st.plotly_chart(fig_hist_h, use_container_width=True)
-                            st.markdown("<div class='source-tag'>Quelle: FCS API</div>", unsafe_allow_html=True)
-                        else:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                            
-                    # Subtab 7: Rohstoffe & Märkte
-                    with hist_sub_tabs[7]:
-                        st.markdown("#### 🛍️ Historische Rohstoffpreise & Märkte")
-                        st.caption(f"Rohstoffpreise und VIX-Volatilität am {target_date_str} (Quelle: FRED API).")
-                        
-                        comm_h = get_historical_commodities(target_date_str, FRED_KEY)
-                        
-                        if not comm_h:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            c_col1, c_col2, c_col3, c_col4, c_col5 = st.columns(5)
-                            
-                            # Gold
-                            with c_col1:
-                                val = comm_h.get("gold")
-                                chg = comm_h.get("gold_chg")
-                                val_str = f"${val:.2f}" if val is not None else "N/A"
-                                chg_str = f"{chg:+.1f}%" if chg is not None else "N/A"
-                                render_metric_card("Gold (Spot)", val_str, f"FRED ({chg_str})", (chg or 0.0) >= 0)
-                                
-                            # Silber
-                            with c_col2:
-                                val = comm_h.get("silver")
-                                chg = comm_h.get("silver_chg")
-                                val_str = f"${val:.2f}" if val is not None else "N/A"
-                                chg_str = f"{chg:+.1f}%" if chg is not None else "N/A"
-                                render_metric_card("Silber (Spot)", val_str, f"FRED ({chg_str})", (chg or 0.0) >= 0)
-                                
-                            # WTI
-                            with c_col3:
-                                val = comm_h.get("wti")
-                                chg = comm_h.get("wti_chg")
-                                val_str = f"${val:.2f}" if val is not None else "N/A"
-                                chg_str = f"{chg:+.1f}%" if chg is not None else "N/A"
-                                render_metric_card("WTI Rohöl", val_str, f"FRED ({chg_str})", (chg or 0.0) >= 0)
-                                
-                            # Brent
-                            with c_col4:
-                                val = comm_h.get("brent")
-                                chg = comm_h.get("brent_chg")
-                                val_str = f"${val:.2f}" if val is not None else "N/A"
-                                chg_str = f"{chg:+.1f}%" if chg is not None else "N/A"
-                                render_metric_card("Brent Rohöl", val_str, f"FRED ({chg_str})", (chg or 0.0) >= 0)
-                                
-                            # VIX
-                            with c_col5:
-                                val = comm_h.get("vix")
-                                chg = comm_h.get("vix_chg")
-                                val_str = f"{val:.2f}" if val is not None else "N/A"
-                                chg_str = f"{chg:+.1f}%" if chg is not None else "N/A"
-                                render_metric_card("VIX Volatilitätsindex", val_str, f"FRED ({chg_str})", (chg or 0.0) < 0)
-                                
-                    # Subtab 8: US-Arbeitsmarkt (BLS)
-                    with hist_sub_tabs[8]:
-                        st.markdown("#### 🇺🇸 US-Arbeitsmarkt (BLS) - Historisch")
-                        st.caption(f"Historische US-Arbeitsmarktdaten am {target_date_str} (Quelle: FRED API).")
-                        
-                        labor_h = get_historical_labor_data(target_date_str, FRED_KEY)
-                        
-                        if not labor_h:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                val = labor_h.get("nfp")
-                                chg = labor_h.get("nfp_chg")
-                                val_str = f"{val/1000.0:,.1f}M" if val is not None else "N/A"
-                                chg_str = f"Change: {chg:+.1f}K" if chg is not None else "N/A"
-                                st.markdown(f"""
-                                <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                                    <span class="metric-label">Non-Farm Payrolls</span>
-                                    <div class="metric-value">{val_str}</div>
-                                    <div style="font-size:0.85rem; color:{'#10b981' if (chg or 0.0) >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                                        {chg_str} (Jobs)
-                                    </div>
-                                    <div class="source-tag">Quelle: FRED (PAYEMS)</div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                            with col2:
-                                val = labor_h.get("wage")
-                                chg = labor_h.get("wage_chg")
-                                val_str = f"${val:.2f}" if val is not None else "N/A"
-                                chg_str = f"MoM: {chg:+.2f}%" if chg is not None else "N/A"
-                                st.markdown(f"""
-                                <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                                    <span class="metric-label">Durchschnittlicher Stundenlohn</span>
-                                    <div class="metric-value">{val_str}</div>
-                                    <div style="font-size:0.85rem; color:{'#10b981' if (chg or 0.0) >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                                        {chg_str}
-                                    </div>
-                                    <div class="source-tag">Quelle: FRED (CES0500000003)</div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                            with col3:
-                                val = labor_h.get("part")
-                                chg = labor_h.get("part_chg")
-                                val_str = f"{val:.1f}%" if val is not None else "N/A"
-                                chg_str = f"Change: {chg:+.2f}%" if chg is not None else "N/A"
-                                st.markdown(f"""
-                                <div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-                                    <span class="metric-label">Erwerbsquote (Participation Rate)</span>
-                                    <div class="metric-value">{val_str}</div>
-                                    <div style="font-size:0.85rem; color:{'#10b981' if (chg or 0.0) >= 0 else '#ef4444'}; margin-top:5px; font-weight:600;">
-                                        {chg_str}
-                                    </div>
-                                    <div class="source-tag">Quelle: FRED (CIVPART)</div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                    # Subtab 9: Historische Risikokennzahlen
-                    with hist_sub_tabs[9]:
-                        st.markdown("#### ⚠️ Historische Risikokennzahlen")
-                        base_iso = CURRENCIES.get(base_c, {}).get("wb_code", base_c)
-                        quote_iso = CURRENCIES.get(quote_c, {}).get("wb_code", quote_c)
-                        
-                        base_debt_h, base_debt_dt, _ = get_worldbank_data_historical(base_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-                        quote_debt_h, quote_debt_dt, _ = get_worldbank_data_historical(quote_iso, "GC.DOD.TOTL.GD.ZS", target_date_str)
-                        
-                        base_cli_res = get_historical_oecd_cli(base_c, target_date_str)
-                        quote_cli_res = get_historical_oecd_cli(quote_c, target_date_str)
-                        base_cli_h = base_cli_res[0] if base_cli_res is not None else None
-                        quote_cli_h = quote_cli_res[0] if quote_cli_res is not None else None
-                        
-                        debt_col1, debt_col2 = st.columns(2)
-                        with debt_col1:
-                            st.markdown(f"##### 🏛️ Staatsverschuldung (% BIP)")
-                            b_debt_str = f"{base_debt_h:.1f}%" if base_debt_h is not None else "Daten nicht verfügbar"
-                            q_debt_str = f"{quote_debt_h:.1f}%" if quote_debt_h is not None else "Daten nicht verfügbar"
-                            b_dt_str = base_debt_dt.strftime('%Y') if base_debt_dt else 'N/A'
-                            q_dt_str = quote_debt_dt.strftime('%Y') if quote_debt_dt else 'N/A'
-                            st.markdown(f"- **{base_c}:** `{b_debt_str}` (Jahr: {b_dt_str}) [Quelle: World Bank]")
-                            st.markdown(f"- **{quote_c}:** `{q_debt_str}` (Jahr: {q_dt_str}) [Quelle: World Bank]")
-                            
-                        with debt_col2:
-                            st.markdown(f"##### 📈 OECD Composite Leading Indicator (CLI)")
-                            b_val = float(base_cli_h) if base_cli_h is not None else None
-                            q_val = float(quote_cli_h) if quote_cli_h is not None else None
-                            
-                            # Normalize deviation values (e.g. -15 to 15) to 100-base
-                            if b_val is not None and -15.0 <= b_val <= 15.0:
-                                b_val = 100.0 + b_val
-                            if q_val is not None and -15.0 <= q_val <= 15.0:
-                                q_val = 100.0 + q_val
-                                
-                            b_cli_str = f"{b_val:.2f}" if b_val is not None else "Daten nicht verfügbar"
-                            q_cli_str = f"{q_val:.2f}" if q_val is not None else "Daten nicht verfügbar"
-                            
-                            b_trend = '>100 (Wachstum)' if b_val and b_val > 100.0 else '<100 (Verlangsamung)' if b_val else 'N/A'
-                            q_trend = '>100 (Wachstum)' if q_val and q_val > 100.0 else '<100 (Verlangsamung)' if q_val else 'N/A'
-                            
-                            st.markdown(f"- **{base_c}:** `{b_cli_str}` (Trend: {b_trend}) [Quelle: OECD]")
-                            st.markdown(f"- **{quote_c}:** `{q_cli_str}` (Trend: {q_trend}) [Quelle: OECD]")
-                            
-                    # Subtab 10: News Hub
-                    with hist_sub_tabs[10]:
-                        st.markdown("#### 📰 Historische Nachrichten (Echtzeit-Timeline ±3 Tage)")
-                        news_h = get_historical_news(hist_analysis_pair, target_date_str, STOCKDATA_KEY)
-                        if not news_h:
-                            st.warning("Daten nicht verfügbar für dieses Datum")
-                        else:
-                            render_articles_grid(news_h)
-                            
-            past_decisions = load_backtest_decisions()
-            if past_decisions:
-                st.markdown("##### 📜 Bisherige Backtest-Entscheidungen")
-                df_dec = pd.DataFrame(past_decisions)
-                df_dec_renamed = df_dec.rename(columns={
-                    "timestamp": "Speicherzeit",
-                    "target_date": "Analysedatum",
-                    "pair": "Paar",
-                    "signal_value": "Signalwert",
-                    "signal_badge": "Signal",
-                    "decision": "Entscheidung",
-                    "notes": "Notizen"
-                })
-                st.dataframe(df_dec_renamed.sort_values("Speicherzeit", ascending=False), use_container_width=True)
-
-
-# ----------------- 7. FALLBACK BOTTOM BAR (Leitdaten) -----------------
+# ----------------- US-MAKRO LEITDATEN BOTTOM BAR -----------------
 st.markdown("---")
 st.subheader("🇺🇸 US-Makroökonomische Leitdaten")
 
