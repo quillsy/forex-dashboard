@@ -3775,6 +3775,73 @@ def get_historical_indicator_values(series_id, dt_str, fred_key):
     except Exception:
         return None, None, None, None
 
+YIELD_2Y_SERIES = {
+    "USD": "DGS2",
+    "EUR": "GEMPTGBD02Y",
+    "GBP": "I1CAB02",
+    "JPY": "IR3TIB01JPM156N",
+    "CHF": "IR3TIB01CHM156N",
+    "CAD": "IR3TIB01CAM156N",
+    "AUD": "IR3TIB01AUM156N",
+    "NZD": "IR3TIB01NZM156N"
+}
+
+YIELD_5Y_SERIES = {
+    "USD": "DGS5",
+    "EUR": "GEMPTGBD05Y",
+    "GBP": "I1CAB05",
+    "JPY": None,
+    "CHF": None,
+    "CAD": None,
+    "AUD": None,
+    "NZD": None
+}
+
+YIELD_10Y_SERIES = {
+    "USD": "DGS10",
+    "EUR": "IRLTLT01EZM156N",
+    "GBP": "IRLTLT01GBM156N",
+    "JPY": "IRLTLT01JPM156N",
+    "CHF": "IRLTLT01CHM156N",
+    "CAD": "IRLTLT01CAM156N",
+    "AUD": "IRLTLT01AUM156N",
+    "NZD": "IRLTLT01NZM156N"
+}
+
+def get_historical_yield_trends(series_id, dt_str, fred_key):
+    try:
+        val_now, _, _ = get_fred_data_historical(series_id, dt_str, fred_key)
+        dt_1w = (pd.to_datetime(dt_str) - timedelta(days=7)).strftime("%Y-%m-%d")
+        val_1w, _, _ = get_fred_data_historical(series_id, dt_1w, fred_key)
+        dt_1m = (pd.to_datetime(dt_str) - timedelta(days=30)).strftime("%Y-%m-%d")
+        val_1m, _, _ = get_fred_data_historical(series_id, dt_1m, fred_key)
+        return val_now, val_1w, val_1m
+    except Exception:
+        return None, None, None
+
+def get_yield_details(curr, series_map, fred_key):
+    series_id = series_map.get(curr)
+    if not series_id or not fred_key:
+        return None
+    try:
+        v_now, v_1w, v_1m = get_historical_yield_trends(series_id, datetime.now().strftime("%Y-%m-%d"), fred_key)
+        if v_now is None:
+            return None
+        chg_1w = v_now - v_1w if v_1w is not None else 0.0
+        chg_1m = v_now - v_1m if v_1m is not None else 0.0
+        trend = "▲" if chg_1w > 0 else "▼" if chg_1w < 0 else "▬"
+        return {
+            "value": v_now,
+            "chg_1w": chg_1w,
+            "chg_1m": chg_1m,
+            "trend": trend,
+            "series_id": series_id,
+            "source": "FRED",
+            "date": datetime.now().strftime("%Y-%m-%d")
+        }
+    except Exception:
+        return None
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🏠 Dashboard",
     "🌍 Currency Ranking",
@@ -4125,6 +4192,97 @@ with tab3:
             
         df_rates = pd.DataFrame(rates_rows)
         st.dataframe(df_rates, hide_index=True, use_container_width=True)
+        
+        # ----------------- Staatsanleihen (Bond Market) -----------------
+        st.write("")
+        st.subheader("🏦 Bond Market & Yield Curve")
+        st.caption("Vergleich der Staatsanleihen-Renditen im G10-Raum (2Y, 5Y und 10Y).")
+        
+        bond_rows = []
+        for curr, info in CURRENCIES.items():
+            y2_det = get_yield_details(curr, YIELD_2Y_SERIES, FRED_KEY)
+            y5_det = get_yield_details(curr, YIELD_5Y_SERIES, FRED_KEY)
+            y10_det = get_yield_details(curr, YIELD_10Y_SERIES, FRED_KEY)
+            
+            y2_str = f"{y2_det['value']:.2f}%" if y2_det else "nicht verfügbar"
+            y5_str = f"{y5_det['value']:.2f}%" if y5_det else "nicht verfügbar"
+            y10_str = f"{y10_det['value']:.2f}%" if y10_det else "nicht verfügbar"
+            
+            if y2_det and y10_det:
+                spread = y10_det["value"] - y2_det["value"]
+                spread_str = f"{spread:+.2f}%"
+            else:
+                spread_str = "N/A"
+                
+            chg_1w = f"{y2_det['chg_1w']:+.2f}%" if y2_det else "N/A"
+            chg_1m = f"{y2_det['chg_1m']:+.2f}%" if y2_det else "N/A"
+            trend_str = y2_det["trend"] if y2_det else "▬"
+            date_str = y2_det["date"] if y2_det else "N/A"
+            src_str = y2_det["source"] if y2_det else "N/A"
+            
+            bond_rows.append({
+                "Währung": f"{info['flag']} {curr}",
+                "2Y Rendite": y2_str,
+                "5Y Rendite": y5_str,
+                "10Y Rendite": y10_str,
+                "2Y-10Y Spread": spread_str,
+                "Veränderung 1W (2Y)": chg_1w,
+                "Veränderung 1M (2Y)": chg_1m,
+                "Trend": trend_str,
+                "Datenquelle": src_str,
+                "Letzte Aktualisierung": date_str
+            })
+            
+        df_bonds = pd.DataFrame(bond_rows)
+        
+        def apply_bond_trend_colors(val):
+            val_str = str(val)
+            if "▲" in val_str:
+                return "color: #10b981; font-weight: bold;"
+            elif "▼" in val_str:
+                return "color: #ef4444; font-weight: bold;"
+            return ""
+            
+        styled_df_bonds = df_bonds.style
+        try:
+            styled_df_bonds = styled_df_bonds.map(apply_bond_trend_colors, subset=["Trend"])
+        except AttributeError:
+            styled_df_bonds = styled_df_bonds.applymap(apply_bond_trend_colors, subset=["Trend"])
+            
+        st.dataframe(styled_df_bonds, hide_index=True, use_container_width=True)
+        
+        # Liniendiagramm für Renditestrukturkurven
+        st.write("")
+        st.markdown("#### 📈 Renditekurven-Vergleich (USA, Eurozone, UK)")
+        
+        curves_data = []
+        for c_code, name in [("USD", "USA"), ("EUR", "Eurozone"), ("GBP", "UK")]:
+            y2 = get_yield_details(c_code, YIELD_2Y_SERIES, FRED_KEY)
+            y5 = get_yield_details(c_code, YIELD_5Y_SERIES, FRED_KEY)
+            y10 = get_yield_details(c_code, YIELD_10Y_SERIES, FRED_KEY)
+            
+            if y2: curves_data.append({"Land": name, "Laufzeit": "2Y", "Rendite": y2["value"]})
+            if y5: curves_data.append({"Land": name, "Laufzeit": "5Y", "Rendite": y5["value"]})
+            if y10: curves_data.append({"Land": name, "Laufzeit": "10Y", "Rendite": y10["value"]})
+            
+        if curves_data:
+            df_curves = pd.DataFrame(curves_data)
+            fig_curves = px.line(
+                df_curves, 
+                x="Laufzeit", 
+                y="Rendite", 
+                color="Land", 
+                markers=True,
+                title="Aktuelle Staatsanleihen-Renditestrukturkurve"
+            )
+            fig_curves.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a")
+            )
+            st.plotly_chart(fig_curves, use_container_width=True)
+        else:
+            st.info("Keine ausreichenden Zinskurven-Daten für Liniendiagramm vorhanden.")
 
     with sub_fund3:
         st.subheader("📊 Einkaufsmanagerindizes (PMI)")
@@ -4259,6 +4417,44 @@ with tab4:
             for b in explain_currency_score_bullets(quote_sel):
                 if b.startswith("-"):
                     st.write(b)
+                    
+        # ----------------- Yield Differential (Bond Market) -----------------
+        st.write("")
+        st.subheader("💱 Yield Differential")
+        st.caption(f"Vergleich der Staatsanleihen-Renditen zwischen {base_sel} und {quote_sel} (2Y).")
+        
+        y2_base = get_yield_details(base_sel, YIELD_2Y_SERIES, FRED_KEY)
+        y2_quote = get_yield_details(quote_sel, YIELD_2Y_SERIES, FRED_KEY)
+        
+        col_yd1, col_yd2, col_yd3 = st.columns(3)
+        with col_yd1:
+            val_b = f"{y2_base['value']:.2f}%" if y2_base else "nicht verfügbar"
+            st.metric(f"{base_sel} 2Y Rendite", val_b)
+        with col_yd2:
+            val_q = f"{y2_quote['value']:.2f}%" if y2_quote else "nicht verfügbar"
+            st.metric(f"{quote_sel} 2Y Rendite", val_q)
+        with col_yd3:
+            if y2_base and y2_quote:
+                diff_yd = y2_base["value"] - y2_quote["value"]
+                diff_bps = int(diff_yd * 100)
+                st.metric("Yield Differential (Base - Quote)", f"{diff_yd:+.2f}% ({diff_bps:+d} bps)")
+            else:
+                st.metric("Yield Differential (Base - Quote)", "N/A")
+                
+        if y2_base and y2_quote:
+            y2_base_1w = y2_base["value"] - y2_base["chg_1w"]
+            y2_quote_1w = y2_quote["value"] - y2_quote["chg_1w"]
+            diff_1w = y2_base_1w - y2_quote_1w
+            chg_diff_1w = diff_yd - diff_1w
+            
+            y2_base_1m = y2_base["value"] - y2_base["chg_1m"]
+            y2_quote_1m = y2_quote["value"] - y2_quote["chg_1m"]
+            diff_1m = y2_base_1m - y2_quote_1m
+            chg_diff_1m = diff_yd - diff_1m
+            
+            st.write(f"- **Veränderung des Differentials (1W):** `{chg_diff_1w:+.2f}% ({int(chg_diff_1w*100):+d} bps)`")
+            st.write(f"- **Veränderung des Differentials (1M):** `{chg_diff_1m:+.2f}% ({int(chg_diff_1m*100):+d} bps)`")
+            st.write(f"- **Datenquelle:** `FRED` (Zuletzt aktualisiert: `{y2_base['date']}`)")
 
 # ----------------- TAB 5: MARKET REGIME -----------------
 with tab5:
