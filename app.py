@@ -3555,149 +3555,132 @@ def render_articles_grid(articles_list):
 
 
 # ----------------- 3. SIDEBAR CONFIGURATION -----------------
-st.sidebar.title("⚙️ Dashboard-Einstellungen")
-
-# Pairwise Selector for any of the 8 currencies
-st.sidebar.markdown("### 💱 Währungspaar wählen")
-base_curr = st.sidebar.selectbox("Basiswährung (Base)", options=list(CURRENCIES.keys()), index=0) # Default USD
-quote_curr = st.sidebar.selectbox("Quote-Währung (Quote)", options=list(CURRENCIES.keys()), index=1) # Default EUR
-selected_pair = f"{base_curr}/{quote_curr}"
-
-invalid_pair = (base_curr == quote_curr)
-if invalid_pair:
-    st.sidebar.error("⚠️ Basis- und Quote-Währung dürfen nicht identisch sein.")
-
-# Checkbox for displaying all pairs in checklist (including neutral)
-show_all_pairs = st.sidebar.checkbox("Alle Paare anzeigen (inkl. Neutral)", value=False, key="show_all_pairs_chk")
-
-# Manual cache clear
-st.sidebar.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
-
-# Zins-Kontrollzentrum (Manual inputs with persistence)
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏦 Zins-Kontrollzentrum")
-st.sidebar.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
-
-st.sidebar.number_input(
-    "Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", step=0.05
-)
-st.sidebar.number_input(
-    "Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", step=0.05
-)
-st.sidebar.number_input(
-    "Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05
-)
-st.sidebar.number_input(
-    "Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05
-)
-st.sidebar.number_input(
-    "Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05
-)
-st.sidebar.number_input(
-    "Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05
-)
-
-if st.sidebar.button("💾 Zinssätze speichern"):
-    saved_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    st.session_state["last_saved_rates"] = saved_time
-    rates_to_save = {
-        "manual_rate_GBP": st.session_state.manual_rate_GBP,
-        "manual_rate_JPY": st.session_state.manual_rate_JPY,
-        "manual_rate_AUD": st.session_state.manual_rate_AUD,
-        "manual_rate_CAD": st.session_state.manual_rate_CAD,
-        "manual_rate_NZD": st.session_state.manual_rate_NZD,
-        "manual_rate_CHF": st.session_state.manual_rate_CHF,
-        "last_saved_rates": saved_time
-    }
-    try:
-        with open(".rates_config.json", "w", encoding="utf-8") as f:
-            json.dump(rates_to_save, f, indent=4)
-        st.sidebar.success("Zinssätze gespeichert!")
-    except Exception as e:
-        st.sidebar.error(f"Fehler: {e}")
-
-last_saved = st.session_state.get("last_saved_rates")
-if last_saved:
-    st.sidebar.info(f"Zuletzt gespeichert: {last_saved}")
-else:
-    st.sidebar.warning("Noch nicht gespeichert")
-
-st.sidebar.date_input("Letzte Aktualisierung", value=datetime.now().date())
-
-def get_cot_data_status():
-    try:
-        now = datetime.now()
-        y = now.year
-        df_cot = load_cot_year_cached(y)
-        if df_cot is None or df_cot.empty:
-            df_cot = load_cot_year_cached(y - 1)
-        if df_cot is not None and not df_cot.empty:
-            date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_cot.columns else "As of Date in Form YYMMDD"
-            dates = pd.to_datetime(df_cot[date_col])
-            latest_date = dates.max()
-            days_diff = (now - latest_date).days
-            
-            if days_diff <= 10:
-                status = "🟢 Aktuell"
-                weekday = now.weekday()
-                if weekday in [5, 6, 0]: # Saturday, Sunday, Monday
-                    explanation = "Der Bericht spiegelt die Daten vom letzten Dienstag wider."
-                elif weekday in [1, 2, 3]: # Tuesday, Wednesday, Thursday
-                    explanation = "Daten vom Dienstag dieser Woche werden am Freitagabend veröffentlicht."
-                else: # Friday
-                    explanation = "Neue Daten werden heute Abend (Freitag) veröffentlicht."
-            else:
-                status = "🟡 Veraltet"
-                explanation = f"Der letzte Bericht ist {days_diff} Tage alt. Bitte warten Sie auf das nächste Update am Freitag/Samstag."
-                
-            return latest_date.strftime("%d.%m.%Y"), status, explanation
-    except Exception:
-        pass
-    return None, "🔴 Nicht verfügbar", "Es konnten keine COT-Daten geladen werden."
-
-# 1. 📅 COT-Status
-with st.sidebar.expander("📅 COT-Status", expanded=False):
-    rep_date, status_val, explanation_val = get_cot_data_status()
-    st.write(f"**Status:** {status_val}")
-    if rep_date:
-        st.write(f"**Bericht vom:** {rep_date}")
-    st.caption(explanation_val)
+with st.sidebar:
+    st.title("⚙️ Dashboard-Einstellungen")
+    st.markdown("### 💱 Währungspaar wählen")
+    base_curr = st.selectbox("Basiswährung (Base)", options=list(CURRENCIES.keys()), index=0)
+    quote_curr = st.selectbox("Quote-Währung (Quote)", options=list(CURRENCIES.keys()), index=1)
+    selected_pair = f"{base_curr}/{quote_curr}"
     
-    try:
-        y = datetime.now().year
-        df_cot = load_cot_year_cached(y)
-        if df_cot is None or df_cot.empty:
-            df_cot = load_cot_year_cached(y - 1)
-        if df_cot is not None and not df_cot.empty:
-            cot_rows = []
-            for curr, code in COT_SYMBOLS.items():
-                rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
-                cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
-            st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
-    except Exception as e:
-        st.error(f"Fehler bei Tabelle: {e}")
+    invalid_pair = (base_curr == quote_curr)
+    if invalid_pair:
+        st.error("⚠️ Basis- und Quote-Währung dürfen nicht identisch sein.")
+        
+    show_all_pairs = st.checkbox("Alle Paare anzeigen (inkl. Neutral)", value=False, key="show_all_pairs_chk")
+    st.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
+    
+    st.markdown("---")
+    st.markdown("### 🏦 Zins-Kontrollzentrum")
+    st.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
+    
+    st.number_input("Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", step=0.05)
+    st.number_input("Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", step=0.05)
+    st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05)
+    st.number_input("Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05)
+    st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05)
+    st.number_input("Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05)
+    
+    if st.button("💾 Zinssätze speichern"):
+        saved_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        st.session_state["last_saved_rates"] = saved_time
+        rates_to_save = {
+            "manual_rate_GBP": st.session_state.manual_rate_GBP,
+            "manual_rate_JPY": st.session_state.manual_rate_JPY,
+            "manual_rate_AUD": st.session_state.manual_rate_AUD,
+            "manual_rate_CAD": st.session_state.manual_rate_CAD,
+            "manual_rate_NZD": st.session_state.manual_rate_NZD,
+            "manual_rate_CHF": st.session_state.manual_rate_CHF,
+            "last_saved_rates": saved_time
+        }
+        try:
+            with open(".rates_config.json", "w", encoding="utf-8") as f:
+                json.dump(rates_to_save, f, indent=4)
+            st.success("Zinssätze gespeichert!")
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            
+    last_saved = st.session_state.get("last_saved_rates")
+    if last_saved:
+        st.info(f"Zuletzt gespeichert: {last_saved}")
+    else:
+        st.warning("Noch nicht gespeichert")
+        
+    st.date_input("Letzte Aktualisierung", value=datetime.now().date())
+    
+    def get_cot_data_status():
+        try:
+            now = datetime.now()
+            y = now.year
+            df_cot = load_cot_year_cached(y)
+            if df_cot is None or df_cot.empty:
+                df_cot = load_cot_year_cached(y - 1)
+            if df_cot is not None and not df_cot.empty:
+                date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_cot.columns else "As of Date in Form YYMMDD"
+                dates = pd.to_datetime(df_cot[date_col])
+                latest_date = dates.max()
+                days_diff = (now - latest_date).days
+                
+                if days_diff <= 10:
+                    status = "🟢 Aktuell"
+                    weekday = now.weekday()
+                    if weekday in [5, 6, 0]:
+                        explanation = "Der Bericht spiegelt die Daten vom letzten Dienstag wider."
+                    elif weekday in [1, 2, 3]:
+                        explanation = "Daten vom Dienstag dieser Woche werden am Freitagabend veröffentlicht."
+                    else:
+                        explanation = "Neue Daten werden heute Abend (Freitag) veröffentlicht."
+                else:
+                    status = "🟡 Veraltet"
+                    explanation = f"Der letzte Bericht ist {days_diff} Tage alt. Bitte warten Sie auf das nächste Update am Freitag/Samstag."
+                    
+                return latest_date.strftime("%d.%m.%Y"), status, explanation
+        except Exception:
+            pass
+        return None, "🔴 Nicht verfügbar", "Es konnten keine COT-Daten geladen werden."
 
-# 2. 🔑 API Key Status
-with st.sidebar.expander("🔑 API Key Status", expanded=False):
-    st.caption("Geladene Schlüssel (Env / Secrets):")
-    st.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
-    st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
-    st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
-    st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
-    st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
-    st.write(f"ESTAT_APP_ID: {'🟢 Aktiv' if ESTAT_APP_ID else '🔴 Fehlt'}")
+    with st.expander("📅 COT-Status", expanded=False):
+        rep_date, status_val, explanation_val = get_cot_data_status()
+        st.write(f"**Status:** {status_val}")
+        if rep_date:
+            st.write(f"**Bericht vom:** {rep_date}")
+        st.caption(explanation_val)
+        
+        try:
+            y = datetime.now().year
+            df_cot = load_cot_year_cached(y)
+            if df_cot is None or df_cot.empty:
+                df_cot = load_cot_year_cached(y - 1)
+            if df_cot is not None and not df_cot.empty:
+                cot_rows = []
+                for curr, code in COT_SYMBOLS.items():
+                    rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
+                    cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
+                st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
+        except Exception as e:
+            st.error(f"Fehler bei Tabelle: {e}")
 
-# 3. 📝 Streamlit Secrets Anleitung
-with st.sidebar.expander("📝 Streamlit Secrets Anleitung", expanded=False):
-    st.markdown("""
-    Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
-    ```toml
-    APIFREAKS_API_KEY = "IhrKey"
-    FRED_API_KEY = "IhrKey"
-    EODHD_API_KEY = "IhrKey"
-    # ...
-    ```
-    """)
+    with st.expander("🔑 API Key Status", expanded=False):
+        st.caption("Geladene Schlüssel (Env / Secrets):")
+        st.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
+        st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
+        st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
+        st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
+        st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
+        st.write(f"ESTAT_APP_ID: {'🟢 Aktiv' if ESTAT_APP_ID else '🔴 Fehlt'}")
+
+    with st.expander("📝 Streamlit Secrets Anleitung", expanded=False):
+        st.markdown("""
+        Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
+        ```toml
+        APIFREAKS_API_KEY = "IhrKey"
+        FRED_API_KEY = "IhrKey"
+        EODHD_API_KEY = "IhrKey"
+        # ...
+        ```
+        """)
+        
+    df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
+    st.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
 
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
 if invalid_pair:
@@ -3711,16 +3694,13 @@ if invalid_pair:
     is_live_itick = False
 else:
     with st.spinner("Initialisiere globale Marktdaten..."):
-        # Pre-load macro scores
         base_score = compute_currency_score(base_curr, FRED_KEY)
         quote_score = compute_currency_score(quote_curr, FRED_KEY)
         
-        # Calculate corrected signal value (scaled to range -50 to +50)
         raw_diff = quote_score - base_score
         signal_value = raw_diff / 2.0
         signal_value = max(-50.0, min(50.0, signal_value))
         
-        # Calculate filtered trading signal based on new boundaries
         if signal_value >= 25.0:
             sig = "SB"
             badge = "STRONG BUY"
@@ -3737,7 +3717,6 @@ else:
             sig = "SS"
             badge = "STRONG SELL"
             
-        # Load iTick close price
         itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
         latest_close = itick_data["close"] if itick_data else 0.0
 
@@ -3746,30 +3725,9 @@ st.title("⚖️ Forex Fundamental Suite")
 if invalid_pair:
     st.error("⚠️ **Ungültiges Währungspaar ausgewählt:** Basis- und Kurswährung müssen unterschiedlich sein. Bitte wählen Sie zwei verschiedene G10-Währungen in der Sidebar aus (z. B. USD/EUR).")
 else:
-    st.markdown(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
-    
-    # Always show bias banner and economy scores at the top
-    render_bias_box(signal_value, base_curr, quote_curr, base_score, quote_score, sig)
-    
-    col_score_b, col_score_q = st.columns(2)
-    with col_score_b:
-        st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #10b981;">
-    <span class="metric-label">{CURRENCIES[base_curr]['flag']} {base_curr} Wirtschaftsscore</span>
-    <div class="metric-value">{base_score:.1f} / 100</div>
-    <div class="source-tag">Zusammengesetzter Score</div>
-    </div>""", unsafe_allow_html=True)
-    with col_score_q:
-        st.markdown(f"""<div class="metric-card-custom" style="border-left: 4px solid #444c56;">
-    <span class="metric-label">{CURRENCIES[quote_curr]['flag']} {quote_curr} Wirtschaftsscore</span>
-    <div class="metric-value">{quote_score:.1f} / 100</div>
-    <div class="source-tag">Zusammengesetzter Score</div>
-    </div>""", unsafe_allow_html=True)
-
+    st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
 
 # ----------------- 6. TABS MODULES -----------------
-df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
-st.sidebar.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
-
 def get_pair_signal_and_badge(base, quote):
     b_score = compute_currency_score(base, FRED_KEY)
     q_score = compute_currency_score(quote, FRED_KEY)
@@ -3847,9 +3805,65 @@ with tab1:
         elif badge_name == "MID SELL": sig_code = "MS"
         elif badge_name == "STRONG SELL": sig_code = "SS"
         
+        # 1. Signale Banner
         render_bias_box(sig_val, base_curr, quote_curr, base_score, quote_score, sig_code)
         
-        # Global market regime detection
+        # 2. G10 Trading Checklist IMMEDIATELY BELOW Signale
+        st.subheader("📋 G10 Währungspaare Gesamtübersicht (Trading-Checkliste)")
+        import itertools
+        currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
+        G8_PAIRS = list(itertools.permutations(currencies_list, 2))
+        
+        checklist_rows = []
+        for b, q in G8_PAIRS:
+            p_name = f"{b}/{q}"
+            b_name_p, b_color_p, sig_val_p = get_pair_signal_and_badge(b, q)
+            if b_name_p == "NEUTRAL" and not show_all_pairs:
+                continue
+            b_rate, _, _ = get_country_rate(CURRENCIES[b]["wb_code"], FRED_KEY)
+            q_rate, _, _ = get_country_rate(CURRENCIES[q]["wb_code"], FRED_KEY)
+            diff_bps = int((q_rate - b_rate) * 100)
+            diff_str = f"{b_rate:.2f}% vs {q_rate:.2f}% ({diff_bps:+d} bps)"
+            
+            rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
+            rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
+            
+            sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
+            sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
+            sent_str = f"{sent_val:+.1f} {sent_emoji}"
+            
+            debt_str = format_imf_indicator(b, q, "GGXWDG_NGDP")
+            ca_str = format_imf_indicator(b, q, "BCA_NGDPD")
+            
+            b_mom = compute_macro_momentum(b)
+            q_mom = compute_macro_momentum(q)
+            mom_str = f"{b_mom:+.1f} / {q_mom:+.1f}"
+            
+            class_emoji = "🟢 " + b_name_p if "BUY" in b_name_p else "🔴 " + b_name_p if "SELL" in b_name_p else "🟡 " + b_name_p
+            
+            checklist_rows.append({
+                "Währungspaar": f"{CURRENCIES[b]['flag']} {b} / {CURRENCIES[q]['flag']} {q}",
+                "Zins-Differenz (bps)": diff_str,
+                "Signal-Wert": f"{sig_val_p:+.1f}",
+                "Signal-Klassifikation": class_emoji,
+                "Analysten-Konsens": rec_str,
+                "Sentiment": sent_str,
+                "Staatsverschuldung": debt_str,
+                "Leistungsbilanz": ca_str,
+                "Momentum (Base/Quote)": mom_str
+            })
+            
+        if checklist_rows:
+            df_checklist = pd.DataFrame(checklist_rows)
+            dynamic_height = min(750, (len(checklist_rows) + 1) * 35 + 3)
+            st.dataframe(df_checklist, hide_index=True, use_container_width=True, height=dynamic_height)
+        else:
+            st.info("ℹ️ Aktuell liegen keine aktiven BUY/SELL-Signale für G10-Paare vor. Aktivieren Sie 'Alle Paare anzeigen (inkl. Neutral)' in der Sidebar, um die gesamte Matrix inklusive aller neutralen Paare zu sehen.")
+
+        st.write("")
+        st.markdown("---")
+        
+        # 3. Global market regime detection & Overview metrics
         vix = get_vix_value()
         cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
         gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
@@ -3865,14 +3879,12 @@ with tab1:
         else:
             global_regime = "Normales Marktregime 🟡"
             
-        # Strongest/Weakest currency
         scores_dict = {}
         for curr in CURRENCIES.keys():
             scores_dict[curr] = compute_currency_professional_score_and_regime(curr)[0]
         strongest_c = max(scores_dict.keys(), key=lambda k: scores_dict[k])
         weakest_c = min(scores_dict.keys(), key=lambda k: scores_dict[k])
         
-        # Overview metrics
         col_dash1, col_dash2, col_dash3, col_dash4 = st.columns(4)
         with col_dash1:
             st.metric("Globale Marktphase", global_regime)
@@ -3932,57 +3944,6 @@ with tab1:
             bullets.append(f"- **GDP**: {winner_gdp} stärker (Differenz: {abs(gdp_diff):.1f} Pkt)")
             for bullet in bullets:
                 st.write(bullet)
-                
-    # Decisions checklist table at the bottom - permanently visible directly below header
-    st.subheader("📋 G10 Währungspaare Gesamtübersicht (Trading-Checkliste)")
-    import itertools
-    currencies_list = ["USD", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD", "JPY"]
-    G8_PAIRS = list(itertools.permutations(currencies_list, 2))
-    
-    checklist_rows = []
-    for b, q in G8_PAIRS:
-        p_name = f"{b}/{q}"
-        b_name_p, b_color_p, sig_val_p = get_pair_signal_and_badge(b, q)
-        if b_name_p == "NEUTRAL" and not show_all_pairs:
-            continue
-        b_rate, _, _ = get_country_rate(CURRENCIES[b]["wb_code"], FRED_KEY)
-        q_rate, _, _ = get_country_rate(CURRENCIES[q]["wb_code"], FRED_KEY)
-        diff_bps = int((q_rate - b_rate) * 100)
-        diff_str = f"{b_rate:.2f}% vs {q_rate:.2f}% ({diff_bps:+d} bps)"
-        
-        rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
-        rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
-        
-        sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
-        sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
-        sent_str = f"{sent_val:+.1f} {sent_emoji}"
-        
-        debt_str = format_imf_indicator(b, q, "GGXWDG_NGDP")
-        ca_str = format_imf_indicator(b, q, "BCA_NGDPD")
-        
-        b_mom = compute_macro_momentum(b)
-        q_mom = compute_macro_momentum(q)
-        mom_str = f"{b_mom:+.1f} / {q_mom:+.1f}"
-        
-        class_emoji = "🟢 " + b_name_p if "BUY" in b_name_p else "🔴 " + b_name_p if "SELL" in b_name_p else "🟡 " + b_name_p
-        
-        checklist_rows.append({
-            "Währungspaar": f"{CURRENCIES[b]['flag']} {b} / {CURRENCIES[q]['flag']} {q}",
-            "Zins-Differenz (bps)": diff_str,
-            "Signal-Wert": f"{sig_val_p:+.1f}",
-            "Signal-Klassifikation": class_emoji,
-            "Analysten-Konsens": rec_str,
-            "Sentiment": sent_str,
-            "Staatsverschuldung": debt_str,
-            "Leistungsbilanz": ca_str,
-            "Momentum (Base/Quote)": mom_str
-        })
-        
-    if checklist_rows:
-        df_checklist = pd.DataFrame(checklist_rows)
-        # Dynamically fit container height to exact row count to eliminate vertical empty space
-        dynamic_height = min(750, (len(checklist_rows) + 1) * 35 + 3)
-        st.dataframe(df_checklist, hide_index=True, use_container_width=True, height=dynamic_height)
     else:
         st.info("ℹ️ Aktuell liegen keine aktiven BUY/SELL-Signale für G10-Paare vor. Aktivieren Sie 'Alle Paare anzeigen (inkl. Neutral)' in der Sidebar, um die gesamte Matrix inklusive aller neutralen Paare zu sehen.")
 
