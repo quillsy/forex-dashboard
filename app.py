@@ -194,14 +194,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ----------------- Load API Keys from Env & Secrets -----------------
-def load_api_key(name):
-    val = os.getenv(name)
-    if not val:
+def load_api_key(name, alt_names=None):
+    candidates = [name]
+    if alt_names:
+        candidates.extend(alt_names)
+        
+    for key_name in candidates:
+        val = os.getenv(key_name)
+        if val:
+            return val
         try:
-            val = st.secrets.get(name) or st.secrets.get(name.lower())
+            val = st.secrets.get(key_name) or st.secrets.get(key_name.lower())
+            if val:
+                return val
         except Exception:
             pass
-    return val
+    return None
 
 FRED_KEY = load_api_key("FRED_API_KEY")
 AV_KEY = load_api_key("ALPHA_VANTAGE_API_KEY")
@@ -211,7 +219,7 @@ BENZINGA_KEY = load_api_key("BENZINGA_API_KEY")
 FINNHUB_KEY = load_api_key("FINNHUB_API_KEY")
 ITICK_KEY = load_api_key("ITICK_API_KEY")
 FCS_KEY = load_api_key("FCS_API_KEY")
-STOCKDATA_KEY = load_api_key("STOCKDATA_API_KEY")
+STOCKDATA_KEY = load_api_key("STOCKDATA_API_KEY", alt_names=["STOCKDATA_KEY", "STOCKDATA_TOKEN", "STOCK_DATA_API_KEY", "STOCKDATA_API_TOKEN", "STOCK_DATA_KEY"])
 TIINGO_KEY = load_api_key("TIINGO_API_KEY")
 BLS_KEY = load_api_key("BLS_API_KEY")
 APIFREAKS_KEY = load_api_key("APIFREAKS_API_KEY")
@@ -585,16 +593,68 @@ def fetch_fcs_history_live(pair, key):
     return df.sort_values("date").reset_index(drop=True)
 
 def fetch_stockdata_live(pair, key):
-    symbol = pair.replace("/", "")
-    url = f"https://api.stockdata.org/v1/news/all?filter_entities=true&language=en&symbols={symbol}&api_token={key}"
-    r = requests.get(url, timeout=8)
-    r.raise_for_status()
-    res = r.json()
-    articles = res.get("data", [])
-    scores = [art["sentiment_score"] for art in articles if "sentiment_score" in art]
+    if not key:
+        raise ValueError("API-Key nicht konfiguriert")
+        
+    symbol_raw = pair.replace("/", "")
+    base_curr, quote_curr = pair.split("/") if "/" in pair else (pair[:3], pair[3:])
+    
+    urls_to_try = [
+        f"https://api.stockdata.org/v1/news/all?language=en&symbols={symbol_raw}&api_token={key}",
+        f"https://api.stockdata.org/v1/news/all?language=en&search={base_curr}%20{quote_curr}&api_token={key}",
+        f"https://api.stockdata.org/v1/news/all?language=en&search={pair}&api_token={key}"
+    ]
+    
+    last_error = None
+    articles = []
+    
+    for url in urls_to_try:
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code == 401 or r.status_code == 403:
+                raise ValueError("API-Key ungültig")
+            elif r.status_code == 429:
+                raise ValueError("API Rate Limit erreicht")
+            elif r.status_code >= 500:
+                raise ValueError("API momentan nicht erreichbar")
+            r.raise_for_status()
+            
+            res = r.json()
+            if "error" in res:
+                err_msg = str(res["error"].get("message", res["error"]))
+                if "invalid" in err_msg.lower() or "token" in err_msg.lower():
+                    raise ValueError("API-Key ungültig")
+                elif "rate" in err_msg.lower() or "limit" in err_msg.lower():
+                    raise ValueError("API Rate Limit erreicht")
+                else:
+                    raise ValueError(f"API Fehler: {err_msg}")
+                    
+            articles = res.get("data", [])
+            if articles:
+                break
+        except requests.exceptions.RequestException as req_err:
+            if hasattr(req_err, 'response') and req_err.response is not None:
+                st_code = req_err.response.status_code
+                if st_code == 401 or st_code == 403:
+                    raise ValueError("API-Key ungültig")
+                elif st_code == 429:
+                    raise ValueError("API Rate Limit erreicht")
+                elif st_code >= 500:
+                    raise ValueError("API momentan nicht erreichbar")
+            last_error = req_err
+
+    if not articles:
+        if last_error:
+            raise last_error
+        raise ValueError("Keine aktuellen Nachrichten für dieses Paar gefunden")
+        
+    scores = [art["sentiment_score"] for art in articles if "sentiment_score" in art and art["sentiment_score"] is not None]
     if not scores:
-        raise ValueError("No StockData sentiment articles found")
-    return float(sum(scores) / len(scores) * 10.0)
+        raise ValueError("Keine Sentiment-Bewertung in Nachrichten vorhanden")
+        
+    avg_score = float(sum(scores) / len(scores))
+    scaled_sentiment = avg_score * 10.0
+    return float(np.clip(scaled_sentiment, -10.0, 10.0))
 
 def fetch_worldbank_live(country_code, indicator):
     # Auto-translate ZG to ZS for unemployment to get live data from World Bank
@@ -1344,15 +1404,27 @@ def get_stockdata_sentiment(pair, key):
     if "api_errors" not in st.session_state:
         st.session_state["api_errors"] = {}
     if not key:
-        st.session_state["api_errors"]["StockData Sentiment"] = "API-Key nicht konfiguriert"
-        return generate_mock_stockdata(), datetime.now(), False
+        status_msg = "🔴 StockData Sentiment: API-Key fehlt"
+        st.session_state["api_errors"]["StockData Sentiment"] = "API-Key nicht in Streamlit Secrets konfiguriert"
+        return 0.0, datetime.now(), False, status_msg
     try:
         val = fetch_stockdata_live(pair, key)
+        status_msg = "🟢 StockData Sentiment: Aktiv (API-Verbindung erfolgreich)"
         st.session_state["api_errors"]["StockData Sentiment"] = None
-        return val, datetime.now(), True
+        return val, datetime.now(), True, status_msg
     except Exception as e:
-        st.session_state["api_errors"]["StockData Sentiment"] = str(e)
-        return generate_mock_stockdata(), datetime.now(), False
+        err_str = str(e)
+        if "ungültig" in err_str:
+            status_msg = "🔴 StockData Sentiment: API-Key ungültig"
+        elif "Rate Limit" in err_str:
+            status_msg = "🟠 StockData Sentiment: API Rate Limit erreicht"
+        elif "nicht erreichbar" in err_str:
+            status_msg = "🟠 StockData Sentiment: API momentan nicht erreichbar"
+        else:
+            status_msg = f"🟠 StockData Sentiment: {err_str}"
+            
+        st.session_state["api_errors"]["StockData Sentiment"] = err_str
+        return 0.0, datetime.now(), False, status_msg
 
 @st.cache_data(ttl=604800, show_spinner=False)
 def get_worldbank_data(country_code, indicator):
@@ -3923,9 +3995,12 @@ with tab1:
             rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
             rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
             
-            sent_val, _, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
-            sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
-            sent_str = f"{sent_val:+.1f} {sent_emoji}"
+            sent_val, _, sent_active, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
+            if sent_active:
+                sent_emoji = "🟢" if sent_val >= 3.5 else "🔴" if sent_val <= -3.5 else "🟡"
+                sent_str = f"{sent_val:+.1f} {sent_emoji}"
+            else:
+                sent_str = "nicht verfügbar"
             
             debt_str = format_imf_indicator(b, q, "GGXWDG_NGDP")
             ca_str = format_imf_indicator(b, q, "BCA_NGDPD")
@@ -4684,10 +4759,17 @@ with tab6:
     if invalid_pair:
         st.warning("⚠️ Bitte wählen Sie in der Sidebar ein gültiges Währungspaar aus, um das Sentiment anzuzeigen.")
     else:
-        sent_val, _, status_active = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
+        sent_val, _, status_active, status_msg = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
         if not status_active:
-            st.info("⚠️ **StockData Sentiment ist zurzeit nicht aktiv:** API-Key nicht konfiguriert oder Fehler bei der Abfrage. Es werden keine künstlichen Sentiment-Daten angezeigt.")
+            if "🟢" in status_msg:
+                st.success(status_msg)
+            elif "🔴" in status_msg:
+                st.error(status_msg)
+            else:
+                st.warning(status_msg)
+            st.info("ℹ️ **Secrets-Konfiguration:** Hinterlegen Sie Ihren API-Key in den Streamlit Secrets unter `STOCKDATA_API_KEY = \"DEIN_KEY\"`.")
         else:
+            st.success(status_msg)
             col_sent1, col_sent2 = st.columns([1.5, 1])
             with col_sent1:
                 fig_gauge = go.Figure(go.Indicator(
@@ -5056,6 +5138,23 @@ with tab8:
     
     df_health = pd.DataFrame(api_health)
     st.dataframe(df_health, hide_index=True, use_container_width=True)
+    
+    st.write("")
+    st.subheader("📝 Streamlit Secrets Konfigurations-Anleitung")
+    st.markdown("""
+    Um externe API-Keys in Streamlit Community Cloud einzurichten, fügen Sie diese unter **Settings → Secrets** ein (oder lokal in `.streamlit/secrets.toml`):
+    
+    ```toml
+    STOCKDATA_API_KEY = "Ihr_StockData_API_Key"
+    FRED_API_KEY = "Ihr_FRED_API_Key"
+    FINNHUB_API_KEY = "Ihr_Finnhub_API_Key"
+    FCS_API_KEY = "Ihr_FCS_API_Key"
+    ITICK_API_KEY = "Ihr_iTick_API_Key"
+    BENZINGA_API_KEY = "Ihr_Benzinga_API_Key"
+    ```
+    
+    *Unterstützte Secret-Namen für StockData:* `STOCKDATA_API_KEY`, `STOCKDATA_KEY`, `STOCKDATA_TOKEN`.
+    """)
     
     st.write("")
     st.subheader("📋 Rohdaten & Aktualisierungsstand")
