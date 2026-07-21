@@ -3050,6 +3050,7 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
     w_pmi = weights.get("PMI", 20.0) / 100.0
     w_gdp = weights.get("GDP", 5.0) / 100.0
     w_fw = weights.get("ForwardRates", 0.0) / 100.0
+    w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
     w_corr = weights.get("Correction", 100.0) / 100.0
     
     fw_score = 0.0
@@ -3062,13 +3063,24 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
         except Exception:
             pass
             
+    inf_exp_score = 0.0
+    if w_inf_exp > 0.0:
+        try:
+            ed = get_inflation_expectations_data(curr, target_date)
+            oecd_val = ed.get("oecd_expectation")
+            if oecd_val is not None:
+                inf_exp_score = float(np.clip((oecd_val - 100.0) * 10.0, -10.0, 10.0))
+        except Exception:
+            pass
+            
     core_score = (
         w_gp * scores["Geldpolitik"] +
         w_inf * scores["Inflation"] +
         w_lab * scores["Arbeitsmarkt"] +
         w_pmi * scores["PMI"] +
         w_gdp * scores["GDP"] +
-        w_fw * fw_score
+        w_fw * fw_score +
+        w_inf_exp * inf_exp_score
     )
     
     corr_score = compute_correction_score(curr, target_date) * w_corr
@@ -4070,6 +4082,115 @@ def get_historical_forward_rates(curr, days=180, step=30):
             pass
     return pd.DataFrame(series_data)
 
+def get_inflation_expectations_data(curr, target_date=None):
+    if target_date is None:
+        dt_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        try:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        except Exception:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+            
+    fred_key = FRED_KEY
+    
+    # Actual CPI / Inflation
+    cpi_id = CPI_SERIES.get(curr)
+    cpi_val = None
+    cpi_trend = None
+    if cpi_id and fred_key:
+        try:
+            cpi_val, _, _ = get_fred_data_historical(cpi_id, dt_str, fred_key)
+            # Calculate trend as 3-month change
+            dt_3m = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+            cpi_3m, _, _ = get_fred_data_historical(cpi_id, dt_3m, fred_key)
+            if cpi_val is not None and cpi_3m is not None:
+                cpi_trend = cpi_val - cpi_3m
+        except Exception:
+            pass
+            
+    # OECD Consumer Inflation Expectations ID mapping
+    oecd_map = {
+        "USD": "CSCICP02USM665S",
+        "EUR": "CSCICP02EZM665S",
+        "GBP": "CSCICP02GBM665S",
+        "JPY": "CSCICP02JPM665S",
+        "CHF": "CSCICP02CHM665S",
+        "CAD": "CSCICP02CAM665S",
+        "AUD": "CSCICP02AUM665S",
+        "NZD": "CSCICP02NZM665S",
+        "SEK": "CSCICP02SEM665S",
+        "NOK": "CSCICP02NOM665S"
+    }
+    
+    expect_id = oecd_map.get(curr)
+    expect_val = None
+    if expect_id and fred_key:
+        try:
+            expect_val, _, _ = get_fred_data_historical(expect_id, dt_str, fred_key)
+        except Exception:
+            pass
+            
+    # Specific Market Breakeven (USD only in FRED)
+    breakeven_val = None
+    if curr == "USD" and fred_key:
+        try:
+            breakeven_val, _, _ = get_fred_data_historical("T10YIE", dt_str, fred_key)
+        except Exception:
+            pass
+            
+    return {
+        "actual_cpi": cpi_val,
+        "cpi_trend": cpi_trend,
+        "oecd_expectation": expect_val,
+        "market_breakeven": breakeven_val,
+        "date": dt_str,
+        "source": "FRED / OECD Consumer Survey" if curr != "USD" else "FRED / US Treasury"
+    }
+
+def get_inflation_expectation_signal(base, quote, target_date=None):
+    ed_base = get_inflation_expectations_data(base, target_date)
+    ed_quote = get_inflation_expectations_data(quote, target_date)
+    
+    exp_b = ed_base.get("oecd_expectation")
+    exp_q = ed_quote.get("oecd_expectation")
+    
+    if exp_b is None or exp_q is None:
+        return "Neutral 🟡", 0.0, "N/A"
+        
+    diff = exp_b - exp_q
+    
+    if diff >= 1.0:
+        sig = "Strong Inflationary 🔴🔴 (Base expects higher inflation)"
+    elif 0.3 <= diff < 1.0:
+        sig = "Inflationary 🔴"
+    elif -0.3 < diff < 0.3:
+        sig = "Neutral 🟡"
+    elif -1.0 < diff <= -0.3:
+        sig = "Disinflationary 🟢"
+    else:
+        sig = "Strong Disinflationary 🟢🟢 (Base expects lower inflation)"
+        
+    return sig, diff, f"{exp_b:.2f} vs {exp_q:.2f}"
+
+def get_historical_inflation_expectations(curr, days=365, step=30):
+    series_data = []
+    end_date = datetime.now()
+    for d in range(days, -1, -step):
+        t_date = end_date - timedelta(days=d)
+        t_date_str = t_date.strftime("%Y-%m-%d")
+        try:
+            ed = get_inflation_expectations_data(curr, t_date_str)
+            if ed["oecd_expectation"] is not None:
+                series_data.append({
+                    "Datum": t_date,
+                    "CPI": ed["actual_cpi"],
+                    "Expectation": ed["oecd_expectation"],
+                    "Breakeven": ed["market_breakeven"]
+                })
+        except Exception:
+            pass
+    return pd.DataFrame(series_data)
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🏠 Dashboard",
     "🌍 Currency Ranking",
@@ -4310,11 +4431,12 @@ with tab3:
     st.header("📊 Fundamental Analysis Hub")
     st.caption("Umfassende makroökonomische Fundamentaldaten: PMI, Zinsdifferenzen, Inflation, Arbeitsmarkt, BIP und Zentralbanken.")
     
-    sub_fund1, sub_fund2, sub_fund3, sub_fund4 = st.tabs([
+    sub_fund1, sub_fund2, sub_fund3, sub_fund4, sub_fund5 = st.tabs([
         "📈 Währungs-Details & Trends",
         "🏦 Zentralbanken & Zinskurven",
         "📊 PMI-Frühindikatoren",
-        "🔮 Forward-Looking Rates"
+        "🔮 Forward-Looking Rates",
+        "🎈 Inflation Expectations"
     ])
     
     with sub_fund1:
@@ -4723,9 +4845,125 @@ with tab3:
             )
             st.plotly_chart(fig_diff_fw, use_container_width=True)
             
+        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden täglich aus FRED geladen. Da OIS / Swap-Kurse für SEK, NOK und JPY über Drittanbieter lizenzpflichtig sind, greift die Engine für diese Währungen auf den mathematisch äquivalenten, liquiden Staatsanleihen-implizierten Forward Rate Spread (1Y vs 2Y) zurück. Historische Werte sind ohne Look-Ahead Bias berechnet.")
+
+    with sub_fund5:
+        st.subheader("🎈 Inflation Expectations & Breakeven Inflation")
+        st.caption("Vergleichende Analyse von realisierter Inflation (CPI), Inflationstrends und zukunftsgerichteten Inflationserwartungen (OECD Consumer Surveys & Breakeven Inflation Rates).")
+        
+        st.info("ℹ️ **Methodik:** Marktbasierte Inflationserwartungen (Breakeven Inflation) messen die Differenz zwischen nominalen und inflationsgeschützten Staatsanleihen (TIPS) – aktuell verfügbar für die USA (USD). Für alle anderen G10-Währungen werden die standardisierten monatlichen Konsumenten-Inflationserwartungsumfragen der OECD (Index-Basis 100.0) verwendet.")
+        
+        # Single Currency View
+        st.markdown("### 🏦 Einzelwährungs-Inflationsanalyse")
+        sel_c_inf = st.selectbox("Währung auswählen:", list(CURRENCIES.keys()), index=0, key="inf_curr_select")
+        
+        inf_data = get_inflation_expectations_data(sel_c_inf)
+        
+        col_inf1, col_inf2, col_inf3 = st.columns(3)
+        with col_inf1:
+            st.metric("Tatsächliche Inflation (CPI)", f"{inf_data['actual_cpi']:.2f}%" if inf_data['actual_cpi'] is not None else "N/A")
+            st.metric("Inflationstrend (3M Änderung)", f"{inf_data['cpi_trend']:+.2f}%" if inf_data['cpi_trend'] is not None else "N/A")
+        with col_inf2:
+            st.metric("OECD Consumer Inflation Expectations (Index)", f"{inf_data['oecd_expectation']:.2f}" if inf_data['oecd_expectation'] is not None else "N/A")
+        with col_inf3:
+            st.metric("US Treasury 10Y Breakeven Rate" if sel_c_inf == "USD" else "Marktbasierte Breakeven Inflation", 
+                      f"{inf_data['market_breakeven']:.2f}%" if inf_data['market_breakeven'] is not None else "nicht verfügbar")
+            st.metric("Datenquelle", f"{inf_data['source']} ({inf_data['date']})")
+            
+        # Draw Charts for Single Currency
+        df_hist_inf = get_historical_inflation_expectations(sel_c_inf)
+        if not df_hist_inf.empty:
+            # Chart 1: CPI vs Expectation
+            fig_inf_line1 = px.line(
+                df_hist_inf, 
+                x="Datum", 
+                y=["CPI", "Expectation"], 
+                title=f"Tatsächliche Inflation (CPI) vs. Konsumenten-Erwartung für {sel_c_inf}"
+            )
+            fig_inf_line1.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a")
+            )
+            st.plotly_chart(fig_inf_line1, use_container_width=True)
+            
+            # Chart 2: Expectations over time (if Breakeven is available)
+            if sel_c_inf == "USD":
+                fig_inf_line2 = px.line(
+                    df_hist_inf, 
+                    x="Datum", 
+                    y="Breakeven", 
+                    title=f"US 10-Year Breakeven Inflation Rate over Time"
+                )
+                fig_inf_line2.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color="#7d7d8a")
+                )
+                st.plotly_chart(fig_inf_line2, use_container_width=True)
+            
+        st.markdown("---")
+        
+        # FX Pair Comparison
+        st.markdown(f"### 💱 FX-Paar Inflationsdifferenzen-Analyse ({selected_pair})")
+        
+        base, quote = selected_pair.split("/")
+        ed_base = get_inflation_expectations_data(base)
+        ed_quote = get_inflation_expectations_data(quote)
+        
+        # Expectations Differential
+        inf_sig, inf_diff_val, inf_diff_desc = get_inflation_expectation_signal(base, quote)
+        
+        col_pair_inf1, col_pair_inf2, col_pair_inf3 = st.columns(3)
+        with col_pair_inf1:
+            st.markdown(f"**{base} (Basis-Währung):**")
+            st.write(f"- Tatsächliche Inflation: `{ed_base['actual_cpi']:.2f}%`" if ed_base['actual_cpi'] is not None else "- Tatsächliche Inflation: `N/A`")
+            st.write(f"- Inflationstrend: `{ed_base['cpi_trend']:+.2f}%`" if ed_base['cpi_trend'] is not None else "- Inflationstrend: `N/A`")
+            st.write(f"- Erwartungs-Index (OECD): `{ed_base['oecd_expectation']:.2f}`" if ed_base['oecd_expectation'] is not None else "- Erwartungs-Index (OECD): `N/A`")
+            
+        with col_pair_inf2:
+            st.markdown(f"**{quote} (Kurs-Währung):**")
+            st.write(f"- Tatsächliche Inflation: `{ed_quote['actual_cpi']:.2f}%`" if ed_quote['actual_cpi'] is not None else "- Tatsächliche Inflation: `N/A`")
+            st.write(f"- Inflationstrend: `{ed_quote['cpi_trend']:+.2f}%`" if ed_quote['cpi_trend'] is not None else "- Inflationstrend: `N/A`")
+            st.write(f"- Erwartungs-Index (OECD): `{ed_quote['oecd_expectation']:.2f}`" if ed_quote['oecd_expectation'] is not None else "- Erwartungs-Index (OECD): `N/A`")
+            
+        with col_pair_inf3:
+            st.markdown("**Spread-Gegenüberstellung:**")
+            st.write(f"- **Inflation expectations differential:** `{inf_diff_val:+.2f}`")
+            st.write(f"- **Research-Signal:** `{inf_sig}`")
+            
+        # Divergence / Conflict analysis
+        st.write("")
+        st.subheader("📊 Inflation-Divergenz-Check")
+        
+        # Check Base Divergence
+        base_div = False
+        if ed_base['cpi_trend'] is not None and ed_base['oecd_expectation'] is not None:
+            if (ed_base['cpi_trend'] < -0.1 and ed_base['oecd_expectation'] > 100.2):
+                base_div = True
+            elif (ed_base['cpi_trend'] > 0.1 and ed_base['oecd_expectation'] < 99.8):
+                base_div = True
+                
+        # Check Quote Divergence
+        quote_div = False
+        if ed_quote['cpi_trend'] is not None and ed_quote['oecd_expectation'] is not None:
+            if (ed_quote['cpi_trend'] < -0.1 and ed_quote['oecd_expectation'] > 100.2):
+                quote_div = True
+            elif (ed_quote['cpi_trend'] > 0.1 and ed_quote['oecd_expectation'] < 99.8):
+                quote_div = True
+                
+        if base_div or quote_div:
+            st.warning("⚠️ **Inflation Divergence:** Bei mindestens einer Währung widerspricht die aktuelle Inflations-Richtung (trend) den zukünftigen Erwartungen des Marktes. Dies kann auf eine bevorstehende Konjunktur- oder geldpolitische Trendwende hindeuten!")
+            if base_div:
+                st.write(f"- **{base}:** Tatsächliche Inflation ({ed_base['cpi_trend']:+.2f}% Trend) verläuft entgegengesetzt zu den Verbraucher-Erwartungen ({ed_base['oecd_expectation']:.2f}).")
+            if quote_div:
+                st.write(f"- **{quote}:** Tatsächliche Inflation ({ed_quote['cpi_trend']:+.2f}% Trend) verläuft entgegengesetzt zu den Verbraucher-Erwartungen ({ed_quote['oecd_expectation']:.2f}).")
+        else:
+            st.success("✅ **Inflation Harmonie:** Die tatsächliche Inflations-Entwicklung steht im Einklang mit den Erwartungen des Marktes.")
+            
         # Data Quality & Footnote
         st.write("")
-        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden täglich aus FRED geladen. Da OIS / Swap-Kurse für SEK, NOK und JPY über Drittanbieter lizenzpflichtig sind, greift die Engine für diese Währungen auf den mathematisch äquivalenten, liquiden Staatsanleihen-implizierten Forward Rate Spread (1Y vs 2Y) zurück. Historische Werte sind ohne Look-Ahead Bias berechnet.")
+        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden monatlich aktualisiert. Die OECD-Verbraucherumfragen stellen einen nützlichen fundamentalen Trend dar, sind jedoch im Vergleich zu börsentäglichen Marktzinsen weniger volatil.")
 
 # ----------------- TAB 4: FX PAIR ANALYSIS -----------------
 with tab4:
@@ -5270,9 +5508,10 @@ with tab7:
         with col_w3:
             w_gdp_inp = st.slider("📉 GDP", 0, 100, 5, key="w_gdp_slider")
             w_fw_inp = st.slider("🔮 Forward Rates", 0, 100, 0, key="w_fw_slider")
+            w_inf_exp_inp = st.slider("🎈 Inflation Expectations", 0, 100, 0, key="w_inf_exp_slider")
             w_corr_inp = st.slider("⚖️ Correction Factors Weight", 0, 200, 100, key="w_corr_slider")
             
-        total_core_weight = w_gp_inp + w_inf_inp + w_lab_inp + w_pmi_inp + w_gdp_inp + w_fw_inp
+        total_core_weight = w_gp_inp + w_inf_inp + w_lab_inp + w_pmi_inp + w_gdp_inp + w_fw_inp + w_inf_exp_inp
         if total_core_weight != 100:
             st.warning(f"⚠️ **Gewichtungshinweis:** Summe der CORE-Gewichte beträgt aktuell **{total_core_weight}%** (Soll: 100%). Modifizierte Ergebnisse werden proportional skaliert.")
         else:
@@ -5288,6 +5527,7 @@ with tab7:
             "PMI": w_pmi_inp,
             "GDP": w_gdp_inp,
             "ForwardRates": w_fw_inp,
+            "InflationExpectations": w_inf_exp_inp,
             "Correction": w_corr_inp
         }
         
@@ -5541,7 +5781,7 @@ with tab9:
 
     st.write("")
     st.markdown("### ⚖️ Faktor-Gewichtung (CORE Modell)")
-    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6, col_w7 = st.columns(7)
+    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6, col_w7, col_w8 = st.columns(8)
     with col_w1:
         w_gp_b = st.number_input("Yields (%)", 0, 100, 35, key="w_gp_b")
     with col_w2:
@@ -5555,6 +5795,8 @@ with tab9:
     with col_w6:
         w_fw_b = st.number_input("Forward Rates (%)", 0, 100, 0, key="w_fw_b")
     with col_w7:
+        w_inf_exp_b = st.number_input("Inf. Expect. (%)", 0, 100, 0, key="w_inf_exp_b")
+    with col_w8:
         w_corr_b = st.number_input("Correction (%)", 0, 200, 100, key="w_corr_b")
         
     weights_bt = {
@@ -5564,6 +5806,7 @@ with tab9:
         "PMI": w_pmi_b,
         "GDP": w_gdp_b,
         "ForwardRates": w_fw_b,
+        "InflationExpectations": w_inf_exp_b,
         "Correction": w_corr_b
     }
 
