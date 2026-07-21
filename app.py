@@ -3944,8 +3944,6 @@ with tab1:
             bullets.append(f"- **GDP**: {winner_gdp} stärker (Differenz: {abs(gdp_diff):.1f} Pkt)")
             for bullet in bullets:
                 st.write(bullet)
-    else:
-        st.info("ℹ️ Aktuell liegen keine aktiven BUY/SELL-Signale für G10-Paare vor. Aktivieren Sie 'Alle Paare anzeigen (inkl. Neutral)' in der Sidebar, um die gesamte Matrix inklusive aller neutralen Paare zu sehen.")
 
 # ----------------- TAB 2: CURRENCY RANKING -----------------
 with tab2:
