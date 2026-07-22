@@ -1007,10 +1007,26 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
                 
     usa_m_ref_str = usa_m_dt.strftime("%Y-%m-%d") if isinstance(usa_m_dt, datetime) else str(usa_m_dt) if usa_m_dt else None
     usa_s_ref_str = usa_s_dt.strftime("%Y-%m-%d") if isinstance(usa_s_dt, datetime) else str(usa_s_dt) if usa_s_dt else None
-                
+    usa_m_src = "FRED"
+    usa_s_src = "FRED"
+
+    # US BCI Proxy Fallback
+    if usa_m_last is None and fred_key:
+        val, dt, _ = get_fred_data_historical("BSCICP02USM460S", target_date, fred_key)
+        if val is not None:
+            usa_m_last = 50.0 + float(val)
+            usa_m_ref_str = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+            usa_m_src = "OECD BCI US Proxy (FRED)"
+            df_bci, _, _ = get_fred_data("BSCICP02USM460S", fred_key)
+            if df_bci is not None and not df_bci.empty:
+                target_dt = pd.to_datetime(target_date)
+                df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
+                if len(df_filtered) >= 2:
+                    usa_m_prev = 50.0 + float(df_filtered.iloc[-2]["value"])
+
     pmi_results["USD"] = {
-        "m_last": usa_m_last, "m_prev": usa_m_prev, "m_ref": usa_m_ref_str, "m_src": "FRED",
-        "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref_str, "s_src": "FRED"
+        "m_last": usa_m_last, "m_prev": usa_m_prev, "m_ref": usa_m_ref_str, "m_src": usa_m_src,
+        "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref_str, "s_src": usa_s_src
     }
     
     # Other G8 Currencies (EODHD with FRED fallback)
@@ -1061,6 +1077,45 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
                         df_filtered = df_s[df_s["date"] <= target_dt].sort_values("date")
                         if len(df_filtered) >= 2:
                             s_prev = float(df_filtered.iloc[-2]["value"])
+
+        # Active OECD Business Confidence proxy fallbacks
+        if m_last is None and fred_key:
+            bci_map_02 = {
+                "EUR": "BSCICP02EZM460S",
+                "GBP": "BSCICP02GBM460S",
+                "CHF": "BSCICP02CHM460S"
+            }
+            bci_map_03 = {
+                "JPY": "BSCICP03JPM665S",
+                "AUD": "BSCICP03AUM665S",
+                "NZD": "BSCICP03NZM665S"
+            }
+            if code in bci_map_02:
+                series_id = bci_map_02[code]
+                val, dt, _ = get_fred_data_historical(series_id, target_date, fred_key)
+                if val is not None:
+                    m_last = 50.0 + float(val)
+                    m_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+                    m_src = f"OECD BCI Proxy ({series_id})"
+                    df_bci, _, _ = get_fred_data(series_id, fred_key)
+                    if df_bci is not None and not df_bci.empty:
+                        target_dt = pd.to_datetime(target_date)
+                        df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
+                        if len(df_filtered) >= 2:
+                            m_prev = 50.0 + float(df_filtered.iloc[-2]["value"])
+            elif code in bci_map_03:
+                series_id = bci_map_03[code]
+                val, dt, _ = get_fred_data_historical(series_id, target_date, fred_key)
+                if val is not None:
+                    m_last = 50.0 + (float(val) - 100.0) * 10.0
+                    m_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+                    m_src = f"OECD BCI Proxy ({series_id})"
+                    df_bci, _, _ = get_fred_data(series_id, fred_key)
+                    if df_bci is not None and not df_bci.empty:
+                        target_dt = pd.to_datetime(target_date)
+                        df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
+                        if len(df_filtered) >= 2:
+                            m_prev = 50.0 + (float(df_filtered.iloc[-2]["value"]) - 100.0) * 10.0
                             
         pmi_results[code] = {
             "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
@@ -1070,7 +1125,16 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
     return pmi_results
 
 def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
+    is_today_or_yesterday = False
     if target_date is not None:
+        try:
+            target_dt = pd.to_datetime(target_date).date()
+            today_dt = datetime.now().date()
+            is_today_or_yesterday = (today_dt - target_dt).days <= 2
+        except Exception:
+            pass
+            
+    if target_date is not None and not is_today_or_yesterday:
         return get_all_pmi_data_historical(fred_key, eodhd_key, target_date)
         
     te_m = parse_tradingeconomics_pmi("https://tradingeconomics.com/country-list/manufacturing-pmi")
