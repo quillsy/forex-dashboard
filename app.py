@@ -4434,7 +4434,7 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
     
     return capped_score, weighted_scores
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "🏠 Dashboard",
     "🌍 Currency Ranking",
     "📊 Fundamental Analysis",
@@ -4445,7 +4445,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "🛠 Data Explorer",
     "📊 Backtesting",
     "🧪 Model Lab",
-    "📓 Research Journal"
+    "📓 Research Journal",
+    "🧪 Forward Testing"
 ])
 
 # ----------------- TAB 1: DASHBOARD -----------------
@@ -6879,3 +6880,202 @@ with tab11:
                 
                 # Show weights at time of experiment
                 st.json(entry["model_weights"])
+
+# ----------------- TAB 12: FORWARD TESTING -----------------
+def load_forward_tests():
+    file_path = "forward_tests.json"
+    if not os.path.exists(file_path):
+        default_tests = {}
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(default_tests, f, indent=4)
+        return default_tests
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_forward_test(test_id, test_data):
+    file_path = "forward_tests.json"
+    tests = load_forward_tests()
+    tests[test_id] = test_data
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(tests, f, indent=4)
+
+with tab12:
+    st.header("🧪 Forward Testing & Paper Trading")
+    st.caption("Validieren Sie Ihre Fundamental-Modelle unter Live-Marktbedingungen in Echtzeit.")
+    
+    fw_tests = load_forward_tests()
+    
+    # 1. Dashboard Overview
+    st.subheader("📡 Aktive Forward Tests")
+    
+    if not fw_tests:
+        st.info("Keine aktiven Forward Tests registriert. Starten Sie einen neuen Test unten.")
+    else:
+        ft_rows = []
+        for t_id, data in fw_tests.items():
+            start_dt = pd.to_datetime(data["start_date"])
+            days_run = (datetime.now() - start_dt).days
+            
+            # Aggregate stats from paper trades
+            trades = data.get("paper_trades", [])
+            total_t = len(trades)
+            wins = [x for x in trades if float(x.get("result_pct", 0.0)) > 0]
+            win_rate = (len(wins) / total_t * 100.0) if total_t > 0 else 0.0
+            
+            ft_rows.append({
+                "Test ID": t_id,
+                "Modell": data["model_name"],
+                "Startdatum": data["start_date"],
+                "Laufzeit (Tage)": days_run,
+                "Signale": len(data.get("signals", [])),
+                "Trades": total_t,
+                "Win Rate": f"{win_rate:.1f}%" if total_t > 0 else "0.0%",
+                "Status": data["status"]
+            })
+        st.dataframe(pd.DataFrame(ft_rows), hide_index=True, use_container_width=True)
+        
+    st.markdown("---")
+    
+    # 2. Start New Forward Test
+    st.subheader("🚀 Neuen Forward Test starten")
+    models_dict = load_saved_models()
+    
+    col_ft1, col_ft2 = st.columns(2)
+    with col_ft1:
+        ft_model = st.selectbox("Modell für Forward Test:", list(models_dict.keys()), key="ft_model_select")
+        ft_pairs = st.multiselect("FX-Paare:", ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"], default=["EUR/USD", "GBP/USD"], key="ft_pairs_select")
+    with col_ft2:
+        ft_hold = st.selectbox("Holding Period (Trading Days):", [5, 10, 15, 20], index=1, key="ft_hold_select")
+        ft_thresh = st.slider("Signal Schwellenwert:", 1.0, 15.0, 5.0, step=0.5, key="ft_thresh_select")
+        
+    if st.button("📡 Forward Test initialisieren", key="start_ft_btn"):
+        linked_m_details = models_dict.get(ft_model, {})
+        new_test_id = f"FT_{ft_model.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        test_data = {
+            "model_name": ft_model,
+            "weights_snapshot": linked_m_details,
+            "start_date": datetime.now().strftime("%Y-%m-%d"),
+            "holding_period": ft_hold,
+            "threshold": ft_thresh,
+            "pairs": ft_pairs,
+            "signals": [],
+            "paper_trades": [],
+            "status": "Active 🟡"
+        }
+        save_forward_test(new_test_id, test_data)
+        st.success(f"Forward Test '{new_test_id}' erfolgreich gestartet und Modell-Snapshot gespeichert!")
+        
+    st.markdown("---")
+    
+    # 3. Model Agreement & Live Signal Alerts
+    st.subheader("🚦 Multi-Modell Consensus & Signal Alerts")
+    
+    active_tests = {k: v for k, v in fw_tests.items() if v["status"] == "Active 🟡"}
+    if active_tests:
+        st.caption("Vergleich der Generierten Signale über alle aktiven Test-Modelle:")
+        agreement_rows = []
+        for pair in ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]:
+            base, quote = pair.split("/")
+            votes = []
+            for t_id, data in active_tests.items():
+                w = data["weights_snapshot"]
+                b_score, _, _, _, _ = compute_currency_professional_score_and_regime_custom(base, w)
+                q_score, _, _, _, _ = compute_currency_professional_score_and_regime_custom(quote, w)
+                diff = b_score - q_score
+                if abs(diff) >= data["threshold"]:
+                    votes.append("BUY" if diff > 0 else "SELL")
+                else:
+                    votes.append("NEUTRAL")
+            
+            buy_v = votes.count("BUY")
+            sell_v = votes.count("SELL")
+            neut_v = votes.count("NEUTRAL")
+            total_v = len(votes)
+            
+            consensus = "NEUTRAL"
+            agreement_pct = (neut_v / total_v) * 100.0
+            if buy_v > sell_v and buy_v > neut_v:
+                consensus = "BUY"
+                agreement_pct = (buy_v / total_v) * 100.0
+            elif sell_v > buy_v and sell_v > neut_v:
+                consensus = "SELL"
+                agreement_pct = (sell_v / total_v) * 100.0
+                
+            agreement_rows.append({
+                "Währungspaar": pair,
+                "Stimmen (BUY/NEUT/SELL)": f"{buy_v} / {neut_v} / {sell_v}",
+                "Consensus": consensus,
+                "Agreement Rate": f"{agreement_pct:.1f}%"
+            })
+        st.dataframe(pd.DataFrame(agreement_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("Keine aktiven Forward Tests für Consensus-Abgleich vorhanden.")
+        
+    st.markdown("---")
+    
+    # 4. Paper Trading simulator logging
+    st.subheader("📝 Paper Trading Simulator")
+    
+    if active_tests:
+        col_pt1, col_pt2 = st.columns(2)
+        with col_pt1:
+            pt_test_id = st.selectbox("Forward Test wählen:", list(active_tests.keys()), key="pt_test_select")
+            pt_pair = st.selectbox("Trade Pair:", active_tests[pt_test_id]["pairs"], key="pt_pair_select")
+            pt_dir = st.selectbox("Richtung:", ["BUY", "SELL"], key="pt_dir_select")
+            pt_entry = st.number_input("Entry Price:", min_value=0.0001, max_value=200.0, value=1.0850, step=0.0001, format="%.4f", key="pt_entry_input")
+        with col_pt2:
+            pt_sl = st.number_input("Stop Loss:", min_value=0.0001, max_value=200.0, value=1.0750, step=0.0001, format="%.4f", key="pt_sl_input")
+            pt_tp = st.number_input("Take Profit:", min_value=0.0001, max_value=200.0, value=1.1000, step=0.0001, format="%.4f", key="pt_tp_input")
+            pt_ret = st.number_input("Ergebnis (Return %):", min_value=-10.0, max_value=10.0, value=0.5, step=0.1, key="pt_ret_input")
+            
+        if st.button("💾 Paper Trade loggen", key="log_pt_btn"):
+            trade_entry = {
+                "pair": pt_pair,
+                "direction": pt_dir,
+                "entry_price": pt_entry,
+                "stop_loss": pt_sl,
+                "take_profit": pt_tp,
+                "result_pct": pt_ret,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+            test_data = active_tests[pt_test_id]
+            test_data["paper_trades"].append(trade_entry)
+            save_forward_test(pt_test_id, test_data)
+            st.success("Paper Trade erfolgreich geloggt!")
+            
+        # Display current paper trades
+        logged_trades = active_tests[pt_test_id].get("paper_trades", [])
+        if logged_trades:
+            st.markdown(f"**Aktuelle Paper Trades für {pt_test_id}:**")
+            st.dataframe(pd.DataFrame(logged_trades), hide_index=True, use_container_width=True)
+    else:
+        st.info("Starten Sie einen aktiven Forward Test, um Paper Trading zu aktivieren.")
+
+    st.markdown("---")
+    
+    # 5. Archive & Test Management
+    st.subheader("🗄️ Forward Test Archiv & Promotion")
+    
+    if fw_tests:
+        manage_test_id = st.selectbox("Modell / Test verwalten:", list(fw_tests.keys()), key="manage_test_select")
+        manage_data = fw_tests[manage_test_id]
+        
+        st.write(f"- **Modell Name:** `{manage_data['model_name']}`")
+        st.write(f"- **Startdatum:** `{manage_data['start_date']}`")
+        st.write(f"- **Aktueller Status:** `{manage_data['status']}`")
+        
+        col_mbtn1, col_mbtn2 = st.columns(2)
+        with col_mbtn1:
+            if st.button("🟢 Als abgeschlossen (Completed) markieren", key="complete_test_btn"):
+                manage_data["status"] = "Completed 🟢"
+                save_forward_test(manage_test_id, manage_data)
+                st.success("Test-Status auf abgeschlossen gesetzt.")
+        with col_mbtn2:
+            if st.button("🔴 Als ungültig (Invalidated) markieren", key="invalidate_test_btn"):
+                manage_data["status"] = "Invalidated 🔴"
+                save_forward_test(manage_test_id, manage_data)
+                st.success("Test-Status auf ungültig gesetzt.")
