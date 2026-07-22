@@ -4694,7 +4694,10 @@ with tab1:
             diff_str = f"{b_rate:.2f}% vs {q_rate:.2f}% ({diff_bps:+d} bps)"
             
             rec_data, _, _ = get_finnhub_data(p_name, FINNHUB_KEY)
-            rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
+            if rec_data:
+                rec_str = f"B:{rec_data.get('buy', 0)} / H:{rec_data.get('hold', 0)} / S:{rec_data.get('sell', 0)}"
+            else:
+                rec_str = "nicht verfügbar"
             
             sent_val, _, sent_active, _ = get_stockdata_sentiment(p_name, STOCKDATA_KEY)
             if sent_active:
@@ -6329,56 +6332,59 @@ with tab8:
     
     finnhub_data, t_finnhub, is_live_finnhub = get_finnhub_data(selected_pair, FINNHUB_KEY)
     
-    c_col1, c_col2 = st.columns([1, 1.2])
-    with c_col1:
-        st.write("**Ratings-Verteilung**")
-        labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
-        counts = [
-            finnhub_data.get("strongBuy", 0),
-            finnhub_data.get("buy_only", 0) or finnhub_data.get("buy", 0),
-            finnhub_data.get("hold", 0),
-            finnhub_data.get("sell_only", 0) or finnhub_data.get("sell", 0),
-            finnhub_data.get("strongSell", 0)
-        ]
-        
-        fig_finnhub = go.Figure(data=[go.Bar(
-            x=labels,
-            y=counts,
-            marker_color=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
-            text=counts,
-            textposition='auto'
-        )])
-        fig_finnhub.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color="#7d7d8a", size=10),
-            xaxis=dict(showgrid=False, linecolor="#1f2026"),
-            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
-            height=280,
-            margin=dict(l=10, r=10, t=10, b=10)
-        )
-        st.plotly_chart(fig_finnhub, use_container_width=True)
-        
-    with c_col2:
-        st.write("**Konsens-Kursziele**")
-        avg_t = finnhub_data["target_mean"]
-        high_t = finnhub_data["target_high"]
-        low_t = finnhub_data["target_low"]
-        
-        t_col1, t_col2 = st.columns(2)
-        with t_col1:
-            st.metric("Mittleres Kursziel", f"{avg_t:.4f}" if avg_t else "N/A")
-            st.metric("Höchstes Kursziel", f"{high_t:.4f}" if high_t else "N/A")
-        with t_col2:
-            st.metric("Aktueller Kurs (iTick)", f"{latest_close:.4f}" if latest_close else "N/A")
-            st.metric("Tiefstes Kursziel", f"{low_t:.4f}" if low_t else "N/A")
+    if finnhub_data:
+        c_col1, c_col2 = st.columns([1, 1.2])
+        with c_col1:
+            st.write("**Ratings-Verteilung**")
+            labels = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
+            counts = [
+                finnhub_data.get("strongBuy", 0),
+                finnhub_data.get("buy_only", 0) or finnhub_data.get("buy", 0),
+                finnhub_data.get("hold", 0),
+                finnhub_data.get("sell_only", 0) or finnhub_data.get("sell", 0),
+                finnhub_data.get("strongSell", 0)
+            ]
             
-    st.write("**Letzte Ratings-Änderungen**")
-    df_ratings = pd.DataFrame(finnhub_data["history"])
-    if not df_ratings.empty:
-        st.dataframe(df_ratings, use_container_width=True, hide_index=True)
+            fig_finnhub = go.Figure(data=[go.Bar(
+                x=labels,
+                y=counts,
+                marker_color=["#065f46", "#10b981", "#e2b13c", "#f87171", "#991b1b"],
+                text=counts,
+                textposition='auto'
+            )])
+            fig_finnhub.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#7d7d8a", size=10),
+                xaxis=dict(showgrid=False, linecolor="#1f2026"),
+                yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
+                height=280,
+                margin=dict(l=10, r=10, t=10, b=10)
+            )
+            st.plotly_chart(fig_finnhub, use_container_width=True)
+            
+        with c_col2:
+            st.write("**Konsens-Kursziele**")
+            avg_t = finnhub_data.get("target_mean")
+            high_t = finnhub_data.get("target_high")
+            low_t = finnhub_data.get("target_low")
+            
+            t_col1, t_col2 = st.columns(2)
+            with t_col1:
+                st.metric("Mittleres Kursziel", f"{avg_t:.4f}" if avg_t else "N/A")
+                st.metric("Höchstes Kursziel", f"{high_t:.4f}" if high_t else "N/A")
+            with t_col2:
+                st.metric("Aktueller Kurs (iTick)", f"{latest_close:.4f}" if latest_close else "N/A")
+                st.metric("Tiefstes Kursziel", f"{low_t:.4f}" if low_t else "N/A")
+                
+        st.write("**Letzte Ratings-Änderungen**")
+        df_ratings = pd.DataFrame(finnhub_data.get("history", []))
+        if not df_ratings.empty:
+            st.dataframe(df_ratings, use_container_width=True, hide_index=True)
+        else:
+            st.info("Keine Rating-Historie verfügbar.")
     else:
-        st.info("Keine Rating-Historie verfügbar.")
+        st.info("Finnhub Analysten-Konsens zur Zeit nicht verfügbar.")
 
     st.write("")
     st.subheader("📊 Data Integrity & Signal Quality Dashboard")
