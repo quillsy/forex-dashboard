@@ -1280,37 +1280,65 @@ def get_latest_oecd_cli(curr):
 
 
 # ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
+def check_demo_active():
+    try:
+        return st.session_state.get("demo_mode_chk", False)
+    except Exception:
+        return False
+
+def is_data_valid(val, is_live):
+    if val is None:
+        return False
+    if isinstance(val, pd.DataFrame) and val.empty:
+        return False
+    if not is_live and not check_demo_active():
+        return False
+    return True
+
+# ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fred_data(series_id, key):
     if not key:
-        return generate_mock_fred(series_id), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_fred(series_id), datetime.now(), False
+        return None, datetime.now(), False
     try:
         df = fetch_fred_live(series_id, key)
         return df, datetime.now(), True
     except Exception:
-        return generate_mock_fred(series_id), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_fred(series_id), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_av_data(from_symbol, to_symbol, key):
     if not key:
-        return generate_mock_av(from_symbol, to_symbol), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_av(from_symbol, to_symbol), datetime.now(), False
+        return None, datetime.now(), False
     try:
         df = fetch_av_live(from_symbol, to_symbol, key)
         return df, datetime.now(), True
     except Exception:
-        return generate_mock_av(from_symbol, to_symbol), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_av(from_symbol, to_symbol), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_benzinga_data(key):
     if not key:
-        return generate_mock_benzinga(), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_benzinga(), datetime.now(), False
+        return None, datetime.now(), False
     try:
         df = fetch_benzinga_live(key)
         if df.empty:
             raise ValueError("Empty response")
         return df, datetime.now(), True
     except Exception:
-        return generate_mock_benzinga(), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_benzinga(), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def get_finnhub_data(pair, key):
@@ -1318,36 +1346,46 @@ def get_finnhub_data(pair, key):
         st.session_state["api_errors"] = {}
     if not key:
         st.session_state["api_errors"]["Finnhub API"] = "API-Key nicht konfiguriert"
-        return generate_mock_finnhub(pair), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_finnhub(pair), datetime.now(), False
+        return None, datetime.now(), False
     try:
         data = fetch_finnhub_live(pair, key)
         st.session_state["api_errors"]["Finnhub API"] = None
         return data, datetime.now(), True
     except Exception as e:
         st.session_state["api_errors"]["Finnhub API"] = str(e)
-        return generate_mock_finnhub(pair), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_finnhub(pair), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_itick_data(pair, key):
     if not key:
-        return generate_mock_itick(pair), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_itick(pair), datetime.now(), False
+        return None, datetime.now(), False
     try:
         data = fetch_itick_live(pair, key)
         return data, datetime.now(), True
     except Exception:
-        return generate_mock_itick(pair), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_itick(pair), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_av_technical_data(pair, key):
     if not key:
-        import random
-        random.seed(hash(pair) % 15000)
-        base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
-        base = base_prices.get(pair, 1.0)
-        return {
-            "SMA_50": base * random.uniform(0.99, 1.01),
-            "SMA_200": base * random.uniform(0.97, 0.99)
-        }, datetime.now(), False
+        if check_demo_active():
+            import random
+            random.seed(hash(pair) % 15000)
+            base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+            base = base_prices.get(pair, 1.0)
+            return {
+                "SMA_50": base * random.uniform(0.99, 1.01),
+                "SMA_200": base * random.uniform(0.97, 0.99)
+            }, datetime.now(), False
+        return None, datetime.now(), False
     try:
         from_sym, to_sym = pair.split("/")
         df = fetch_av_live(from_sym, to_sym, key)
@@ -1361,31 +1399,39 @@ def get_av_technical_data(pair, key):
         else:
             raise ValueError("Insufficient data for SMA")
     except Exception:
-        import random
-        random.seed(hash(pair) % 15000)
-        base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
-        base = base_prices.get(pair, 1.0)
-        return {
-            "SMA_50": base * random.uniform(0.99, 1.01),
-            "SMA_200": base * random.uniform(0.97, 0.99)
-        }, datetime.now(), False
+        if check_demo_active():
+            import random
+            random.seed(hash(pair) % 15000)
+            base_prices = {"EUR/USD": 1.0850, "GBP/USD": 1.2720, "USD/JPY": 158.50, "USD/CHF": 0.8910, "AUD/USD": 0.6650, "USD/CAD": 1.3680, "NZD/USD": 0.6120, "EUR/GBP": 0.8520}
+            base = base_prices.get(pair, 1.0)
+            return {
+                "SMA_50": base * random.uniform(0.99, 1.01),
+                "SMA_200": base * random.uniform(0.97, 0.99)
+            }, datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fcs_history_data(pair, key):
     if not key:
-        from_sym, to_sym = pair.split("/")
-        return generate_mock_fcs_history(from_sym, to_sym), datetime.now(), False
+        if check_demo_active():
+            from_sym, to_sym = pair.split("/")
+            return generate_mock_fcs_history(from_sym, to_sym), datetime.now(), False
+        return None, datetime.now(), False
     try:
         df = fetch_fcs_history_live(pair, key)
         return df, datetime.now(), True
     except Exception:
-        from_sym, to_sym = pair.split("/")
-        return generate_mock_fcs_history(from_sym, to_sym), datetime.now(), False
+        if check_demo_active():
+            from_sym, to_sym = pair.split("/")
+            return generate_mock_fcs_history(from_sym, to_sym), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fcs_correlation_data(key):
     if not key:
-        return generate_mock_fcs_correlation(), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_fcs_correlation(), datetime.now(), False
+        return None, datetime.now(), False
     try:
         pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"]
         prices = {}
@@ -1399,7 +1445,9 @@ def get_fcs_correlation_data(key):
         else:
             raise ValueError("Failed to retrieve all pairs for correlation")
     except Exception:
-        return generate_mock_fcs_correlation(), datetime.now(), False
+        if check_demo_active():
+            return generate_mock_fcs_correlation(), datetime.now(), False
+        return None, datetime.now(), False
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_stockdata_sentiment(pair, key):
@@ -1408,7 +1456,9 @@ def get_stockdata_sentiment(pair, key):
     if not key:
         status_msg = "🔴 StockData Sentiment: API-Key fehlt"
         st.session_state["api_errors"]["StockData Sentiment"] = "API-Key nicht in Streamlit Secrets konfiguriert"
-        return 0.0, datetime.now(), False, status_msg
+        if check_demo_active():
+            return 0.0, datetime.now(), False, status_msg
+        return None, datetime.now(), False, status_msg
     try:
         val = fetch_stockdata_live(pair, key)
         status_msg = "🟢 StockData Sentiment: Aktiv (API-Verbindung erfolgreich)"
@@ -1426,7 +1476,9 @@ def get_stockdata_sentiment(pair, key):
             status_msg = f"🟠 StockData Sentiment: {err_str}"
             
         st.session_state["api_errors"]["StockData Sentiment"] = err_str
-        return 0.0, datetime.now(), False, status_msg
+        if check_demo_active():
+            return 0.0, datetime.now(), False, status_msg
+        return None, datetime.now(), False, status_msg
 
 @st.cache_data(ttl=604800, show_spinner=False)
 def get_worldbank_data(country_code, indicator):
@@ -2619,7 +2671,7 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
         bullets.append("⚪ Neutrale fundamentale Gesamtlage")
     return bullets
 
-def get_cpi_yoy_value(curr: str, target_date=None) -> float:
+def get_cpi_yoy_value(curr: str, target_date=None):
     try:
         fred_key = FRED_KEY
         if target_date is None:
@@ -2628,11 +2680,86 @@ def get_cpi_yoy_value(curr: str, target_date=None) -> float:
             dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
         series_id = CPI_SERIES.get(curr, "CPIAUCSL")
-        df, _, _ = get_fred_data(series_id, fred_key)
+        df, _, is_live = get_fred_data(series_id, fred_key)
         if df is not None and not df.empty:
-            df_c = df.copy()
-            if series_id != "FP.CPI.TOTL.ZG":
-                df_c["yoy"] = df_c["value"].pct_change(periods=12) * 100
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                df_c = df.copy()
+                if series_id != "FP.CPI.TOTL.ZG":
+                    df_c["yoy"] = df_c["value"].pct_change(periods=12) * 100
+                    df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
+                    if not df_filtered.empty:
+                        val = df_filtered.iloc[-1]["yoy"]
+                        if pd.notna(val):
+                            return float(val)
+    except Exception:
+        pass
+    try:
+        code = CURRENCIES[curr]["wb_code"]
+        val, _, is_live = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+        if val is not None:
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                return float(val)
+    except Exception:
+        pass
+    if check_demo_active():
+        return 2.0
+    return None
+
+def get_unemployment_value(curr: str, target_date=None):
+    try:
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+            
+        series_id = UNEMP_SERIES.get(curr, "UNRATE")
+        df, _, is_live = get_fred_data(series_id, fred_key)
+        if df is not None and not df.empty:
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                df_filtered = df[df["date"] <= pd.to_datetime(dt_str)]
+                if not df_filtered.empty:
+                    val = df_filtered.iloc[-1]["value"]
+                    if pd.notna(val):
+                        return float(val)
+    except Exception:
+        pass
+    try:
+        code = CURRENCIES[curr]["wb_code"]
+        val, _, is_live = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
+        if val is not None:
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                return float(val)
+    except Exception:
+        pass
+    if check_demo_active():
+        return 5.0
+    return None
+
+def get_gdp_yoy_value(curr: str, target_date=None):
+    try:
+        fred_key = FRED_KEY
+        if target_date is None:
+            dt_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+            
+        series_id = GDP_SERIES.get(curr, "GDPC1")
+        df, _, is_live = get_fred_data(series_id, fred_key)
+        if df is not None and not df.empty:
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                df_c = df.copy()
+                df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
                 df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
                 if not df_filtered.empty:
                     val = df_filtered.iloc[-1]["yoy"]
@@ -2642,68 +2769,17 @@ def get_cpi_yoy_value(curr: str, target_date=None) -> float:
         pass
     try:
         code = CURRENCIES[curr]["wb_code"]
-        val, _, _ = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+        val, _, is_live = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
         if val is not None:
-            return float(val)
+            if not is_live and not check_demo_active():
+                pass
+            else:
+                return float(val)
     except Exception:
         pass
-    return 2.0
-
-def get_unemployment_value(curr: str, target_date=None) -> float:
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = UNEMP_SERIES.get(curr, "UNRATE")
-        df, _, _ = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            df_filtered = df[df["date"] <= pd.to_datetime(dt_str)]
-            if not df_filtered.empty:
-                val = df_filtered.iloc[-1]["value"]
-                if pd.notna(val):
-                    return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, _, _ = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
-        if val is not None:
-            return float(val)
-    except Exception:
-        pass
-    return 5.0
-
-def get_gdp_yoy_value(curr: str, target_date=None) -> float:
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = GDP_SERIES.get(curr, "GDPC1")
-        df, _, _ = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            df_c = df.copy()
-            df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
-            df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
-            if not df_filtered.empty:
-                val = df_filtered.iloc[-1]["yoy"]
-                if pd.notna(val):
-                    return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, _, _ = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-        if val is not None:
-            return float(val)
-    except Exception:
-        pass
-    return 1.5
+    if check_demo_active():
+        return 1.5
+    return None
 
 def get_series_trend_points(series_id: str, target_date=None, reverse=False) -> float:
     try:
@@ -2965,63 +3041,88 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
         
     scores = {
-        "Geldpolitik": 0.0,
-        "Inflation": 0.0,
-        "Arbeitsmarkt": 0.0,
-        "PMI": 0.0,
-        "GDP": 0.0
+        "Geldpolitik": None,
+        "Inflation": None,
+        "Arbeitsmarkt": None,
+        "PMI": None,
+        "GDP": None
     }
+    
+    missing = []
     
     try:
         # 1. Geldpolitik (Interest Rate / Yield)
-        yield_val, _, _ = get_fred_data_historical(YIELD_SERIES[curr], dt_str, fred_key)
-        if yield_val is None:
-            yield_val = 3.0
+        yield_val, _, is_live = get_fred_data_historical(YIELD_SERIES[curr], dt_str, fred_key)
+        # Check manual rates override
+        manual_key = f"manual_rate_{curr}"
+        if manual_key in st.session_state and st.session_state[manual_key] is not None:
+            yield_val = st.session_state[manual_key]
+            is_live = True
             
-        cpi = get_cpi_yoy_value(curr, dt_str)
-        real_yield = yield_val - cpi
-        
-        gp_yield_score = (yield_val - 3.0) / 3.0 * 100.0
-        gp_real_score = real_yield / 3.0 * 100.0
-        gp_trend = get_series_trend_points(YIELD_SERIES[curr], dt_str)
-        gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
-        
-        scores["Geldpolitik"] = np.clip(0.70 * gp_yield_score + 0.30 * gp_real_score + gp_trend + gp_surprise, -100.0, 100.0)
-        
+        if not is_data_valid(yield_val, is_live):
+            missing.append("Geldpolitik")
+        else:
+            cpi = get_cpi_yoy_value(curr, dt_str)
+            if cpi is None:
+                real_yield = yield_val - 2.0
+            else:
+                real_yield = yield_val - cpi
+                
+            gp_yield_score = (yield_val - 3.0) / 3.0 * 100.0
+            gp_real_score = real_yield / 3.0 * 100.0
+            gp_trend = get_series_trend_points(YIELD_SERIES[curr], dt_str)
+            gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
+            scores["Geldpolitik"] = np.clip(0.70 * gp_yield_score + 0.30 * gp_real_score + gp_trend + gp_surprise, -100.0, 100.0)
+            
         # 2. Inflation
-        cpi_dev = (cpi - 2.0) * 50.0
-        cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
-        cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
-        scores["Inflation"] = np.clip(cpi_dev + cpi_trend + cpi_surprise, -100.0, 100.0)
-        
+        cpi = get_cpi_yoy_value(curr, dt_str)
+        if cpi is None:
+            missing.append("Inflation")
+        else:
+            cpi_dev = (cpi - 2.0) * 50.0
+            cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
+            cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
+            scores["Inflation"] = np.clip(cpi_dev + cpi_trend + cpi_surprise, -100.0, 100.0)
+            
         # 3. Arbeitsmarkt
         unrate = get_unemployment_value(curr, dt_str)
-        lab_dev = (5.0 - unrate) / 3.0 * 100.0
-        lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
-        lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
-        scores["Arbeitsmarkt"] = np.clip(lab_dev + lab_trend + lab_surprise, -100.0, 100.0)
-        
+        if unrate is None:
+            missing.append("Arbeitsmarkt")
+        else:
+            lab_dev = (5.0 - unrate) / 3.0 * 100.0
+            lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
+            lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
+            scores["Arbeitsmarkt"] = np.clip(lab_dev + lab_trend + lab_surprise, -100.0, 100.0)
+            
         # 4. PMI
         pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
-        pmi_data = pmi_all.get(curr, {})
+        pmi_data = pmi_all.get(curr, {}) if pmi_all else {}
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
         pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
-        pmi_avg = np.mean(pmi_vals) if pmi_vals else 50.0
-        pmi_score = (pmi_avg - 50.0) / 10.0 * 100.0
-        
-        pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
-        pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
-        scores["PMI"] = np.clip(pmi_score + pmi_trend + pmi_surprise, -100.0, 100.0)
-        
+        if not pmi_vals:
+            missing.append("PMI")
+        else:
+            pmi_avg = np.mean(pmi_vals)
+            pmi_score = (pmi_avg - 50.0) / 10.0 * 100.0
+            pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
+            pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
+            scores["PMI"] = np.clip(pmi_score + pmi_trend + pmi_surprise, -100.0, 100.0)
+            
         # 5. GDP
         gdp = get_gdp_yoy_value(curr, dt_str)
-        gdp_score = (gdp - 1.5) / 1.5 * 100.0
-        gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
-        scores["GDP"] = np.clip(gdp_score + gdp_trend, -100.0, 100.0)
-        
+        if gdp is None:
+            missing.append("GDP")
+        else:
+            gdp_score = (gdp - 1.5) / 1.5 * 100.0
+            gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
+            scores["GDP"] = np.clip(gdp_score + gdp_trend, -100.0, 100.0)
+            
     except Exception:
         pass
+        
+    scores["_missing"] = missing
+    scores["_completeness"] = (5.0 - len(missing)) / 5.0 * 100.0
     return scores
 
 def compute_currency_professional_score_and_regime(curr: str, target_date=None):
@@ -3054,47 +3155,74 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
     w_corr = weights.get("Correction", 100.0) / 100.0
     
     fw_score = 0.0
+    fw_available = False
     if w_fw > 0.0:
         try:
             fd = get_forward_rates_data(curr, target_date)
-            exp_chg = fd.get("expected_change", 0.0)
+            exp_chg = fd.get("expected_change")
             if exp_chg is not None:
                 fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
+                fw_available = True
         except Exception:
             pass
             
     inf_exp_score = 0.0
+    inf_exp_available = False
     if w_inf_exp > 0.0:
         try:
             ed = get_inflation_expectations_data(curr, target_date)
             oecd_val = ed.get("oecd_expectation")
             if oecd_val is not None:
                 inf_exp_score = float(np.clip((oecd_val - 100.0) * 10.0, -10.0, 10.0))
+                inf_exp_available = True
         except Exception:
             pass
             
     surp_score = 0.0
+    surp_available = False
     if w_surp > 0.0:
         try:
             s_val, _ = compute_currency_surprise_score(curr, target_date=target_date)
-            surp_score = float(s_val)
+            if s_val is not None:
+                surp_score = float(s_val)
+                surp_available = True
         except Exception:
             pass
 
-    core_score = (
-        w_gp * scores["Geldpolitik"] +
-        w_inf * scores["Inflation"] +
-        w_lab * scores["Arbeitsmarkt"] +
-        w_pmi * scores["PMI"] +
-        w_gdp * scores["GDP"] +
-        w_fw * fw_score +
-        w_inf_exp * inf_exp_score +
-        w_surp * surp_score
-    )
-    
+    # Dynamic Weight Normalization
+    available_factors = {}
+    if scores.get("Geldpolitik") is not None:
+        available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
+    if scores.get("Inflation") is not None:
+        available_factors["Inflation"] = (scores["Inflation"], w_inf)
+    if scores.get("Arbeitsmarkt") is not None:
+        available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
+    if scores.get("PMI") is not None:
+        available_factors["PMI"] = (scores["PMI"], w_pmi)
+    if scores.get("GDP") is not None:
+        available_factors["GDP"] = (scores["GDP"], w_gdp)
+        
+    if w_fw > 0.0 and fw_available:
+        available_factors["ForwardRates"] = (fw_score, w_fw)
+    if w_inf_exp > 0.0 and inf_exp_available:
+        available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
+    if w_surp > 0.0 and surp_available:
+        available_factors["EconomicSurprises"] = (surp_score, w_surp)
+
+    total_weight = sum(weight for val, weight in available_factors.values())
+    if total_weight > 0.0:
+        core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
+    else:
+        core_score = 0.0
+
     corr_score = compute_correction_score(curr, target_date) * w_corr
     final_score = np.clip(core_score + corr_score, -100.0, 100.0)
     
+    # Preserve key integrity for callers
+    for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
+        if scores[k] is None:
+            scores[k] = 0.0
+            
     return final_score, regime, core_score, corr_score, scores
 
 def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict, target_date=None):
@@ -3112,47 +3240,74 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
     w_corr = weights.get("Correction", 100.0) / 100.0
     
     fw_score = 0.0
+    fw_available = False
     if w_fw > 0.0:
         try:
             fd = get_forward_rates_data(curr, target_date)
-            exp_chg = fd.get("expected_change", 0.0)
+            exp_chg = fd.get("expected_change")
             if exp_chg is not None:
                 fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
+                fw_available = True
         except Exception:
             pass
             
     inf_exp_score = 0.0
+    inf_exp_available = False
     if w_inf_exp > 0.0:
         try:
             ed = get_inflation_expectations_data(curr, target_date)
             oecd_val = ed.get("oecd_expectation")
             if oecd_val is not None:
                 inf_exp_score = float(np.clip((oecd_val - 100.0) * 10.0, -10.0, 10.0))
+                inf_exp_available = True
         except Exception:
             pass
 
     surp_score = 0.0
+    surp_available = False
     if w_surp > 0.0:
         try:
             s_val, _ = compute_currency_surprise_score(curr, target_date=target_date)
-            surp_score = float(s_val)
+            if s_val is not None:
+                surp_score = float(s_val)
+                surp_available = True
         except Exception:
             pass
             
-    core_score = (
-        w_gp * scores["Geldpolitik"] +
-        w_inf * scores["Inflation"] +
-        w_lab * scores["Arbeitsmarkt"] +
-        w_pmi * scores["PMI"] +
-        w_gdp * scores["GDP"] +
-        w_fw * fw_score +
-        w_inf_exp * inf_exp_score +
-        w_surp * surp_score
-    )
+    # Dynamic Weight Normalization
+    available_factors = {}
+    if scores.get("Geldpolitik") is not None:
+        available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
+    if scores.get("Inflation") is not None:
+        available_factors["Inflation"] = (scores["Inflation"], w_inf)
+    if scores.get("Arbeitsmarkt") is not None:
+        available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
+    if scores.get("PMI") is not None:
+        available_factors["PMI"] = (scores["PMI"], w_pmi)
+    if scores.get("GDP") is not None:
+        available_factors["GDP"] = (scores["GDP"], w_gdp)
+        
+    if w_fw > 0.0 and fw_available:
+        available_factors["ForwardRates"] = (fw_score, w_fw)
+    if w_inf_exp > 0.0 and inf_exp_available:
+        available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
+    if w_surp > 0.0 and surp_available:
+        available_factors["EconomicSurprises"] = (surp_score, w_surp)
+
+    total_weight = sum(weight for val, weight in available_factors.values())
+    if total_weight > 0.0:
+        core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
+    else:
+        core_score = 0.0
     
     corr_score = compute_correction_score(curr, target_date) * w_corr
     final_score = np.clip(core_score + corr_score, -100.0, 100.0)
     
+    # Preserve key integrity for callers
+    for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
+        if scores[k] is None:
+            scores[k] = 0.0
+            
     return final_score, regime, core_score, corr_score, scores
 
 def compute_currency_score_historical(curr: str, target_date) -> float:
@@ -3600,13 +3755,48 @@ def get_cot_signal(symbol_code, target_date):
     except Exception:
         return 50.0
 
+def load_manual_cot():
+    file_path = "manual_cot.json"
+    if not os.path.exists(file_path):
+        default_cot = {}
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(default_cot, f, indent=4)
+        return default_cot
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_manual_cot_entry(curr, position, net_pos, percentile, date_str):
+    file_path = "manual_cot.json"
+    cot_data = load_manual_cot()
+    cot_data[curr] = {
+        "position": position,
+        "net_position": net_pos,
+        "percentile": percentile,
+        "date": date_str
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(cot_data, f, indent=4)
+
 def get_latest_cot_percentile(curr, target_date=None):
+    # Check manual COT input first
+    manual_data = load_manual_cot()
+    if curr in manual_data:
+        entry = manual_data[curr]
+        return float(entry.get("percentile", 50.0))
+        
     if not target_date:
         target_date = datetime.now().strftime("%Y-%m-%d")
     code = COT_SYMBOLS.get(curr)
     if not code:
-        return 50.0
-    return get_cot_signal(code, target_date)
+        return None
+        
+    val = get_cot_signal(code, target_date)
+    if val == 50.0 and not check_demo_active():
+        return None
+    return val
 
 # ----------------- UI RENDERERS -----------------
 def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig):
@@ -3760,6 +3950,7 @@ def render_articles_grid(articles_list):
 # ----------------- 3. SIDEBAR CONFIGURATION -----------------
 with st.sidebar:
     st.title("⚙️ Dashboard-Einstellungen")
+    demo_mode_chk = st.checkbox("🧪 Demo Mode (Mock-Daten aktiv)", value=False, key="demo_mode_chk")
     st.markdown("### 💱 Währungspaar wählen")
     base_curr = st.selectbox("Basiswährung (Base)", options=list(CURRENCIES.keys()), index=0)
     quote_curr = st.selectbox("Quote-Währung (Quote)", options=list(CURRENCIES.keys()), index=1)
@@ -3925,9 +4116,20 @@ else:
 
 # ----------------- 5. HEADER SECTION -----------------
 st.title("⚖️ Forex Fundamental Suite")
+if st.session_state.get("demo_mode_chk", False):
+    st.warning("⚠️ **DEMO MODE ACTIVE – DATA IS NOT REAL (using mock data)**")
+
 if invalid_pair:
     st.error("⚠️ **Ungültiges Währungspaar ausgewählt:** Basis- und Kurswährung müssen unterschiedlich sein. Bitte wählen Sie zwei verschiedene G10-Währungen in der Sidebar aus (z. B. USD/EUR).")
 else:
+    base_details_raw = compute_currency_details(base_curr, None)
+    quote_details_raw = compute_currency_details(quote_curr, None)
+    base_comp = base_details_raw.get("_completeness", 100.0)
+    quote_comp = quote_details_raw.get("_completeness", 100.0)
+    pair_completeness = (base_comp + quote_comp) / 2.0
+    
+    if pair_completeness < 100.0:
+        st.warning(f"⚠️ **Incomplete Data Warning (Data Quality: {pair_completeness:.0f}%):** Signal calculation is based on incomplete G10 macro data. Missing factors: {', '.join(set(base_details_raw.get('_missing', []) + quote_details_raw.get('_missing', [])))}")
     st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
 
 # ----------------- 6. TABS MODULES -----------------
@@ -5014,7 +5216,7 @@ with tab3:
         col_fw1, col_fw2, col_fw3 = st.columns(3)
         with col_fw1:
             st.metric("Aktueller Leitzins (Policy Rate)", f"{fw_data['policy_rate']:.2f}%" if fw_data['policy_rate'] is not None else "N/A")
-            st.metric("1Y OIS / Swap Rate", f"{fw_data['ois_rate']:.2f}%" if fw_data['ois_rate'] is not None else "nicht verfügbar")
+            st.metric("1Y OIS / Swap Rate", f"{fw_data['ois_rate']:.2f}%" if fw_data['ois_rate'] is not None else "True OIS data not available for this currency")
         with col_fw2:
             st.metric("2Y Government Yield", f"{fw_data['y2_yield']:.2f}%" if fw_data['y2_yield'] is not None else "N/A")
             st.metric("Zinspfad-Erwartung (in 12M)", f"{fw_data['implied_forward']:.2f}%" if fw_data['implied_forward'] is not None else "N/A")
@@ -5628,24 +5830,45 @@ with tab6:
     st.header("📍 Positioning & Sentiment")
     st.caption("Netto-Spekulanten-Positionierung der G10-Währungen aus dem Commitment of Traders Report und sentimentanalytische Indikatoren.")
     
+    st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Sie können hier manuelle COT-Daten eintragen, die persistent in `manual_cot.json` gespeichert werden.")
+    
+    with st.expander("📝 Manuelle COT-Daten eingeben / aktualisieren"):
+        m_curr = st.selectbox("Währung:", list(CURRENCIES.keys()), key="cot_m_curr")
+        m_pos = st.selectbox("Positionierung:", ["Bullish", "Bearish", "Neutral"], key="cot_m_pos")
+        m_net = st.number_input("Netto-Kontrakte:", value=0, key="cot_m_net")
+        m_perc = st.slider("Percentile (0-100%):", 0.0, 100.0, 50.0, step=1.0, key="cot_m_perc")
+        m_date = st.date_input("Berichtsdatum:", key="cot_m_date")
+        
+        if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn"):
+            save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"))
+            st.success(f"COT-Daten für {m_curr} gespeichert!")
+            st.rerun()
+
     st.subheader("🛍️ COT Netto-Positionierung (Percentile)")
     cot_rows = []
     for curr in CURRENCIES.keys():
         try:
             percentile = get_latest_cot_percentile(curr)
-            warning_str = ""
-            if percentile > 80.0:
-                warning_str = "⚠️ Extrem bullish (Überkauft)"
-            elif percentile < 20.0:
-                warning_str = "⚠️ Extrem bearish (Überverkauft)"
+            if percentile is None:
+                cot_rows.append({
+                    "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                    "COT Rollierendes Percentil (3Y)": "DATA UNAVAILABLE 🔴",
+                    "Status / Warnung": "Keine aktuellen Daten verfügbar"
+                })
             else:
-                warning_str = "Gesund"
-                
-            cot_rows.append({
-                "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-                "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
-                "Status / Warnung": warning_str
-            })
+                warning_str = ""
+                if percentile > 80.0:
+                    warning_str = "⚠️ Extrem bullish (Überkauft)"
+                elif percentile < 20.0:
+                    warning_str = "⚠️ Extrem bearish (Überverkauft)"
+                else:
+                    warning_str = "Gesund"
+                    
+                cot_rows.append({
+                    "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                    "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
+                    "Status / Warnung": warning_str
+                })
         except Exception:
             pass
             
@@ -5662,6 +5885,7 @@ with tab6:
     else:
         sent_val, _, status_active, status_msg = get_stockdata_sentiment(selected_pair, STOCKDATA_KEY)
         if not status_active:
+            st.error("Sentiment: 🔴 UNAVAILABLE (Sentiment excluded from calculation)")
             if "🟢" in status_msg:
                 st.success(status_msg)
             elif "🔴" in status_msg:
@@ -6155,6 +6379,25 @@ with tab8:
         st.dataframe(df_ratings, use_container_width=True, hide_index=True)
     else:
         st.info("Keine Rating-Historie verfügbar.")
+
+    st.write("")
+    st.subheader("📊 Data Integrity & Signal Quality Dashboard")
+    st.caption("Auswertung der makroökonomischen Datenvollständigkeit und Qualität für alle G10-Währungen:")
+    
+    health_rows = []
+    for curr in CURRENCIES.keys():
+        details = compute_currency_details(curr, None)
+        comp = details.get("_completeness", 0.0)
+        missing = details.get("_missing", [])
+        
+        status_str = "🟢 VALID" if comp == 100.0 else "🟡 PARTIAL" if comp > 0.0 else "🔴 UNAVAILABLE"
+        health_rows.append({
+            "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+            "Status": status_str,
+            "Datenvollständigkeit": f"{comp:.0f}%",
+            "Fehlende Faktoren": ", ".join(missing) if missing else "Keine"
+        })
+    st.dataframe(pd.DataFrame(health_rows), hide_index=True, use_container_width=True)
 
 # ----------------- US-MAKRO LEITDATEN BOTTOM BAR -----------------
 st.markdown("---")
