@@ -1010,20 +1010,6 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
     usa_m_src = "FRED"
     usa_s_src = "FRED"
 
-    # US BCI Proxy Fallback
-    if usa_m_last is None and fred_key:
-        val, dt, _ = get_fred_data_historical("BSCICP02USM460S", target_date, fred_key)
-        if val is not None:
-            usa_m_last = 50.0 + float(val)
-            usa_m_ref_str = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
-            usa_m_src = "OECD BCI US Proxy (FRED)"
-            df_bci, _, _ = get_fred_data("BSCICP02USM460S", fred_key)
-            if df_bci is not None and not df_bci.empty:
-                target_dt = pd.to_datetime(target_date)
-                df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
-                if len(df_filtered) >= 2:
-                    usa_m_prev = 50.0 + float(df_filtered.iloc[-2]["value"])
-
     pmi_results["USD"] = {
         "m_last": usa_m_last, "m_prev": usa_m_prev, "m_ref": usa_m_ref_str, "m_src": usa_m_src,
         "s_last": usa_s_last, "s_prev": usa_s_prev, "s_ref": usa_s_ref_str, "s_src": usa_s_src
@@ -1077,45 +1063,6 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
                         df_filtered = df_s[df_s["date"] <= target_dt].sort_values("date")
                         if len(df_filtered) >= 2:
                             s_prev = float(df_filtered.iloc[-2]["value"])
-
-        # Active OECD Business Confidence proxy fallbacks
-        if m_last is None and fred_key:
-            bci_map_02 = {
-                "EUR": "BSCICP02EZM460S",
-                "GBP": "BSCICP02GBM460S",
-                "CHF": "BSCICP02CHM460S"
-            }
-            bci_map_03 = {
-                "JPY": "BSCICP03JPM665S",
-                "AUD": "BSCICP03AUM665S",
-                "NZD": "BSCICP03NZM665S"
-            }
-            if code in bci_map_02:
-                series_id = bci_map_02[code]
-                val, dt, _ = get_fred_data_historical(series_id, target_date, fred_key)
-                if val is not None:
-                    m_last = 50.0 + float(val)
-                    m_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
-                    m_src = f"OECD BCI Proxy ({series_id})"
-                    df_bci, _, _ = get_fred_data(series_id, fred_key)
-                    if df_bci is not None and not df_bci.empty:
-                        target_dt = pd.to_datetime(target_date)
-                        df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
-                        if len(df_filtered) >= 2:
-                            m_prev = 50.0 + float(df_filtered.iloc[-2]["value"])
-            elif code in bci_map_03:
-                series_id = bci_map_03[code]
-                val, dt, _ = get_fred_data_historical(series_id, target_date, fred_key)
-                if val is not None:
-                    m_last = 50.0 + (float(val) - 100.0) * 10.0
-                    m_ref = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
-                    m_src = f"OECD BCI Proxy ({series_id})"
-                    df_bci, _, _ = get_fred_data(series_id, fred_key)
-                    if df_bci is not None and not df_bci.empty:
-                        target_dt = pd.to_datetime(target_date)
-                        df_filtered = df_bci[df_bci["date"] <= target_dt].sort_values("date")
-                        if len(df_filtered) >= 2:
-                            m_prev = 50.0 + (float(df_filtered.iloc[-2]["value"]) - 100.0) * 10.0
                             
         pmi_results[code] = {
             "m_last": m_last, "m_prev": m_prev, "m_ref": m_ref, "m_src": m_src,
@@ -3097,6 +3044,52 @@ def compute_correction_score(curr: str, target_date=None) -> float:
     
     return np.clip(corr, -10.0, 10.0)
 
+def get_bci_value(curr: str, target_date=None) -> dict:
+    fred_key = FRED_KEY
+    if target_date is None:
+        dt_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
+        
+    bci_map_02 = {
+        "USD": "BSCICP02USM460S",
+        "EUR": "BSCICP02EZM460S",
+        "GBP": "BSCICP02GBM460S",
+        "CHF": "BSCICP02CHM460S"
+    }
+    bci_map_03 = {
+        "JPY": "BSCICP03JPM665S",
+        "AUD": "BSCICP03AUM665S",
+        "NZD": "BSCICP03NZM665S"
+    }
+    
+    val = None
+    source = "FRED"
+    ref_date = dt_str
+    
+    if curr in bci_map_02:
+        series_id = bci_map_02[curr]
+        val, dt, _ = get_fred_data_historical(series_id, dt_str, fred_key)
+        if val is not None:
+            val = 50.0 + float(val)
+            ref_date = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+            source = f"FRED ({series_id})"
+    elif curr in bci_map_03:
+        series_id = bci_map_03[curr]
+        val, dt, _ = get_fred_data_historical(series_id, dt_str, fred_key)
+        if val is not None:
+            val = 50.0 + (float(val) - 100.0) * 10.0
+            ref_date = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt) if dt else None
+            source = f"FRED ({series_id})"
+            
+    if val is None:
+        return None
+    return {
+        "value": val,
+        "date": ref_date,
+        "source": source
+    }
+
 def compute_currency_details(curr: str, target_date=None) -> dict:
     fred_key = FRED_KEY
     if target_date is None:
@@ -3185,6 +3178,12 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
     except Exception:
         pass
         
+    bci_data = get_bci_value(curr, dt_str)
+    if bci_data is not None:
+        scores["BCI"] = bci_data["value"]
+    else:
+        scores["BCI"] = None
+        
     scores["_missing"] = missing
     scores["_completeness"] = (5.0 - len(missing)) / 5.0 * 100.0
     return scores
@@ -3205,6 +3204,7 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
             "ForwardRates": 0.0,
             "InflationExpectations": 0.0,
             "EconomicSurprises": 0.0,
+            "BCI": 0.0,
             "Correction": 100.0
         }
         
@@ -3216,6 +3216,7 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
     w_fw = weights.get("ForwardRates", 0.0) / 100.0
     w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
     w_surp = weights.get("EconomicSurprises", 0.0) / 100.0
+    w_bci = weights.get("BCI", 0.0) / 100.0
     w_corr = weights.get("Correction", 100.0) / 100.0
     
     fw_score = 0.0
@@ -3272,6 +3273,8 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
         available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
     if w_surp > 0.0 and surp_available:
         available_factors["EconomicSurprises"] = (surp_score, w_surp)
+    if w_bci > 0.0 and scores.get("BCI") is not None:
+        available_factors["BCI"] = (scores["BCI"], w_bci)
 
     total_weight = sum(weight for val, weight in available_factors.values())
     if total_weight > 0.0:
@@ -3301,6 +3304,7 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
     w_fw = weights.get("ForwardRates", 0.0) / 100.0
     w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
     w_surp = weights.get("EconomicSurprises", 0.0) / 100.0
+    w_bci = weights.get("BCI", 0.0) / 100.0
     w_corr = weights.get("Correction", 100.0) / 100.0
     
     fw_score = 0.0
@@ -3326,7 +3330,7 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
                 inf_exp_available = True
         except Exception:
             pass
-
+ 
     surp_score = 0.0
     surp_available = False
     if w_surp > 0.0:
@@ -3357,7 +3361,9 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
         available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
     if w_surp > 0.0 and surp_available:
         available_factors["EconomicSurprises"] = (surp_score, w_surp)
-
+    if w_bci > 0.0 and scores.get("BCI") is not None:
+        available_factors["BCI"] = (scores["BCI"], w_bci)
+ 
     total_weight = sum(weight for val, weight in available_factors.values())
     if total_weight > 0.0:
         core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
@@ -6451,6 +6457,11 @@ with tab8:
         st.info("Finnhub Analysten-Konsens zur Zeit nicht verfügbar.")
 
     st.write("")
+    st.info("ℹ️ **Methodischer Hinweis zur PMI-Datenqualität:**\n"
+            "- **Live-System:** 🟢 **REAL PMI** (S&P Global / ISM PMI wird live von Trading Economics geladen).\n"
+            "- **Historisch / Backtest:** 🔴 **HISTORICAL PMI UNAVAILABLE** (FRED-Reihen NAPM/EUROPAMIMIPDSMEI sind eingestellt/lizenzpflichtig). Der CORE-Backtest verwendet für diese Zeiträume die **dynamische Renormalisierung** (PMI wird ausgeschlossen, verbleibende Faktoren werden skaliert).\n"
+            "- **Research-Faktor:** Der OECD **Business Confidence Indicator (BCI)** ist historisch verfügbar und kann im Model Lab separat als eigener Faktor getestet werden.")
+
     st.subheader("📊 Data Integrity & Signal Quality Dashboard")
     st.caption("Auswertung der makroökonomischen Datenvollständigkeit und Qualität für alle G10-Währungen:")
     
@@ -6525,7 +6536,7 @@ with tab9:
 
     st.write("")
     st.markdown("### ⚖️ Faktor-Gewichtung (CORE Modell)")
-    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6, col_w7, col_w8, col_w9 = st.columns(9)
+    col_w1, col_w2, col_w3, col_w4, col_w5, col_w6, col_w7, col_w8, col_w9, col_w10 = st.columns(10)
     with col_w1:
         w_gp_b = st.number_input("Yields (%)", 0, 100, 35, key="w_gp_b")
     with col_w2:
@@ -6543,6 +6554,8 @@ with tab9:
     with col_w8:
         w_surp_b = st.number_input("Surprises (%)", 0, 100, 0, key="w_surp_b")
     with col_w9:
+        w_bci_b = st.number_input("BCI (%)", 0, 100, 0, key="w_bci_b")
+    with col_w10:
         w_corr_b = st.number_input("Correction (%)", 0, 200, 100, key="w_corr_b")
         
     weights_bt = {
@@ -6554,6 +6567,7 @@ with tab9:
         "ForwardRates": w_fw_b,
         "InflationExpectations": w_inf_exp_b,
         "EconomicSurprises": w_surp_b,
+        "BCI": w_bci_b,
         "Correction": w_corr_b
     }
 
@@ -6564,6 +6578,11 @@ with tab9:
             trades_list = []
             equity_curve = [10000.0]
             current_equity = 10000.0
+            
+            total_checks = 0
+            real_pmi_count = 0
+            proxy_pmi_count = 0
+            unavailable_pmi_count = 0
             
             start_dt = pd.to_datetime(bt_start_date)
             end_dt = pd.to_datetime(bt_end_date)
@@ -6582,6 +6601,18 @@ with tab9:
                     base, quote = pair.split("/")
                     
                     try:
+                        b_details = compute_currency_details(base, date_str)
+                        q_details = compute_currency_details(quote, date_str)
+                        
+                        # Count PMI statuses in baseline weights
+                        for details in [b_details, q_details]:
+                            total_checks += 1
+                            pmi_val = details.get("PMI")
+                            if pmi_val is None:
+                                unavailable_pmi_count += 1
+                            else:
+                                real_pmi_count += 1
+                                
                         b_score, b_reg, _, _, _ = compute_currency_professional_score_and_regime_custom(base, weights_bt, date_str)
                         q_score, q_reg, _, _, _ = compute_currency_professional_score_and_regime_custom(quote, weights_bt, date_str)
                         
@@ -6631,6 +6662,20 @@ with tab9:
                         pass
                         
             df_bt_trades = pd.DataFrame(trades_list)
+            if total_checks > 0:
+                real_pct = (real_pmi_count / total_checks) * 100.0
+                proxy_pct = (proxy_pmi_count / total_checks) * 100.0
+                unavail_pct = (unavailable_pmi_count / total_checks) * 100.0
+            else:
+                real_pct = 0.0
+                proxy_pct = 0.0
+                unavail_pct = 100.0
+                
+            st.session_state["bt_pmi_metrics"] = {
+                "real": real_pct,
+                "proxy": proxy_pct,
+                "unavailable": unavail_pct
+            }
             
             if df_bt_trades.empty:
                 st.warning("Keine Trades mit den aktuellen Filtern generiert. Versuchen Sie, den Schwellenwert oder Konfidenz-Filter zu lockern.")
@@ -6672,12 +6717,16 @@ with tab9:
                     
                 pit_status = "Partially Point-in-Time Validated 🟡" if is_part else "Point-in-Time Validated 🟢"
                 
+                pmi_met = st.session_state.get("bt_pmi_metrics", {"real": 0.0, "proxy": 0.0, "unavailable": 100.0})
+                
                 col_meta1, col_meta2 = st.columns(2)
                 with col_meta1:
                     st.write(f"- **Backtest-Zeitraum:** `{bt_start_date}` bis `{bt_end_date}`")
                     st.write(f"- **Point-in-Time Status:** `{pit_status}`")
                     st.write("- **Look-Ahead Bias Audit:** `PASSED (Chronologische Filterung aktiv)`")
                 with col_meta2:
+                    st.write(f"- **Historical PMI Coverage:** `{pmi_met['real']:.1f}%` (Real PMI)")
+                    st.write(f"- **Real PMI:** `{pmi_met['real']:.1f}%` | **Proxy:** `{pmi_met['proxy']:.1f}%` | **Unavailable:** `{pmi_met['unavailable']:.1f}%`")
                     st.write("- **Vintage-Datenverfügbarkeit:** `Verfügbar für CPI, Labour, GDP`" if not is_part else "- **Vintage-Datenverfügbarkeit:** `Eingeschränkt für Forward Rates / Surprises`")
                     st.write("- **Revision Risk Level:** `Niedrig`" if not is_part else "- **Revision Risk Level:** `Mittel`")
                     
@@ -6799,6 +6848,7 @@ def load_saved_models():
                 "ForwardRates": 0.0,
                 "InflationExpectations": 0.0,
                 "EconomicSurprises": 0.0,
+                "BCI": 0.0,
                 "Correction": 100.0,
                 "notes": "Original core fundamental model baseline.",
                 "hypothesis": "Baseline macroeconomic core indicators."
@@ -6854,10 +6904,11 @@ with tab10:
         w_fw = st.number_input("🔮 Forward Rates %", 0, 100, int(model_details.get("ForwardRates", 0.0)), key="w_fw_lab")
         w_inf_exp = st.number_input("🎈 Inflation Expectations %", 0, 100, int(model_details.get("InflationExpectations", 0.0)), key="w_inf_exp_lab")
         w_surp = st.number_input("📰 Economic Surprises %", 0, 100, int(model_details.get("EconomicSurprises", 0.0)), key="w_surp_lab")
+        w_bci = st.number_input("💼 Business Confidence (BCI) %", 0, 100, int(model_details.get("BCI", 0.0)), key="w_bci_lab")
         w_corr = st.number_input("⚖️ Correction Factors %", 0, 200, int(model_details.get("Correction", 100.0)), key="w_corr_lab")
 
     # Sum check
-    total_w = w_gp + w_inf + w_lab + w_pmi + w_gdp + w_fw + w_inf_exp + w_surp
+    total_w = w_gp + w_inf + w_lab + w_pmi + w_gdp + w_fw + w_inf_exp + w_surp + w_bci
     if total_w != 100:
         st.error(f"❌ Die Summe der Core- und Research-Faktoren beträgt **{total_w}%** (Soll: 100%).")
         if st.checkbox("Normalisiere Gewichtungen automatisch auf 100%"):
@@ -6870,6 +6921,7 @@ with tab10:
             w_fw = round(w_fw * scale_fac)
             w_inf_exp = round(w_inf_exp * scale_fac)
             w_surp = round(w_surp * scale_fac)
+            w_bci = round(w_bci * scale_fac)
             st.success("Normalisierte Werte berechnet. Bitte Modell speichern.")
     else:
         st.success("✅ Modell-Gewichtung beträgt genau 100%.")
@@ -6893,6 +6945,7 @@ with tab10:
                 "ForwardRates": float(w_fw),
                 "InflationExpectations": float(w_inf_exp),
                 "EconomicSurprises": float(w_surp),
+                "BCI": float(w_bci),
                 "Correction": float(w_corr),
                 "notes": model_notes,
                 "hypothesis": model_hypothesis
@@ -6921,6 +6974,7 @@ with tab10:
                     "ForwardRates": float(model_details.get("ForwardRates", 0)),
                     "InflationExpectations": float(model_details.get("InflationExpectations", 0)),
                     "EconomicSurprises": float(model_details.get("EconomicSurprises", 0)),
+                    "BCI": float(model_details.get("BCI", 0)),
                     "Correction": float(model_details["Correction"])
                 }
                 st.success(f"Modell '{sel_model_name}' erfolgreich als LIVE-Modell aktiviert! Live-Signale und Dashboard-Berechnungen wurden aktualisiert.")
