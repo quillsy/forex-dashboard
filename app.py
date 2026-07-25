@@ -650,7 +650,23 @@ def fetch_stockdata_live(pair, key):
             raise last_error
         raise ValueError("Keine aktuellen Nachrichten für dieses Paar gefunden")
         
-    scores = [art["sentiment_score"] for art in articles if "sentiment_score" in art and art["sentiment_score"] is not None]
+    scores = []
+    symbol_raw = pair.replace("/", "").upper()
+    for art in articles:
+        found_entity = False
+        entities = art.get("entities", [])
+        for ent in entities:
+            ent_sym = str(ent.get("symbol", "")).upper()
+            if ent_sym == symbol_raw:
+                s_val = ent.get("sentiment_score")
+                if s_val is not None:
+                    scores.append(float(s_val))
+                    found_entity = True
+                    break
+        if not found_entity:
+            if "sentiment_score" in art and art["sentiment_score"] is not None:
+                scores.append(float(art["sentiment_score"]))
+                
     if not scores:
         raise ValueError("Keine Sentiment-Bewertung in Nachrichten vorhanden")
         
