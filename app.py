@@ -4706,7 +4706,369 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
     
     return capped_score, weighted_scores
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+def load_live_signals():
+    file_path = "live_signals.json"
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_live_signals(signals):
+    file_path = "live_signals.json"
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(signals, f, indent=4, ensure_ascii=False)
+        git_push_file(file_path)
+    except Exception:
+        pass
+
+def git_push_file(file_path):
+    import subprocess
+    import threading
+    def run_git():
+        try:
+            res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, timeout=5)
+            if "true" in res.stdout.lower():
+                subprocess.run(["git", "add", file_path], timeout=5)
+                subprocess.run(["git", "commit", "-m", f"Auto-update: {file_path} Snapshots/Outcomes"], timeout=5)
+                subprocess.run(["git", "push"], timeout=10)
+        except Exception:
+            pass
+    threading.Thread(target=run_git, daemon=True).start()
+
+def compute_checklist_snapshot(model_weights):
+    checklist = []
+    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
+    for pair in pairs:
+        base, quote = pair.split("/")
+        try:
+            # Base
+            b_score, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+            # Quote
+            q_score, q_reg, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+            
+            diff = b_score - q_score
+            signal_value = diff / 2.0
+            
+            if signal_value >= 25.0:
+                sig_text = "STRONG BUY"
+                sig_strength = "STARK"
+            elif 10.0 <= signal_value < 25.0:
+                sig_text = "MID BUY"
+                sig_strength = "MITTEL"
+            elif -10.0 < signal_value < 10.0:
+                sig_text = "NEUTRAL"
+                sig_strength = "SCHWACH"
+            elif -25.0 < signal_value <= -10.0:
+                sig_text = "MID SELL"
+                sig_strength = "MITTEL"
+            else:
+                sig_text = "STRONG SELL"
+                sig_strength = "STARK"
+                
+            b_comp = b_details.get("_completeness", 100.0)
+            q_comp = q_details.get("_completeness", 100.0)
+            dq = (b_comp + q_comp) / 2.0
+            
+            checklist.append({
+                "pair": pair,
+                "signal": sig_text,
+                "signal_strength": sig_strength,
+                "divergence": round(diff, 1),
+                "confidence": min(int(abs(diff) / 10.0 * 100.0), 100),
+                "data_quality": dq,
+                "regime": b_reg
+            })
+        except Exception:
+            pass
+    return checklist
+
+def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close):
+    model_name = st.session_state.get("active_live_model", "CORE v1 - Baseline")
+    model_weights = st.session_state.get("active_live_model_weights")
+    if model_weights is None:
+        model_weights = {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        }
+        
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    signals = load_live_signals()
+    
+    # Duplicate Check (prevent duplicate snapshot if same signal on same day)
+    duplicate_found = False
+    for s_id, s_data in signals.items():
+        if s_data.get("metadata", {}).get("pair") == selected_pair and s_data.get("metadata", {}).get("date") == today_str:
+            if s_data.get("pair_signal", {}).get("signal") == badge:
+                duplicate_found = True
+                break
+                
+    if duplicate_found:
+        return
+        
+    time_str = datetime.now().strftime("%H%M")
+    snapshot_id = f"{today_str}_{time_str}_{selected_pair.replace('/', '')}_{model_name.replace(' ', '_')}"
+    
+    checklist_copy = compute_checklist_snapshot(model_weights)
+    
+    base_details_raw = compute_currency_details(base_curr, None)
+    quote_details_raw = compute_currency_details(quote_curr, None)
+    
+    def get_effective_weights(details, w):
+        av_factors = {}
+        for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
+            if details.get(k) is not None:
+                av_factors[k] = w.get(k, 0.0)
+        if w.get("BCI", 0.0) > 0.0 and details.get("BCI") is not None:
+            av_factors["BCI"] = w.get("BCI", 0.0)
+        total_w = sum(av_factors.values())
+        eff = {}
+        for k, v in av_factors.items():
+            eff[k] = (v / total_w * 100.0) if total_w > 0 else 0.0
+        return eff
+        
+    base_eff_weights = get_effective_weights(base_details_raw, model_weights)
+    quote_eff_weights = get_effective_weights(quote_details_raw, model_weights)
+    
+    vix_val = None
+    try:
+        vix_val = get_vix_value(today_str)
+    except Exception:
+        pass
+        
+    oil_val = None
+    try:
+        oil_val = get_oil_price(today_str)
+    except Exception:
+        pass
+        
+    milk_val = None
+    try:
+        milk_val = get_milk_price(today_str)
+    except Exception:
+        pass
+        
+    snapshot = {
+        "metadata": {
+            "snapshot_id": snapshot_id,
+            "date": today_str,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "timezone": str(datetime.now().astimezone().tzinfo),
+            "pair": selected_pair,
+            "base_currency": base_curr,
+            "quote_currency": quote_curr,
+            "core_model_name": model_name,
+            "core_model_weights": model_weights,
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": float(base_score),
+            "quote_core": float(quote_score),
+            "divergence": float(signal_value * 2.0),
+            "final_score": float(signal_value),
+            "signal": badge,
+            "signal_strength": "STARK" if abs(signal_value * 2.0) >= 25.0 else "MITTEL" if abs(signal_value * 2.0) >= 10.0 else "SCHWACH",
+            "confidence": min(int(abs(signal_value * 2.0) / 10.0 * 100.0), 100),
+            "regime": base_details_raw.get("regime", "Normal"),
+            "risk_on_off": "Risk-Off" if (vix_val and vix_val > 22.0) else "Risk-On",
+            "data_quality": (base_details_raw.get("_completeness", 100.0) + quote_details_raw.get("_completeness", 100.0)) / 2.0
+        },
+        "base_currency_details": {
+            "total_core_score": float(base_score),
+            "factor_scores": {k: float(v) if v is not None else None for k, v in base_details_raw.items() if not k.startswith("_")},
+            "original_weights": model_weights,
+            "effective_weights": base_eff_weights,
+            "data_quality": base_details_raw.get("_completeness", 100.0),
+            "missing_factors": base_details_raw.get("_missing", []),
+            "data_quality_status": "🟢 VALID" if base_details_raw.get("_completeness", 100.0) == 100.0 else "🟡 PARTIAL"
+        },
+        "quote_currency_details": {
+            "total_core_score": float(quote_score),
+            "factor_scores": {k: float(v) if v is not None else None for k, v in quote_details_raw.items() if not k.startswith("_")},
+            "original_weights": model_weights,
+            "effective_weights": quote_eff_weights,
+            "data_quality": quote_details_raw.get("_completeness", 100.0),
+            "missing_factors": quote_details_raw.get("_missing", []),
+            "data_quality_status": "🟢 VALID" if quote_details_raw.get("_completeness", 100.0) == 100.0 else "🟡 PARTIAL"
+        },
+        "market_context": {
+            "vix": vix_val,
+            "oil": oil_val,
+            "milk": milk_val
+        },
+        "checklist_snapshot": checklist_copy,
+        "outcome_status": "OPEN",
+        "entry_price": float(latest_close),
+        "outcomes": {
+            str(n): {
+                "exit_price": None,
+                "exit_date": None,
+                "return_pct": None,
+                "directional_return_pct": None,
+                "status": None,
+                "mfe": None,
+                "mae": None
+            } for n in [1, 3, 5, 10, 15, 20]
+        }
+    }
+    
+    signals[snapshot_id] = snapshot
+    save_live_signals(signals)
+
+def update_open_outcomes():
+    signals = load_live_signals()
+    changed = False
+    
+    open_snapshots_by_pair = {}
+    for s_id, s_data in list(signals.items()):
+        if s_data.get("outcome_status", "OPEN") == "OPEN":
+            p = s_data["metadata"]["pair"]
+            if p not in open_snapshots_by_pair:
+                open_snapshots_by_pair[p] = []
+            open_snapshots_by_pair[p].append((s_id, s_data))
+            
+    if not open_snapshots_by_pair:
+        return
+        
+    for pair, snapshots in open_snapshots_by_pair.items():
+        df, _, _ = get_fcs_history_data(pair, FCS_KEY)
+        if df is None or df.empty:
+            continue
+            
+        df = df.sort_values("date").reset_index(drop=True)
+        df["date_str"] = df["date"].dt.strftime("%Y-%m-%d")
+        
+        for s_id, s_data in snapshots:
+            entry_date_str = s_data["metadata"]["date"]
+            entry_price = s_data["entry_price"]
+            direction = "LONG" if "BUY" in s_data["pair_signal"]["signal"] else "SHORT"
+            
+            matching_rows = df[df["date_str"] == entry_date_str]
+            if matching_rows.empty:
+                matching_rows = df[df["date_str"] >= entry_date_str]
+                if matching_rows.empty:
+                    continue
+            idx = matching_rows.index[0]
+            
+            all_filled = True
+            for n_str, out_data in list(s_data["outcomes"].items()):
+                n = int(n_str)
+                if out_data.get("exit_price") is not None:
+                    continue
+                    
+                target_idx = idx + n
+                if target_idx < len(df):
+                    exit_row = df.iloc[target_idx]
+                    exit_price = float(exit_row["close"])
+                    exit_date = exit_row["date_str"]
+                    
+                    raw_ret = (exit_price - entry_price) / entry_price * 100.0
+                    dir_ret = raw_ret if direction == "LONG" else -raw_ret
+                    
+                    window_df = df.iloc[idx + 1:target_idx + 1]
+                    max_fav = 0.0
+                    max_adv = 0.0
+                    
+                    for _, row in window_df.iterrows():
+                        high_val = float(row["high"])
+                        low_val = float(row["low"])
+                        
+                        if direction == "LONG":
+                            fav = (high_val - entry_price) / entry_price * 100.0
+                            adv = (low_val - entry_price) / entry_price * 100.0
+                        else:
+                            fav = (entry_price - low_val) / entry_price * 100.0
+                            adv = (entry_price - high_val) / entry_price * 100.0
+                            
+                        max_fav = max(max_fav, fav)
+                        max_adv = min(max_adv, adv)
+                        
+                    out_data["exit_price"] = exit_price
+                    out_data["exit_date"] = exit_date
+                    out_data["return_pct"] = round(raw_ret, 3)
+                    out_data["directional_return_pct"] = round(dir_ret, 3)
+                    out_data["status"] = "CORRECT" if dir_ret > 0.0 else "WRONG" if dir_ret < 0.0 else "NEUTRAL"
+                    out_data["mfe"] = round(max_fav, 3)
+                    out_data["mae"] = round(max_adv, 3)
+                    
+                    changed = True
+                else:
+                    all_filled = False
+                    
+            if all_filled:
+                s_data["outcome_status"] = "COMPLETED"
+                changed = True
+                
+    if changed:
+        save_live_signals(signals)
+
+def save_all_g10_live_snapshots():
+    model_weights = st.session_state.get("active_live_model_weights")
+    if model_weights is None:
+        model_weights = {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        }
+        
+    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
+    for pair in pairs:
+        base, quote = pair.split("/")
+        try:
+            b_score, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+            q_score, q_reg, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+            
+            diff = b_score - q_score
+            signal_value = diff / 2.0
+            
+            if signal_value >= 25.0:
+                badge = "STRONG BUY"
+            elif 10.0 <= signal_value < 25.0:
+                badge = "MID BUY"
+            elif -10.0 < signal_value < 10.0:
+                badge = "NEUTRAL"
+            elif -25.0 < signal_value <= -10.0:
+                badge = "MID SELL"
+            else:
+                badge = "STRONG SELL"
+                
+            itick_data, _, _ = get_itick_data(pair, ITICK_KEY)
+            latest_close = itick_data["close"] if itick_data else 0.0
+            if latest_close == 0.0:
+                df, _, _ = get_fcs_history_data(pair, FCS_KEY)
+                if df is not None and not df.empty:
+                    latest_close = float(df.iloc[-1]["close"])
+                    
+            save_live_signal_snapshot(pair, base, quote, b_score, q_score, signal_value, badge, latest_close)
+        except Exception:
+            pass
+
+# Execute automatic daily G10 snapshots & outcome updates (Phase 18)
+try:
+    save_all_g10_live_snapshots()
+    update_open_outcomes()
+except Exception:
+    pass
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "🏠 Dashboard",
     "🌍 Currency Ranking",
     "📊 Fundamental Analysis",
@@ -4718,7 +5080,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.t
     "📊 Backtesting",
     "🧪 Model Lab",
     "📓 Research Journal",
-    "🧪 Forward Testing"
+    "🧪 Forward Testing",
+    "📈 Live Signal History"
 ])
 
 # ----------------- TAB 1: DASHBOARD -----------------
@@ -7446,3 +7809,236 @@ with tab12:
                 manage_data["status"] = "Invalidated 🔴"
                 save_forward_test(manage_test_id, manage_data)
                 st.success("Test-Status auf ungültig gesetzt.")
+
+with tab13:
+    st.header("📈 Live Signal History & Outcomes")
+    st.caption("Dauerhafte Aufzeichnung und Analyse von echten Live-Signal-Snapshots zur empirischen Evaluierung.")
+    
+    st.warning("⚠️ **Wichtiger Hinweis:** Die Live-Datensammlung dient Beobachtungszwecken. Statistische Ergebnisse beweisen keine Kausalität und Modelle werden nicht automatisch optimiert.")
+    
+    signals_data = load_live_signals()
+    
+    if not signals_data:
+        st.info("Bisher wurden keine Live-Signal-Snapshots aufgezeichnet. Die automatische Erfassung startet bei täglicher Verwendung.")
+    else:
+        # Compute general stats
+        num_snapshots = len(signals_data)
+        completed_outcomes = sum(1 for s in signals_data.values() if s.get("outcome_status") == "COMPLETED")
+        open_outcomes = num_snapshots - completed_outcomes
+        
+        # Calculate duration of data collection
+        dates = [pd.to_datetime(s["metadata"]["date"]) for s in signals_data.values()]
+        oldest = min(dates)
+        newest = max(dates)
+        duration_days = (newest - oldest).days
+        duration_months = duration_days / 30.4
+        
+        # Validation Status
+        if duration_months < 3.0:
+            val_status = "Initial Data Collection (Observation) 🟡"
+            status_desc = "Empfehlung: Datenerfassung fortsetzen (< 3 Monate)."
+        elif 3.0 <= duration_months < 6.0:
+            val_status = "Early Analysis Phase 🟡"
+            status_desc = "Erste Tendenzen erkennbar (>= 3 Monate)."
+        elif 6.0 <= duration_months < 12.0:
+            val_status = "Preliminary Validation 🟡"
+            status_desc = "Aussagekräftige Zwischenstände (>= 6 Monate)."
+        elif 12.0 <= duration_months < 18.0:
+            val_status = "Initial Validation 🟢"
+            status_desc = "Statistisch belastbare Auswertungen möglich (>= 12 Monate)."
+        elif 18.0 <= duration_months < 24.0:
+            val_status = "Stronger Validation 🟢"
+            status_desc = "Hohe Validität der Regimes & Signale (>= 18 Monate)."
+        else:
+            val_status = "Robust Validation 🟢"
+            status_desc = "Optimaler Datensatz zur Modelloptimierung (>= 24 Monate)."
+            
+        col_st1, col_st2, col_st3, col_st4 = st.columns(4)
+        with col_st1:
+            st.metric("Total Snapshots", f"{num_snapshots}")
+        with col_st2:
+            st.metric("Laufzeit (Tage)", f"{duration_days} Tage")
+        with col_st3:
+            st.metric("Outcomes (Completed / Open)", f"{completed_outcomes} / {open_outcomes}")
+        with col_st4:
+            st.metric("Abdeckungsdauer", f"{duration_months:.1f} Mon.")
+            
+        st.subheader("🚦 Validierungsstatus & Empfehlung")
+        st.write(f"- **Aktueller Status:** `{val_status}`")
+        st.write(f"- **Empfehlung:** {status_desc}")
+        
+        # Average Data Quality
+        dq_vals = [s["pair_signal"]["data_quality"] for s in signals_data.values()]
+        avg_dq = np.mean(dq_vals) if dq_vals else 100.0
+        st.markdown(f"- **Durchschnittliche Signal-Datenqualität:** `{avg_dq:.1f}%` (Unvollständige Tage werden dynamisch renormalisiert).")
+        
+        st.markdown("---")
+        
+        # 1. Performance Overview (Outcomes)
+        st.subheader("📊 Performance-Analyse (Abgeschlossene Signale)")
+        
+        # Filter signals with completed outcomes
+        completed_sigs = [s for s in signals_data.values() if s.get("outcome_status") == "COMPLETED"]
+        
+        if not completed_sigs:
+            st.info("Noch keine Signale mit abgeschlossenen Outcomes vorhanden (Wartezeit für 1D/3D/5D/10D/15D/20D Exit-Kurse läuft).")
+        else:
+            # Let the user select target window for analysis
+            window_select = st.selectbox("Zeitfenster für Performance-Auswertung:", ["1", "3", "5", "10", "15", "20"], index=2, key="history_window_select")
+            
+            perf_rows = []
+            for s in completed_sigs:
+                out_data = s["outcomes"].get(window_select, {})
+                if out_data.get("exit_price") is not None:
+                    perf_rows.append({
+                        "Snapshot ID": s["metadata"]["snapshot_id"],
+                        "Pair": s["metadata"]["pair"],
+                        "Signal": s["pair_signal"]["signal"],
+                        "Confidence": s["pair_signal"]["confidence"],
+                        "Regime": s["pair_signal"]["regime"],
+                        "Return (%)": out_data.get("return_pct"),
+                        "Dir Return (%)": out_data.get("directional_return_pct"),
+                        "Outcome": out_data.get("status"),
+                        "MFE (%)": out_data.get("mfe"),
+                        "MAE (%)": out_data.get("mae")
+                    })
+            
+            df_perf = pd.DataFrame(perf_rows)
+            if not df_perf.empty:
+                # Calculations
+                correct_count = sum(1 for x in df_perf["Outcome"] if x == "CORRECT")
+                total_perf = len(df_perf)
+                hit_rate = (correct_count / total_perf * 100.0) if total_perf > 0 else 0.0
+                
+                avg_dir_ret = df_perf["Dir Return (%)"].mean()
+                med_dir_ret = df_perf["Dir Return (%)"].median()
+                
+                kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+                with kpi_col1:
+                    st.metric("Hit Rate (Korrekt %)", f"{hit_rate:.1f}%")
+                with kpi_col2:
+                    st.metric("Mittlerer Dir. Return", f"{avg_dir_ret:+.3f}%")
+                with kpi_col3:
+                    st.metric("Median Dir. Return", f"{med_dir_ret:+.3f}%")
+                    
+                st.markdown("#### Segmentierungs-Analyse")
+                
+                seg_option = st.radio("Segmentieren nach:", ["FX-Paar", "Signalstärke", "Regime", "Confidence"], horizontal=True, key="history_seg_radio")
+                
+                if seg_option == "FX-Paar":
+                    df_grp = df_perf.groupby("Pair").agg(
+                        Signals=("Outcome", "count"),
+                        Correct=("Outcome", lambda x: sum(1 for v in x if v == "CORRECT")),
+                        AvgReturn=("Dir Return (%)", "mean"),
+                        MaxMFE=("MFE (%)", "max"),
+                        MaxMAE=("MAE (%)", "min")
+                    ).reset_index()
+                    df_grp["Hit Rate"] = (df_grp["Correct"] / df_grp["Signals"] * 100.0).round(1).map(lambda x: f"{x}%")
+                    st.dataframe(df_grp, hide_index=True, use_container_width=True)
+                    
+                elif seg_option == "Signalstärke":
+                    df_grp = df_perf.groupby("Signal").agg(
+                        Signals=("Outcome", "count"),
+                        Correct=("Outcome", lambda x: sum(1 for v in x if v == "CORRECT")),
+                        AvgReturn=("Dir Return (%)", "mean"),
+                        MaxMFE=("MFE (%)", "max"),
+                        MaxMAE=("MAE (%)", "min")
+                    ).reset_index()
+                    df_grp["Hit Rate"] = (df_grp["Correct"] / df_grp["Signals"] * 100.0).round(1).map(lambda x: f"{x}%")
+                    st.dataframe(df_grp, hide_index=True, use_container_width=True)
+                    
+                elif seg_option == "Regime":
+                    df_grp = df_perf.groupby("Regime").agg(
+                        Signals=("Outcome", "count"),
+                        Correct=("Outcome", lambda x: sum(1 for v in x if v == "CORRECT")),
+                        AvgReturn=("Dir Return (%)", "mean"),
+                        MaxMFE=("MFE (%)", "max"),
+                        MaxMAE=("MAE (%)", "min")
+                    ).reset_index()
+                    df_grp["Hit Rate"] = (df_grp["Correct"] / df_grp["Signals"] * 100.0).round(1).map(lambda x: f"{x}%")
+                    st.dataframe(df_grp, hide_index=True, use_container_width=True)
+                    
+                else:  # Confidence
+                    # Bin confidence into categories
+                    df_perf["Conf Group"] = pd.cut(df_perf["Confidence"], bins=[0, 40, 70, 100], labels=["Niedrig (<40%)", "Mittel (40-70%)", "Hoch (>70%)"])
+                    df_grp = df_perf.groupby("Conf Group", observed=False).agg(
+                        Signals=("Outcome", "count"),
+                        Correct=("Outcome", lambda x: sum(1 for v in x if v == "CORRECT")),
+                        AvgReturn=("Dir Return (%)", "mean"),
+                        MaxMFE=("MFE (%)", "max"),
+                        MaxMAE=("MAE (%)", "min")
+                    ).reset_index()
+                    df_grp["Hit Rate"] = (df_grp["Correct"] / df_grp["Signals"] * 100.0).round(1).map(lambda x: f"{x}%")
+                    st.dataframe(df_grp, hide_index=True, use_container_width=True)
+                    
+        st.markdown("---")
+        
+        # 2. Raw snapshots table
+        st.subheader("📋 Protokollierte Snapshots & Daten")
+        
+        raw_rows = []
+        for s_id, s in signals_data.items():
+            raw_rows.append({
+                "Snapshot ID": s_id,
+                "Datum": s["metadata"]["date"],
+                "FX-Paar": s["metadata"]["pair"],
+                "Signal": s["pair_signal"]["signal"],
+                "Divergenz": s["pair_signal"]["divergence"],
+                "Confidence": f"{s['pair_signal']['confidence']}%",
+                "Entry Price": s["entry_price"],
+                "Status": s["outcome_status"],
+                "Modell": s["metadata"]["core_model_name"]
+            })
+        df_raw = pd.DataFrame(raw_rows)
+        st.dataframe(df_raw.sort_values("Snapshot ID", ascending=False), hide_index=True, use_container_width=True)
+        
+        # 3. Export Section
+        st.subheader("📥 Daten-Export")
+        
+        # Full JSON download
+        json_str = json.dumps(signals_data, indent=4, ensure_ascii=False)
+        st.download_button(
+            label="📥 Vollständigen JSON Datensatz exportieren",
+            data=json_str,
+            file_name=f"live_signals_full_{datetime.now().strftime('%Y%m%d')}.json",
+            mime="application/json",
+            key="btn_export_json_history"
+        )
+        
+        # CSV Snapshot export
+        csv_snap = df_raw.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Snapshot-Liste als CSV exportieren",
+            data=csv_snap,
+            file_name=f"live_signal_snapshots_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="btn_export_csv_snapshots"
+        )
+        
+        # CSV Outcomes export
+        out_rows = []
+        for s_id, s in signals_data.items():
+            for w in ["1", "3", "5", "10", "15", "20"]:
+                out_data = s["outcomes"].get(w, {})
+                out_rows.append({
+                    "Snapshot ID": s_id,
+                    "Pair": s["metadata"]["pair"],
+                    "Signal": s["pair_signal"]["signal"],
+                    "Window": f"{w}D",
+                    "Entry Price": s["entry_price"],
+                    "Exit Price": out_data.get("exit_price"),
+                    "Return (%)": out_data.get("return_pct"),
+                    "Dir Return (%)": out_data.get("directional_return_pct"),
+                    "Status": out_data.get("status"),
+                    "MFE (%)": out_data.get("mfe"),
+                    "MAE (%)": out_data.get("mae")
+                })
+        df_out = pd.DataFrame(out_rows)
+        csv_out = df_out.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Outcomes-Liste als CSV exportieren",
+            data=csv_out,
+            file_name=f"live_signal_outcomes_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="btn_export_csv_outcomes"
+        )
