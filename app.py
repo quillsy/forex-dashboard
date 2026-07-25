@@ -4721,23 +4721,8 @@ def save_live_signals(signals):
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(signals, f, indent=4, ensure_ascii=False)
-        git_push_file(file_path)
     except Exception:
         pass
-
-def git_push_file(file_path):
-    import subprocess
-    import threading
-    def run_git():
-        try:
-            res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, timeout=5)
-            if "true" in res.stdout.lower():
-                subprocess.run(["git", "add", file_path], timeout=5)
-                subprocess.run(["git", "commit", "-m", f"Auto-update: {file_path} Snapshots/Outcomes"], timeout=5)
-                subprocess.run(["git", "push"], timeout=10)
-        except Exception:
-            pass
-    threading.Thread(target=run_git, daemon=True).start()
 
 def compute_checklist_snapshot(model_weights):
     checklist = []
@@ -5061,12 +5046,7 @@ def save_all_g10_live_snapshots():
         except Exception:
             pass
 
-# Execute automatic daily G10 snapshots & outcome updates (Phase 18)
-try:
-    save_all_g10_live_snapshots()
-    update_open_outcomes()
-except Exception:
-    pass
+# Daily G10 snapshots & outcome updates are automatically executed by the GitHub Actions workflow scheduler
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "🏠 Dashboard",
@@ -7810,6 +7790,30 @@ with tab12:
                 save_forward_test(manage_test_id, manage_data)
                 st.success("Test-Status auf ungültig gesetzt.")
 
+def load_data_collection_status():
+    file_path = "data_collection_status.json"
+    if not os.path.exists(file_path):
+        return {
+            "last_run_timestamp": "N/A",
+            "last_run_status": "N/A",
+            "last_run_error": None,
+            "total_successful_runs": 0,
+            "total_failed_runs": 0,
+            "history": []
+        }
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {
+            "last_run_timestamp": "N/A",
+            "last_run_status": "N/A",
+            "last_run_error": None,
+            "total_successful_runs": 0,
+            "total_failed_runs": 0,
+            "history": []
+        }
+
 with tab13:
     st.header("📈 Live Signal History & Outcomes")
     st.caption("Dauerhafte Aufzeichnung und Analyse von echten Live-Signal-Snapshots zur empirischen Evaluierung.")
@@ -7872,6 +7876,58 @@ with tab13:
         avg_dq = np.mean(dq_vals) if dq_vals else 100.0
         st.markdown(f"- **Durchschnittliche Signal-Datenqualität:** `{avg_dq:.1f}%` (Unvollständige Tage werden dynamisch renormalisiert).")
         
+        # Automated Data Collection Status & Health Checks
+        st.write("")
+        st.subheader("⚙️ Automated Data Collection Status")
+        status_info = load_data_collection_status()
+        
+        last_snap_time = None
+        last_snap_id = "Keine"
+        if signals_data:
+            last_snap_id = max(signals_data.keys())
+            last_snap = signals_data[last_snap_id]
+            last_date = last_snap["metadata"]["date"]
+            last_time = last_snap["metadata"].get("time", "22:00:00")
+            last_snap_time = pd.to_datetime(f"{last_date} {last_time}")
+            
+        health_status = "🔴 Data Collection Inactive"
+        warning_msg = None
+        
+        if last_snap_time is not None:
+            hours_since = (datetime.now() - last_snap_time).total_seconds() / 3600.0
+            if hours_since <= 48.0:
+                health_status = "🟢 Collection Running Normally"
+            elif hours_since <= 168.0:
+                health_status = "🟡 Last Run Failed"
+                warning_msg = "⚠️ Live data collection may be inactive."
+            else:
+                health_status = "🔴 Data Collection Inactive"
+                warning_msg = "🔴 Live data collection appears inactive."
+        else:
+            warning_msg = "🔴 Live data collection appears inactive."
+            
+        if health_status.startswith("🟢"):
+            st.success(f"**Status:** {health_status}")
+        elif health_status.startswith("🟡"):
+            st.warning(f"**Status:** {health_status}")
+            if warning_msg:
+                st.info(warning_msg)
+        else:
+            st.error(f"**Status:** {health_status}")
+            if warning_msg:
+                st.error(warning_msg)
+                
+        col_status1, col_status2, col_status3 = st.columns(3)
+        with col_status1:
+            st.write(f"- **Letzter erfolgreicher Snapshot:** `{last_snap_id}`")
+            st.write(f"- **Zeitpunkt des letzten Jobs:** `{status_info.get('last_run_timestamp', 'N/A')}`")
+        with col_status2:
+            st.write(f"- **Nächster geplanter Lauf:** `Täglich um 22:00 UTC` (bzw. manuell)")
+            st.write(f"- **Erfolgreiche Läufe:** `{status_info.get('total_successful_runs', 0)}`")
+        with col_status3:
+            st.write(f"- **Fehlgeschlagene Läufe:** `{status_info.get('total_failed_runs', 0)}`")
+            st.write(f"- **Letzter Fehler:** `{status_info.get('last_run_error') or 'Keiner'}`")
+            
         st.markdown("---")
         
         # 1. Performance Overview (Outcomes)
