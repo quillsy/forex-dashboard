@@ -1546,5 +1546,263 @@
                 "mae": null
             }
         }
+    },
+    "2026-07-25_1955_NZDUSD_CORE_v1_-_Baseline": {
+        "metadata": {
+            "snapshot_id": "2026-07-25_1955_NZDUSD_CORE_v1_-_Baseline",
+            "date": "2026-07-25",
+            "time": "19:55:45",
+            "timezone": "CEST",
+            "pair": "NZD/USD",
+            "base_currency": "NZD",
+            "quote_currency": "USD",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 48.19129651390534,
+            "quote_core": 56.12295666862117,
+            "divergence": -7.9316601547158285,
+            "final_score": -3.9658300773579143,
+            "signal": "NEUTRAL",
+            "signal_strength": "SCHWACH",
+            "confidence": 79,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 100.0
+        },
+        "base_currency_details": {
+            "total_core_score": 48.19129651390534,
+            "factor_scores": {
+                "Geldpolitik": 100.0,
+                "Inflation": 41.989815902859995,
+                "Arbeitsmarkt": -2.533333333333321,
+                "PMI": 31.500000000000057,
+                "GDP": -100.0,
+                "BCI": 50.15799999999999
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "quote_currency_details": {
+            "total_core_score": 56.12295666862117,
+            "factor_scores": {
+                "Geldpolitik": 53.401368182479864,
+                "Inflation": 100.0,
+                "Arbeitsmarkt": 46.66666666666666,
+                "PMI": 17.00000000000003,
+                "GDP": 93.98288942839771,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "market_context": {
+            "vix": 18.7,
+            "oil": -5.0,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "MID SELL",
+                "signal_strength": "MITTEL",
+                "divergence": -38.3,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -12.2,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "STRONG BUY",
+                "signal_strength": "STARK",
+                "divergence": 71.2,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 33.7,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "STRONG BUY",
+                "signal_strength": "STARK",
+                "divergence": 52.0,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -7.9,
+                "confidence": 79,
+                "data_quality": 100.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "MID SELL",
+                "signal_strength": "MITTEL",
+                "divergence": -26.1,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 32.9,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "STRONG BUY",
+                "signal_strength": "STARK",
+                "divergence": 59.0,
+                "confidence": 100,
+                "data_quality": 100.0,
+                "regime": "Inflation"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        }
     }
 }
