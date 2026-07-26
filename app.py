@@ -4108,9 +4108,11 @@ with st.sidebar:
                 
             rates_to_save[key] = new_val
             
-        # Update session state with saved values
+        # Update session state with saved values (exclude widget keys to prevent StreamlitAPIException)
+        widget_keys = [f"manual_rate_{c}" for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]]
         for k, v in rates_to_save.items():
-            st.session_state[k] = v
+            if k not in widget_keys:
+                st.session_state[k] = v
             
         try:
             with open(RATES_CONFIG_FILE, "w", encoding="utf-8") as f:
