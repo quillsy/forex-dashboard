@@ -246,9 +246,7 @@ CURRENCIES = {
     "CAD": {"name": "Canadian Dollar", "flag": "🇨🇦", "country": "Canada", "wb_code": "CAN"},
     "AUD": {"name": "Australian Dollar", "flag": "🇦🇺", "country": "Australia", "wb_code": "AUS"},
     "NZD": {"name": "New Zealand Dollar", "flag": "🇳🇿", "country": "New Zealand", "wb_code": "NZL"},
-    "JPY": {"name": "Japanese Yen", "flag": "🇯🇵", "country": "Japan", "wb_code": "JPN"},
-    "SEK": {"name": "Swedish Krona", "flag": "🇸🇪", "country": "Sweden", "wb_code": "SWE"},
-    "NOK": {"name": "Norwegian Krone", "flag": "🇳🇴", "country": "Norway", "wb_code": "NOR"}
+    "JPY": {"name": "Japanese Yen", "flag": "🇯🇵", "country": "Japan", "wb_code": "JPN"}
 }
 
 # ----------------- 0. MOCK DATA GENERATORS (Graceful Fallback) -----------------
@@ -2571,9 +2569,7 @@ YIELD_SERIES = {
     "CHF": "IRLTLT01CHM156N",
     "CAD": "IRLTLT01CAM156N",
     "AUD": "IRLTLT01AUM156N",
-    "NZD": "IRLTLT01NZM156N",
-    "SEK": "IRLTLT01SEM156N",
-    "NOK": "IRLTLT01NOM156N"
+    "NZD": "IRLTLT01NZM156N"
 }
 
 CPI_SERIES = {
@@ -2584,9 +2580,7 @@ CPI_SERIES = {
     "CHF": "CPALTT01CHM657N",
     "CAD": "CPALTT01CAM657N",
     "AUD": "CPALTT01AUM657N",
-    "NZD": "CPALTT01NZM657N",
-    "SEK": "CPALTT01SEM657N",
-    "NOK": "CPALTT01NOM657N"
+    "NZD": "CPALTT01NZM657N"
 }
 
 UNEMP_SERIES = {
@@ -2597,9 +2591,7 @@ UNEMP_SERIES = {
     "CHF": "LRUNTTTTCHM156S",
     "CAD": "LRUNTTTTCAM156S",
     "AUD": "LRUNTTTTAUM156S",
-    "NZD": "LRUNTTTTNZM156S",
-    "SEK": "LRUNTTTTSEM156S",
-    "NOK": "LRUNTTTTNOM156S"
+    "NZD": "LRUNTTTTNZM156S"
 }
 
 GDP_SERIES = {
@@ -2610,9 +2602,7 @@ GDP_SERIES = {
     "CHF": "CHEGDPRQPSMEI",
     "CAD": "CANGDPRQPSMEI",
     "AUD": "AUSGDPRQPSMEI",
-    "NZD": "NZLGDPRQPSMEI",
-    "SEK": "SWEGDPRQPSMEI",
-    "NOK": "NORGDPRQPSMEI"
+    "NZD": "NZLGDPRQPSMEI"
 }
 
 PMI_SERIES = {
@@ -2623,9 +2613,7 @@ PMI_SERIES = {
     "CHF": "BSPRTE01CHM661S",
     "CAD": "BSPRTE01CAM661S",
     "AUD": "BSPRTE01AUM661S",
-    "NZD": "BSPRTE01NZM661S",
-    "SEK": "BSPRTE01SEM661S",
-    "NOK": "BSPRTE01NOM661S"
+    "NZD": "BSPRTE01NZM661S"
 }
 
 def get_vix_value(target_date=None):
@@ -4339,9 +4327,7 @@ YIELD_2Y_SERIES = {
     "CHF": "IR3TIB01CHM156N",
     "CAD": "IR3TIB01CAM156N",
     "AUD": "IR3TIB01AUM156N",
-    "NZD": "IR3TIB01NZM156N",
-    "SEK": "IR3TIB01SEM156N",
-    "NOK": "IR3TIB01NOM156N"
+    "NZD": "IR3TIB01NZM156N"
 }
 
 YIELD_5Y_SERIES = {
@@ -4352,9 +4338,7 @@ YIELD_5Y_SERIES = {
     "CHF": None,
     "CAD": None,
     "AUD": None,
-    "NZD": None,
-    "SEK": None,
-    "NOK": None
+    "NZD": None
 }
 
 YIELD_10Y_SERIES = {
@@ -4365,9 +4349,7 @@ YIELD_10Y_SERIES = {
     "CHF": "IRLTLT01CHM156N",
     "CAD": "IRLTLT01CAM156N",
     "AUD": "IRLTLT01AUM156N",
-    "NZD": "IRLTLT01NZM156N",
-    "SEK": "IRLTLT01SEM156N",
-    "NOK": "IRLTLT01NOM156N"
+    "NZD": "IRLTLT01NZM156N"
 }
 
 def get_historical_yield_trends(series_id, dt_str, fred_key):
@@ -4541,9 +4523,7 @@ def get_inflation_expectations_data(curr, target_date=None):
         "CHF": "CSCICP02CHM665S",
         "CAD": "CSCICP02CAM665S",
         "AUD": "CSCICP02AUM665S",
-        "NZD": "CSCICP02NZM665S",
-        "SEK": "CSCICP02SEM665S",
-        "NOK": "CSCICP02NOM665S"
+        "NZD": "CSCICP02NZM665S"
     }
     
     expect_id = oecd_map.get(curr)
@@ -4693,9 +4673,7 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
         "CHF": "CHE",
         "CAD": "CAN",
         "AUD": "AUS",
-        "NZD": "NZL",
-        "SEK": "SWE",
-        "NOK": "NOR"
+        "NZD": "NZL"
     }
     country_code = curr_countries.get(curr, "USA")
     
@@ -5820,7 +5798,7 @@ with tab3:
             )
             st.plotly_chart(fig_diff_fw, use_container_width=True)
             
-        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden täglich aus FRED geladen. Da OIS / Swap-Kurse für SEK, NOK und JPY über Drittanbieter lizenzpflichtig sind, greift die Engine für diese Währungen auf den mathematisch äquivalenten, liquiden Staatsanleihen-implizierten Forward Rate Spread (1Y vs 2Y) zurück. Historische Werte sind ohne Look-Ahead Bias berechnet.")
+        st.caption("ℹ️ **Datenqualität & Einschränkungen:** Die Daten werden täglich aus FRED geladen. Da OIS / Swap-Kurse für JPY über Drittanbieter lizenzpflichtig sind, greift die Engine für diese Währung auf den mathematisch äquivalenten, liquiden Staatsanleihen-implizierten Forward Rate Spread (1Y vs 2Y) zurück. Historische Werte sind ohne Look-Ahead Bias berechnet.")
 
     with sub_fund5:
         st.subheader("🎈 Inflation Expectations & Breakeven Inflation")
