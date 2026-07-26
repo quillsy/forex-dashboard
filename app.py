@@ -35,6 +35,8 @@ if os.path.exists(RATES_CONFIG_FILE):
         pass
 
 defaults = {
+    "manual_rate_EUR": 4.00,
+    "manual_rate_USD": 5.25,
     "manual_rate_GBP": 5.25,
     "manual_rate_JPY": 0.10,
     "manual_rate_AUD": 4.35,
@@ -47,6 +49,15 @@ defaults = {
 for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = persisted_rates.get(key, val)
+
+# Also load change histories if they exist in persisted file
+for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
+    prev_key = f"manual_rate_{c}_prev"
+    change_key = f"manual_rate_{c}_last_change"
+    if prev_key not in st.session_state:
+        st.session_state[prev_key] = persisted_rates.get(prev_key, persisted_rates.get(f"manual_rate_{c}", defaults[f"manual_rate_{c}"]))
+    if change_key not in st.session_state:
+        st.session_state[change_key] = persisted_rates.get(change_key, "N/A")
 
 # ----------------- Obsidian Dark Theme CSS -----------------
 st.markdown("""
@@ -3694,50 +3705,52 @@ def categorize_article(art):
     return "📊 Sonstige Makro-News"
 
 def get_country_rate(country_code, fred_key):
-    # Retrieve manual rates from session state if available, otherwise use defaults
-    manual_rates = {
-        "GBR": st.session_state.get("manual_rate_GBP", 5.25),
-        "JPN": st.session_state.get("manual_rate_JPY", 0.10),
-        "AUD": st.session_state.get("manual_rate_AUD", 4.35),
-        "CAD": st.session_state.get("manual_rate_CAD", 5.00),
-        "NZD": st.session_state.get("manual_rate_NZD", 5.50),
-        "CHF": st.session_state.get("manual_rate_CHF", 0.00)
+    # Mapping country codes to currencies
+    map_code = {
+        "USA": "USD",
+        "EMU": "EUR",
+        "GBR": "GBP",
+        "JPN": "JPY",
+        "CHE": "CHF",
+        "AUS": "AUD",
+        "CAN": "CAD",
+        "NZL": "NZD"
     }
+    curr = map_code.get(country_code, country_code)
     
-    fallback_rates = {"USA": 5.25, "EMU": 2.25, "GBR": 5.25, "JPN": 0.10, "CHE": 0.00, "AUS": 4.35, "CAN": 5.00, "NZL": 5.50}
-    
-    if country_code == "USA":
-        df, _, _ = get_fred_data("FEDFUNDS", fred_key)
-        if not df.empty:
-            latest = df.iloc[-1]["value"]
-            prev = df.iloc[-2]["value"] if len(df) > 1 else latest
-            bps_change = int((latest - prev) * 100)
-            return latest, bps_change, "FRED"
-        return 5.25, 0, "FRED (Fallback)"
-        
-    elif country_code == "EMU":
-        try:
-            val, bps_change = get_ecb_rate_cached()
-            return val, bps_change, "ECB Data Portal"
-        except Exception:
-            return 2.25, 0, "ECB (Fallback)"
+    # Try getting from session state first, then load from json file, then default
+    val = st.session_state.get(f"manual_rate_{curr}")
+    if val is None:
+        file_path = ".rates_config.json"
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    rates = json.load(f)
+                    val = rates.get(f"manual_rate_{curr}")
+            except Exception:
+                pass
+        if val is None:
+            defaults = {
+                "EUR": 4.00, "USD": 5.25, "GBP": 5.25, "JPY": 0.10,
+                "AUD": 4.35, "CAD": 5.00, "NZD": 5.50, "CHF": 0.00
+            }
+            val = defaults.get(curr, 2.0)
             
-    elif country_code == "CHE":
-        try:
-            val, bps_change = get_snb_rate_cached()
-            return val, bps_change, "SNB Portal"
-        except Exception:
-            val = st.session_state.get("manual_rate_CHF", 0.00)
-            return val, 0, "SNB (Fallback)"
+    # Do the same for previous rate
+    prev_val = st.session_state.get(f"manual_rate_{curr}_prev")
+    if prev_val is None:
+        file_path = ".rates_config.json"
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    rates = json.load(f)
+                    prev_val = rates.get(f"manual_rate_{curr}_prev")
+            except Exception:
+                pass
+        if prev_val is None:
+            prev_val = val
             
-    map_code = {"GBR": "GBR", "JPN": "JPN", "AUS": "AUD", "CAN": "CAD", "NZL": "NZD"}
-    key = map_code.get(country_code, country_code)
-    
-    val = manual_rates.get(key, fallback_rates.get(country_code, 2.0))
-    priors = {"GBR": 5.25, "JPN": 0.10, "AUD": 4.35, "CAD": 5.00, "NZD": 5.50}
-    prior_val = priors.get(key, val)
-    bps_change = int((val - prior_val) * 100)
-    
+    bps_change = int((val - prev_val) * 100)
     return val, bps_change, "Zins-Kontrollzentrum"
 
 # Compute economic score for one currency
@@ -4053,27 +4066,54 @@ with st.sidebar:
     st.markdown("### 🏦 Zins-Kontrollzentrum")
     st.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
     
+    st.number_input("European Central Bank (EUR) %", min_value=0.0, max_value=15.0, key="manual_rate_EUR", step=0.05)
+    st.number_input("Federal Reserve (USD) %", min_value=0.0, max_value=15.0, key="manual_rate_USD", step=0.05)
     st.number_input("Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", step=0.05)
     st.number_input("Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", step=0.05)
-    st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05)
-    st.number_input("Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05)
-    st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05)
     st.number_input("Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05)
+    st.number_input("Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05)
+    st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05)
+    st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05)
     
     if st.button("💾 Zinssätze speichern"):
         saved_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         st.session_state["last_saved_rates"] = saved_time
+        
+        # Load currently saved rates to detect changes
+        old_rates = {}
+        if os.path.exists(RATES_CONFIG_FILE):
+            try:
+                with open(RATES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    old_rates = json.load(f)
+            except Exception:
+                pass
+                
         rates_to_save = {
-            "manual_rate_GBP": st.session_state.manual_rate_GBP,
-            "manual_rate_JPY": st.session_state.manual_rate_JPY,
-            "manual_rate_AUD": st.session_state.manual_rate_AUD,
-            "manual_rate_CAD": st.session_state.manual_rate_CAD,
-            "manual_rate_NZD": st.session_state.manual_rate_NZD,
-            "manual_rate_CHF": st.session_state.manual_rate_CHF,
             "last_saved_rates": saved_time
         }
+        
+        currencies_list = ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
+        for c in currencies_list:
+            key = f"manual_rate_{c}"
+            new_val = st.session_state[key]
+            old_val = old_rates.get(key, defaults.get(key))
+            
+            # Detect change
+            if old_val is not None and abs(new_val - old_val) > 1e-5:
+                rates_to_save[f"{key}_prev"] = old_val
+                rates_to_save[f"{key}_last_change"] = saved_time
+            else:
+                rates_to_save[f"{key}_prev"] = old_rates.get(f"{key}_prev", old_val)
+                rates_to_save[f"{key}_last_change"] = old_rates.get(f"{key}_last_change", "N/A")
+                
+            rates_to_save[key] = new_val
+            
+        # Update session state with saved values
+        for k, v in rates_to_save.items():
+            st.session_state[k] = v
+            
         try:
-            with open(".rates_config.json", "w", encoding="utf-8") as f:
+            with open(RATES_CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(rates_to_save, f, indent=4)
             st.success("Zinssätze gespeichert!")
         except Exception as e:
@@ -4086,6 +4126,33 @@ with st.sidebar:
         st.warning("Noch nicht gespeichert")
         
     st.date_input("Letzte Aktualisierung", value=datetime.now().date())
+    
+    # G8 Interest Rate Overview Table
+    st.markdown("**Notenbank-Zinsübersicht:**")
+    summary_data = []
+    cb_names = {
+        "EUR": ("ECB", "European Central Bank"),
+        "USD": ("Fed", "Federal Reserve"),
+        "GBP": ("BoE", "Bank of England"),
+        "JPY": ("BoJ", "Bank of Japan"),
+        "CHF": ("SNB", "Swiss National Bank"),
+        "CAD": ("BoC", "Bank of Canada"),
+        "AUD": ("RBA", "Reserve Bank of Australia"),
+        "NZD": ("RBNZ", "Reserve Bank of New Zealand")
+    }
+    for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
+        rate = st.session_state.get(f"manual_rate_{c}", defaults.get(f"manual_rate_{c}", 0.0))
+        prev = st.session_state.get(f"manual_rate_{c}_prev", rate)
+        change_dt = st.session_state.get(f"manual_rate_{c}_last_change", "N/A")
+        summary_data.append({
+            "Währung": c,
+            "Zentralbank": cb_names[c][0],
+            "Leitzins": f"{rate:.2f}%",
+            "Vorherig": f"{prev:.2f}%",
+            "Letzte Änderung": change_dt
+        })
+    df_summary = pd.DataFrame(summary_data)
+    st.dataframe(df_summary, hide_index=True)
     
     def get_cot_data_status():
         try:
