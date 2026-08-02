@@ -4627,14 +4627,14 @@ def get_inflation_expectations_data(curr, target_date=None):
             
     # OECD Consumer Inflation Expectations ID mapping
     oecd_map = {
-        "USD": "CSCICP02USM665S",
-        "EUR": "CSCICP02EZM665S",
-        "GBP": "CSCICP02GBM665S",
-        "JPY": "CSCICP02JPM665S",
-        "CHF": "CSCICP02CHM665S",
-        "CAD": "CSCICP02CAM665S",
-        "AUD": "CSCICP02AUM665S",
-        "NZD": "CSCICP02NZM665S"
+        "USD": "CSINFT02USM460S",
+        "EUR": "CSINFT02EZM460S",
+        "GBP": None,
+        "JPY": None,
+        "CHF": None,
+        "CAD": None,
+        "AUD": "CSINFT02AUM460S",
+        "NZD": None
     }
     
     expect_id = oecd_map.get(curr)
