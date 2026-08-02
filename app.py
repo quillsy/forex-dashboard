@@ -1791,6 +1791,84 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
     return None, None, False
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_eodhd_bond_data(ticker, api_key):
+    if not api_key:
+        return None
+    try:
+        url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_key}&fmt=json&from=2015-01-01"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                parsed = []
+                for row in data:
+                    close_val = row.get("close")
+                    date_str = row.get("date")
+                    if close_val is not None and date_str:
+                        parsed.append({"date": date_str, "value": float(close_val)})
+                df = pd.DataFrame(parsed)
+                df["date"] = pd.to_datetime(df["date"])
+                return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        pass
+    return None
+
+def get_eodhd_bond_historical(ticker, target_date, api_key=EODHD_KEY):
+    df = get_eodhd_bond_data(ticker, api_key)
+    if df is not None and not df.empty:
+        target_dt = pd.to_datetime(target_date)
+        df_past = df[df["date"] <= target_dt]
+        if not df_past.empty:
+            closest_row = df_past.sort_values("date", ascending=False).iloc[0]
+            return float(closest_row["value"]), closest_row["date"], True
+    return None, None, False
+
+def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_key=EODHD_KEY):
+    # USD: FRED DGS2 preferred
+    if curr == "USD":
+        if fred_key:
+            val, dt, is_live = get_fred_data_historical("DGS2", target_date, fred_key)
+            if val is not None:
+                return val, dt, "FRED"
+        if eodhd_key:
+            val, dt, is_live = get_eodhd_bond_historical("US2Y.GBOND", target_date, eodhd_key)
+            if val is not None:
+                return val, dt, "EODHD (US2Y.GBOND)"
+                
+    # EUR: EODHD DE2Y.GBOND (transparently Germany 2Y)
+    elif curr == "EUR":
+        if eodhd_key:
+            val, dt, is_live = get_eodhd_bond_historical("DE2Y.GBOND", target_date, eodhd_key)
+            if val is not None:
+                return val, dt, "EODHD"
+                
+    # Other G8 currencies: genuine EODHD 2Y yields
+    elif curr in ["GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
+        ticker_map = {
+            "GBP": "UK2Y.GBOND",
+            "JPY": "JP2Y.GBOND",
+            "CHF": "SW2Y.GBOND",
+            "CAD": "CA2Y.GBOND",
+            "AUD": "AU2Y.GBOND",
+            "NZD": "NZ2Y.GBOND"
+        }
+        ticker = ticker_map.get(curr)
+        if ticker and eodhd_key:
+            val, dt, is_live = get_eodhd_bond_historical(ticker, target_date, eodhd_key)
+            if val is not None:
+                return val, dt, "EODHD"
+                
+    if check_demo_active():
+        mock_map = {
+            "USD": 4.25, "EUR": 2.75, "GBP": 4.35, "JPY": 0.15,
+            "CHF": 0.85, "CAD": 3.15, "AUD": 3.85, "NZD": 4.15
+        }
+        return mock_map.get(curr, 2.0), pd.to_datetime(target_date), "Demo Mock"
+        
+    return None, None, ""
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_ecb_rate_historical(target_date):
     try:
@@ -4321,13 +4399,13 @@ def get_historical_indicator_values(series_id, dt_str, fred_key):
 
 YIELD_2Y_SERIES = {
     "USD": "DGS2",
-    "EUR": "GEMPTGBD02Y",
-    "GBP": "I1CAB02",
-    "JPY": "IR3TIB01JPM156N",
-    "CHF": "IR3TIB01CHM156N",
-    "CAD": "IR3TIB01CAM156N",
-    "AUD": "IR3TIB01AUM156N",
-    "NZD": "IR3TIB01NZM156N"
+    "EUR": "DE2Y.GBOND",
+    "GBP": "UK2Y.GBOND",
+    "JPY": "JP2Y.GBOND",
+    "CHF": "SW2Y.GBOND",
+    "CAD": "CA2Y.GBOND",
+    "AUD": "AU2Y.GBOND",
+    "NZD": "NZ2Y.GBOND"
 }
 
 YIELD_5Y_SERIES = {
@@ -4364,27 +4442,62 @@ def get_historical_yield_trends(series_id, dt_str, fred_key):
         return None, None, None
 
 def get_yield_details(curr, series_map, fred_key):
-    series_id = series_map.get(curr)
-    if not series_id or not fred_key:
+    is_2y = (series_map == YIELD_2Y_SERIES)
+    
+    val_now, val_1w, val_1m = None, None, None
+    source = "FRED"
+    series_id_used = series_map.get(curr, "")
+    
+    if is_2y:
+        val_now, dt_now, src_now = get_genuine_2y_yield_historical(curr, datetime.now().strftime("%Y-%m-%d"), fred_key, EODHD_KEY)
+        if val_now is not None:
+            dt_1w = (pd.to_datetime(dt_now) - timedelta(days=7)).strftime("%Y-%m-%d")
+            val_1w, _, _ = get_genuine_2y_yield_historical(curr, dt_1w, fred_key, EODHD_KEY)
+            dt_1m = (pd.to_datetime(dt_now) - timedelta(days=30)).strftime("%Y-%m-%d")
+            val_1m, _, _ = get_genuine_2y_yield_historical(curr, dt_1m, fred_key, EODHD_KEY)
+            source = src_now
+            series_id_used = "DGS2" if src_now == "FRED" else f"{curr}2Y.GBOND"
+            if curr == "EUR":
+                series_id_used = "DE2Y.GBOND"
+            elif curr == "CHF":
+                series_id_used = "SW2Y.GBOND"
+            elif curr == "GBP":
+                series_id_used = "UK2Y.GBOND"
+            elif curr == "JPY":
+                series_id_used = "JP2Y.GBOND"
+            elif curr == "CAD":
+                series_id_used = "CA2Y.GBOND"
+            elif curr == "AUD":
+                series_id_used = "AU2Y.GBOND"
+            elif curr == "NZD":
+                series_id_used = "NZ2Y.GBOND"
+            elif curr == "USD" and src_now != "FRED":
+                series_id_used = "US2Y.GBOND"
+    else:
+        if series_id_used and fred_key:
+            v_now, v_1w, v_1m = get_historical_yield_trends(series_id_used, datetime.now().strftime("%Y-%m-%d"), fred_key)
+            val_now, val_1w, val_1m = v_now, v_1w, v_1m
+            
+    if val_now is None:
         return None
-    try:
-        v_now, v_1w, v_1m = get_historical_yield_trends(series_id, datetime.now().strftime("%Y-%m-%d"), fred_key)
-        if v_now is None:
-            return None
-        chg_1w = v_now - v_1w if v_1w is not None else 0.0
-        chg_1m = v_now - v_1m if v_1m is not None else 0.0
-        trend = "▲" if chg_1w > 0 else "▼" if chg_1w < 0 else "▬"
-        return {
-            "value": v_now,
-            "chg_1w": chg_1w,
-            "chg_1m": chg_1m,
-            "trend": trend,
-            "series_id": series_id,
-            "source": "FRED",
-            "date": datetime.now().strftime("%Y-%m-%d")
-        }
-    except Exception:
-        return None
+        
+    chg_1w = val_now - val_1w if val_1w is not None else 0.0
+    chg_1m = val_now - val_1m if val_1m is not None else 0.0
+    trend = "▲" if chg_1w > 0 else "▼" if chg_1w < 0 else "▬"
+    
+    src_label = source
+    if is_2y and curr == "EUR":
+        src_label = "EODHD (Germany 2Y Benchmark)"
+        
+    return {
+        "value": val_now,
+        "chg_1w": chg_1w,
+        "chg_1m": chg_1m,
+        "trend": trend,
+        "series_id": series_id_used,
+        "source": src_label,
+        "date": datetime.now().strftime("%Y-%m-%d")
+    }
 
 def get_forward_rates_data(curr, target_date=None):
     if target_date is None:
@@ -4403,10 +4516,7 @@ def get_forward_rates_data(curr, target_date=None):
     policy_rate, _, _ = get_country_rate(wb_code, fred_key)
     
     # Get 2Y Yield
-    y2_series = YIELD_2Y_SERIES.get(curr)
-    y2_val = None
-    if y2_series and fred_key:
-        y2_val, _, _ = get_fred_data_historical(y2_series, dt_str, fred_key)
+    y2_val, _, _ = get_genuine_2y_yield_historical(curr, dt_str, fred_key, EODHD_KEY)
         
     # Get OIS / Swap Rate (or proxy)
     swap_series = {
@@ -5527,8 +5637,21 @@ with tab3:
             date_str = y2_det["date"] if y2_det else "N/A"
             src_str = y2_det["source"] if y2_det else "N/A"
             
+            # Determine data quality/status
+            if y2_det:
+                if y2_det.get("source") == "Demo Mock":
+                    status_2y = "🟡 2Y YIELD UNAVAILABLE"
+                else:
+                    status_2y = "🟢 REAL 2Y YIELD"
+            else:
+                if FRED_KEY or EODHD_KEY:
+                    status_2y = "🔴 INVALID / DATA ERROR"
+                else:
+                    status_2y = "🟡 2Y YIELD UNAVAILABLE"
+                    
             bond_rows.append({
                 "Währung": f"{info['flag']} {curr}",
+                "Status (2Y)": status_2y,
                 "2Y Rendite": y2_str,
                 "5Y Rendite": y5_str,
                 "10Y Rendite": y10_str,
@@ -6455,7 +6578,7 @@ with tab7:
                     t_dt = end_dt - timedelta(days=d)
                     t_str = t_dt.strftime("%Y-%m-%d")
                     
-                    y2, _, _ = get_fred_data_historical(YIELD_2Y_SERIES.get(curr_hd, "DGS2"), t_str, FRED_KEY)
+                    y2, _, _ = get_genuine_2y_yield_historical(curr_hd, t_str, FRED_KEY, EODHD_KEY)
                     y10, _, _ = get_fred_data_historical(YIELD_10Y_SERIES.get(curr_hd, "DGS10"), t_str, FRED_KEY)
                     cpi_val = get_cpi_yoy_value(curr_hd, t_str)
                     unemp_val = get_unemployment_value(curr_hd, t_str)
