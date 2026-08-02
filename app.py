@@ -2661,6 +2661,17 @@ CPI_SERIES = {
     "NZD": "NZLCPIALLQINMEI"
 }
 
+OECD_INFLATION_EXP_SERIES = {
+    "USD": "CSINFT02USM460S",
+    "EUR": "CSINFT02EZM460S",
+    "GBP": None,
+    "JPY": None,
+    "CHF": None,
+    "CAD": None,
+    "AUD": "CSINFT02AUM460S",
+    "NZD": None
+}
+
 UNEMP_SERIES = {
     "USD": "UNRATE",
     "EUR": "LRUNTTTTEZM156S",
@@ -3332,8 +3343,20 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
             ed = get_inflation_expectations_data(curr, target_date)
             oecd_val = ed.get("oecd_expectation")
             if oecd_val is not None:
-                inf_exp_score = float(np.clip((oecd_val - 100.0) * 10.0, -10.0, 10.0))
-                inf_exp_available = True
+                expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
+                if expect_id:
+                    df, _, is_live = get_fred_data(expect_id, FRED_KEY)
+                    if df is not None and not df.empty:
+                        target_dt = pd.to_datetime(target_date) if target_date else datetime.now()
+                        df_past = df[df["date"] <= target_dt]
+                        if len(df_past) >= 24:
+                            mean_past = float(df_past["value"].mean())
+                            std_past = float(df_past["value"].std())
+                            if std_past > 0:
+                                z = (float(oecd_val) - mean_past) / std_past
+                                z_clipped = float(np.clip(z, -2.0, 2.0))
+                                inf_exp_score = z_clipped * 5.0
+                                inf_exp_available = True
         except Exception:
             pass
             
@@ -3420,8 +3443,20 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
             ed = get_inflation_expectations_data(curr, target_date)
             oecd_val = ed.get("oecd_expectation")
             if oecd_val is not None:
-                inf_exp_score = float(np.clip((oecd_val - 100.0) * 10.0, -10.0, 10.0))
-                inf_exp_available = True
+                expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
+                if expect_id:
+                    df, _, is_live = get_fred_data(expect_id, FRED_KEY)
+                    if df is not None and not df.empty:
+                        target_dt = pd.to_datetime(target_date) if target_date else datetime.now()
+                        df_past = df[df["date"] <= target_dt]
+                        if len(df_past) >= 24:
+                            mean_past = float(df_past["value"].mean())
+                            std_past = float(df_past["value"].std())
+                            if std_past > 0:
+                                z = (float(oecd_val) - mean_past) / std_past
+                                z_clipped = float(np.clip(z, -2.0, 2.0))
+                                inf_exp_score = z_clipped * 5.0
+                                inf_exp_available = True
         except Exception:
             pass
  
@@ -4625,19 +4660,7 @@ def get_inflation_expectations_data(curr, target_date=None):
         except Exception:
             pass
             
-    # OECD Consumer Inflation Expectations ID mapping
-    oecd_map = {
-        "USD": "CSINFT02USM460S",
-        "EUR": "CSINFT02EZM460S",
-        "GBP": None,
-        "JPY": None,
-        "CHF": None,
-        "CAD": None,
-        "AUD": "CSINFT02AUM460S",
-        "NZD": None
-    }
-    
-    expect_id = oecd_map.get(curr)
+    expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
     expect_val = None
     if expect_id and fred_key:
         try:
