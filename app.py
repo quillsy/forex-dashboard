@@ -2657,8 +2657,8 @@ CPI_SERIES = {
     "JPY": "JPNCPIALLMINMEI",
     "CHF": "CPALTT01CHM657N",
     "CAD": "CPALTT01CAM657N",
-    "AUD": "CPALTT01AUM657N",
-    "NZD": "CPALTT01NZM657N"
+    "AUD": "AUSCPIALLQINMEI",
+    "NZD": "NZLCPIALLQINMEI"
 }
 
 UNEMP_SERIES = {
@@ -2791,7 +2791,8 @@ def get_cpi_yoy_value(curr: str, target_date=None):
             else:
                 df_c = df.copy()
                 if series_id != "FP.CPI.TOTL.ZG":
-                    df_c["yoy"] = df_c["value"].pct_change(periods=12) * 100
+                    periods_offset = 4 if (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id) else 12
+                    df_c["yoy"] = df_c["value"].pct_change(periods=periods_offset) * 100
                     df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
                     if not df_filtered.empty:
                         val = df_filtered.iloc[-1]["yoy"]
