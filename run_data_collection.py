@@ -76,6 +76,8 @@ try:
     sys.exit(0)
 
 except Exception as e:
+    import traceback
+    traceback.print_exc()
     print(f"\n❌ ERROR during data collection: {e}")
     status["last_run_timestamp"] = now_str
     status["last_run_status"] = "FAILED"
