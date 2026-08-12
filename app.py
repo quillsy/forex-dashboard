@@ -1868,6 +1868,48 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
         
     return None, None, ""
 
+def get_genuine_5y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_key=EODHD_KEY):
+    """
+    Fetches genuine 5Y government benchmark bond yields.
+    Strictly forbids proxies, synthetic blends, or mock data.
+    If unavailable (e.g. CHF), returns None, None, '5Y YIELD UNAVAILABLE'.
+    """
+    if curr == "USD":
+        if fred_key:
+            val, dt, is_live = get_fred_data_historical("DGS5", target_date, fred_key)
+            if val is not None:
+                return val, dt, "FRED (DGS5)"
+        if eodhd_key:
+            val, dt, is_live = get_eodhd_bond_historical("US5Y.GBOND", target_date, eodhd_key)
+            if val is not None:
+                return val, dt, "EODHD (US5Y.GBOND)"
+                
+    elif curr == "EUR":
+        if eodhd_key:
+            val, dt, is_live = get_eodhd_bond_historical("DE5Y.GBOND", target_date, eodhd_key)
+            if val is not None:
+                return val, dt, "EODHD (Germany 5Y Benchmark)"
+                
+    elif curr in ["GBP", "CAD", "AUD", "NZD", "JPY"]:
+        ticker_map = {
+            "GBP": ("UK5Y.GBOND", "EODHD (UK 5Y Gilt)"),
+            "CAD": ("CA5Y.GBOND", "EODHD (Canada 5Y)"),
+            "AUD": ("AU5Y.GBOND", "EODHD (Australia 5Y)"),
+            "NZD": ("NZ5Y.GBOND", "EODHD (New Zealand 5Y)"),
+            "JPY": ("JP5Y.GBOND", "EODHD (Japan 5Y JGB)")
+        }
+        entry = ticker_map.get(curr)
+        if entry and eodhd_key:
+            ticker, src_label = entry
+            val, dt, is_live = get_eodhd_bond_historical(ticker, target_date, eodhd_key)
+            if val is not None:
+                return val, dt, src_label
+                
+    elif curr == "CHF":
+        return None, None, "5Y YIELD UNAVAILABLE"
+        
+    return None, None, "5Y YIELD UNAVAILABLE"
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_ecb_rate_historical(target_date):
@@ -4476,13 +4518,13 @@ YIELD_2Y_SERIES = {
 
 YIELD_5Y_SERIES = {
     "USD": "DGS5",
-    "EUR": "GEMPTGBD05Y",
-    "GBP": "I1CAB05",
-    "JPY": None,
+    "EUR": "DE5Y.GBOND",
+    "GBP": "UK5Y.GBOND",
+    "JPY": "JP5Y.GBOND",
     "CHF": None,
-    "CAD": None,
-    "AUD": None,
-    "NZD": None
+    "CAD": "CA5Y.GBOND",
+    "AUD": "AU5Y.GBOND",
+    "NZD": "NZ5Y.GBOND"
 }
 
 YIELD_10Y_SERIES = {
@@ -4513,6 +4555,7 @@ def get_yield_details(curr, series_map=None, fred_key=None):
     if fred_key is None:
         fred_key = FRED_KEY
     is_2y = (series_map == YIELD_2Y_SERIES)
+    is_5y = (series_map == YIELD_5Y_SERIES)
     
     val_now, val_1w, val_1m = None, None, None
     source = "FRED"
@@ -4543,6 +4586,29 @@ def get_yield_details(curr, series_map=None, fred_key=None):
                 series_id_used = "NZ2Y.GBOND"
             elif curr == "USD" and src_now != "FRED":
                 series_id_used = "US2Y.GBOND"
+    elif is_5y:
+        val_now, dt_now, src_now = get_genuine_5y_yield_historical(curr, datetime.now().strftime("%Y-%m-%d"), fred_key, EODHD_KEY)
+        if val_now is not None:
+            dt_1w = (pd.to_datetime(dt_now) - timedelta(days=7)).strftime("%Y-%m-%d")
+            val_1w, _, _ = get_genuine_5y_yield_historical(curr, dt_1w, fred_key, EODHD_KEY)
+            dt_1m = (pd.to_datetime(dt_now) - timedelta(days=30)).strftime("%Y-%m-%d")
+            val_1m, _, _ = get_genuine_5y_yield_historical(curr, dt_1m, fred_key, EODHD_KEY)
+            source = src_now
+            series_id_used = "DGS5" if curr == "USD" and "FRED" in src_now else f"{curr}5Y.GBOND"
+            if curr == "EUR":
+                series_id_used = "DE5Y.GBOND"
+            elif curr == "GBP":
+                series_id_used = "UK5Y.GBOND"
+            elif curr == "CAD":
+                series_id_used = "CA5Y.GBOND"
+            elif curr == "AUD":
+                series_id_used = "AU5Y.GBOND"
+            elif curr == "NZD":
+                series_id_used = "NZ5Y.GBOND"
+            elif curr == "JPY":
+                series_id_used = "JP5Y.GBOND"
+            elif curr == "USD" and "EODHD" in src_now:
+                series_id_used = "US5Y.GBOND"
     else:
         if series_id_used and fred_key:
             v_now, v_1w, v_1m = get_historical_yield_trends(series_id_used, datetime.now().strftime("%Y-%m-%d"), fred_key)
@@ -4558,6 +4624,8 @@ def get_yield_details(curr, series_map=None, fred_key=None):
     src_label = source
     if is_2y and curr == "EUR":
         src_label = "EODHD (Germany 2Y Benchmark)"
+    elif is_5y and curr == "EUR":
+        src_label = "EODHD (Germany 5Y Benchmark)"
         
     return {
         "value": val_now,
@@ -5574,19 +5642,33 @@ with tab3:
         trend_str = y2_det["trend"] if y2_det else "▬"
         src_str = y2_det["source"] if y2_det else "N/A"
         
-        status_2y = "🟢 REAL 2Y YIELD" if (y2_det and y2_det.get("source") != "Demo Mock") else "🟡 2Y YIELD UNAVAILABLE"
+        status_2y = "🟢 REAL 2Y YIELD" if (y2_det and y2_det.get("source") != "Demo Mock" and y2_det.get("value") is not None) else "🟡 2Y YIELD UNAVAILABLE"
+        status_5y = "🟢 REAL 5Y YIELD" if (y5_det and y5_det.get("source") != "Demo Mock" and y5_det.get("value") is not None) else "🟡 5Y YIELD UNAVAILABLE"
+        
+        y2_str = f"{y2_det['value']:.2f}%" if (y2_det and y2_det.get('value') is not None) else "N/A"
+        y5_str = f"{y5_det['value']:.2f}%" if (y5_det and y5_det.get('value') is not None) else "5Y YIELD UNAVAILABLE"
+        y10_str = f"{y10_det['value']:.2f}%" if (y10_det and y10_det.get('value') is not None) else "N/A"
+        
+        spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det and y2_det.get('value') is not None and y10_det.get('value') is not None) else "N/A"
+        chg_1w = f"{y2_det['chg_1w']:+.2f}%" if (y2_det and y2_det.get('chg_1w') is not None) else "N/A"
+        chg_1m = f"{y2_det['chg_1m']:+.2f}%" if (y2_det and y2_det.get('chg_1m') is not None) else "N/A"
+        trend_str = y2_det["trend"] if y2_det else "▬"
+        src_str = y2_det["source"] if y2_det else "N/A"
+        src_5y_str = y5_det["source"] if y5_det else "5Y YIELD UNAVAILABLE"
         
         bond_rows.append({
             "Währung": f"{info['flag']} {curr}",
             "Status (2Y)": status_2y,
+            "Status (5Y)": status_5y,
             "2Y Rendite": y2_str,
             "5Y Rendite": y5_str,
             "10Y Rendite": y10_str,
             "2Y-10Y Spread": spread_str,
             "Veränderung 1W (2Y)": chg_1w,
             "Veränderung 1M (2Y)": chg_1m,
-            "Trend": trend_str,
-            "Datenquelle": src_str
+            "Trend (2Y)": trend_str,
+            "Quelle 2Y": src_str,
+            "Quelle 5Y": src_5y_str
         })
         
     df_bonds = pd.DataFrame(bond_rows)
@@ -5605,11 +5687,12 @@ with tab4:
         c_trend = inf_data.get("cpi_trend")
         oecd_val = inf_data.get("oecd_expectation")
         
+        oecd_str = f"{oecd_val:.1f} (% Saldo)" if oecd_val is not None else "N/A – OECD Consumer Inflation Expectations unavailable"
         cpi_rows.append({
             "Währung": f"{info['flag']} {curr}",
             "CPI Rate (YoY)": f"{c_val:.2f}%" if c_val is not None else "N/A",
             "Inflationstrend (3M)": f"{c_trend:+.2f}%" if c_trend is not None else "N/A",
-            "OECD Inflation Expectations (Net Balance)": f"{oecd_val:.1f}" if oecd_val is not None else "N/A",
+            "OECD Inflation Expectations": oecd_str,
             "Frequenz": "Quartalsweise" if curr in ["AUD", "NZD"] else "Monatlich",
             "Zielwert": "2.00%"
         })
