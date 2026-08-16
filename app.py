@@ -1911,6 +1911,46 @@ def get_genuine_5y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
     return None, None, "5Y YIELD UNAVAILABLE"
 
 
+def get_yield_series(curr):
+    if curr == "USD":
+        df, _, is_live = get_fred_data("DGS2", FRED_KEY)
+        return df
+    else:
+        ticker = YIELD_2Y_SERIES.get(curr)
+        if ticker:
+            return get_eodhd_bond_data(ticker, EODHD_KEY)
+    return None
+
+
+def get_yield_trends(curr, target_date=None):
+    if target_date is None:
+        target_date = datetime.now()
+    target_dt = pd.to_datetime(target_date)
+    
+    df = get_yield_series(curr)
+    if df is not None and not df.empty:
+        df_filtered = df[df["date"] <= target_dt].sort_values("date")
+        if len(df_filtered) >= 1:
+            val_now = float(df_filtered.iloc[-1]["value"])
+            dt_now = df_filtered.iloc[-1]["date"]
+            
+            val_1w = float(df_filtered.iloc[-6]["value"]) if len(df_filtered) >= 6 else None
+            val_1m = float(df_filtered.iloc[-21]["value"]) if len(df_filtered) >= 21 else None
+            val_3m = float(df_filtered.iloc[-61]["value"]) if len(df_filtered) >= 61 else None
+            
+            chg_1w = val_now - val_1w if val_1w is not None else None
+            chg_1m = val_now - val_1m if val_1m is not None else None
+            chg_3m = val_now - val_3m if val_3m is not None else None
+            
+            return {
+                "val_now": val_now, "dt_now": dt_now,
+                "val_1w": val_1w, "chg_1w": chg_1w,
+                "val_1m": val_1m, "chg_1m": chg_1m,
+                "val_3m": val_3m, "chg_3m": chg_3m
+            }
+    return {}
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_ecb_rate_historical(target_date):
     try:
@@ -2859,22 +2899,54 @@ def get_cpi_yoy_value(curr: str, target_date=None):
             else:
                 df_c = df.copy()
                 if series_id != "FP.CPI.TOTL.ZG":
-                    periods_offset = 4 if (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id) else 12
-                    df_c["yoy"] = df_c["value"].pct_change(periods=periods_offset) * 100
-                    df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
+                    target_dt = pd.to_datetime(dt_str)
+                    df_filtered = df_c[df_c["date"] <= target_dt].sort_values("date")
+                    
                     if not df_filtered.empty:
-                        val = df_filtered.iloc[-1]["yoy"]
-                        if pd.notna(val):
+                        # Check freshness/staleness first
+                        obs_date = df_filtered.iloc[-1]["date"]
+                        days_diff = (target_dt - obs_date).days
+                        is_quarterly = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
+                        threshold = 270 if is_quarterly else 180
+                        if days_diff > threshold:
+                            return None  # Stale!
+                            
+                        if series_id in ["CPALTT01CHM657N", "CPALTT01CAM657N"]:
+                            # Compounding last 12 MoM rates
+                            if len(df_filtered) >= 12:
+                                last_12 = df_filtered.tail(12)["value"].astype(float).values
+                                val = (np.prod(1.0 + last_12 / 100.0) - 1.0) * 100.0
+                            else:
+                                val = None
+                        else:
+                            periods_offset = 4 if is_quarterly else 12
+                            df_c["yoy"] = df_c["value"].pct_change(periods=periods_offset) * 100
+                            # Refilter after calculation to get the yoy value
+                            df_f_yoy = df_c[df_c["date"] <= target_dt].sort_values("date")
+                            val = df_f_yoy.iloc[-1]["yoy"] if not df_f_yoy.empty else None
+                            
+                        if val is not None and pd.notna(val):
+                            # Sanity check
+                            if abs(val) > 25.0:
+                                return None
                             return float(val)
     except Exception:
         pass
     try:
         code = CURRENCIES[curr]["wb_code"]
-        val, _, is_live = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+        val, act_dt, is_live = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
         if val is not None:
             if not is_live and not check_demo_active():
                 pass
             else:
+                # Check freshness for World Bank fallback
+                target_dt = pd.to_datetime(target_date)
+                if act_dt is not None:
+                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
+                    if days_diff > 365 * 2:  # World Bank lag can be long, but max 2 years
+                        return None
+                if abs(val) > 25.0:
+                    return None
                 return float(val)
     except Exception:
         pass
@@ -2896,20 +2968,34 @@ def get_unemployment_value(curr: str, target_date=None):
             if not is_live and not check_demo_active():
                 pass
             else:
-                df_filtered = df[df["date"] <= pd.to_datetime(dt_str)]
+                target_dt = pd.to_datetime(dt_str)
+                df_filtered = df[df["date"] <= target_dt].sort_values("date")
                 if not df_filtered.empty:
+                    obs_date = df_filtered.iloc[-1]["date"]
+                    days_diff = (target_dt - obs_date).days
+                    if days_diff > 180:
+                        return None  # Stale!
                     val = df_filtered.iloc[-1]["value"]
                     if pd.notna(val):
+                        if abs(val) > 25.0:
+                            return None
                         return float(val)
     except Exception:
         pass
     try:
         code = CURRENCIES[curr]["wb_code"]
-        val, _, is_live = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZG", target_date)
+        val, act_dt, is_live = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZS", target_date)
         if val is not None:
             if not is_live and not check_demo_active():
                 pass
             else:
+                target_dt = pd.to_datetime(target_date)
+                if act_dt is not None:
+                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
+                    if days_diff > 365 * 2:
+                        return None
+                if abs(val) > 25.0:
+                    return None
                 return float(val)
     except Exception:
         pass
@@ -2932,21 +3018,43 @@ def get_gdp_yoy_value(curr: str, target_date=None):
                 pass
             else:
                 df_c = df.copy()
-                df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
-                df_filtered = df_c[df_c["date"] <= pd.to_datetime(dt_str)]
+                target_dt = pd.to_datetime(dt_str)
+                df_filtered = df_c[df_c["date"] <= target_dt].sort_values("date")
+                
                 if not df_filtered.empty:
-                    val = df_filtered.iloc[-1]["yoy"]
-                    if pd.notna(val):
+                    # Check freshness first (quarterly, max 270 days)
+                    obs_date = df_filtered.iloc[-1]["date"]
+                    days_diff = (target_dt - obs_date).days
+                    if days_diff > 270:
+                        return None  # Stale!
+                        
+                    if series_id == "GDPC1":
+                        df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
+                        df_f_yoy = df_c[df_c["date"] <= target_dt].sort_values("date")
+                        val = df_f_yoy.iloc[-1]["yoy"] if not df_f_yoy.empty else None
+                    else:
+                        val = df_filtered.iloc[-1]["value"]
+                        
+                    if val is not None and pd.notna(val):
+                        if abs(val) > 25.0:
+                            return None
                         return float(val)
     except Exception:
         pass
     try:
         code = CURRENCIES[curr]["wb_code"]
-        val, _, is_live = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
+        val, act_dt, is_live = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
         if val is not None:
             if not is_live and not check_demo_active():
                 pass
             else:
+                target_dt = pd.to_datetime(target_date)
+                if act_dt is not None:
+                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
+                    if days_diff > 365 * 2:
+                        return None
+                if abs(val) > 25.0:
+                    return None
                 return float(val)
     except Exception:
         pass
@@ -3284,49 +3392,84 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
     
     missing = []
     
+    # Freshness mapping
+    gp_freshness = "STALE"
+    cpi_freshness = "STALE"
+    lab_freshness = "STALE"
+    pmi_freshness = "STALE"
+    gdp_freshness = "STALE"
+    
     try:
         # 1. Geldpolitik (Interest Rate / Yield)
-        yield_val, _, is_live = get_fred_data_historical(YIELD_SERIES[curr], dt_str, fred_key)
-        # Check manual rates override
+        policy_rate = defaults.get(f"manual_rate_{curr}")
         manual_key = f"manual_rate_{curr}"
         if manual_key in st.session_state and st.session_state[manual_key] is not None:
-            yield_val = st.session_state[manual_key]
-            is_live = True
+            policy_rate = st.session_state[manual_key]
             
-        if not is_data_valid(yield_val, is_live):
+        yield_2y, act_dt, is_live = get_genuine_2y_yield_historical(curr, dt_str, fred_key, EODHD_KEY)
+        
+        if policy_rate is not None and yield_2y is not None:
+            days_2y = (pd.to_datetime(dt_str) - pd.to_datetime(act_dt)).days if act_dt else 999
+            if days_2y <= 30:
+                gp_freshness = "FRESH"
+            elif days_2y <= 180:
+                gp_freshness = "AGING"
+                
+        if gp_freshness == "STALE":
             missing.append("Geldpolitik")
         else:
             cpi = get_cpi_yoy_value(curr, dt_str)
             if cpi is None:
-                real_yield = yield_val - 2.0
+                real_policy_rate = policy_rate - 2.0
             else:
-                real_yield = yield_val - cpi
+                real_policy_rate = policy_rate - cpi
                 
-            gp_yield_score = (yield_val - 3.0) / 3.0 * 100.0
-            gp_real_score = real_yield / 3.0 * 100.0
-            gp_trend = get_series_trend_points(YIELD_SERIES[curr], dt_str)
-            gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
-            scores["Geldpolitik"] = np.clip(0.70 * gp_yield_score + 0.30 * gp_real_score + gp_trend + gp_surprise, -100.0, 100.0)
+            gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
+            gp_real_score = real_policy_rate / 3.0 * 100.0
+            gp_policy_blend = 0.80 * gp_nominal_score + 0.20 * gp_real_score
+            gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
+            
+            scores["Geldpolitik"] = np.clip(0.50 * gp_policy_blend + 0.50 * gp_market_score, -100.0, 100.0)
             
         # 2. Inflation
         cpi = get_cpi_yoy_value(curr, dt_str)
-        if cpi is None:
+        if cpi is not None:
+            series_id = CPI_SERIES.get(curr, "CPIAUCSL")
+            df_cpi, _, _ = get_fred_data(series_id, fred_key)
+            if df_cpi is not None and not df_cpi.empty:
+                df_filtered = df_cpi[df_cpi["date"] <= pd.to_datetime(dt_str)].sort_values("date")
+                if not df_filtered.empty:
+                    obs_dt = df_filtered.iloc[-1]["date"]
+                    days = (pd.to_datetime(dt_str) - obs_dt).days
+                    is_q = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
+                    threshold = 270 if is_q else 180
+                    cpi_freshness = "FRESH" if days <= threshold / 2 else "AGING"
+            else:
+                cpi_freshness = "FRESH"
+                
+        if cpi_freshness == "STALE":
             missing.append("Inflation")
         else:
-            cpi_dev = (cpi - 2.0) * 50.0
-            cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
-            cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
-            scores["Inflation"] = np.clip(cpi_dev + cpi_trend + cpi_surprise, -100.0, 100.0)
+            scores["Inflation"] = np.clip((cpi - 2.0) * 50.0, -100.0, 100.0)
             
         # 3. Arbeitsmarkt
         unrate = get_unemployment_value(curr, dt_str)
-        if unrate is None:
+        if unrate is not None:
+            series_id = UNEMP_SERIES.get(curr, "UNRATE")
+            df_un, _, _ = get_fred_data(series_id, fred_key)
+            if df_un is not None and not df_un.empty:
+                df_filtered = df_un[df_un["date"] <= pd.to_datetime(dt_str)].sort_values("date")
+                if not df_filtered.empty:
+                    obs_dt = df_filtered.iloc[-1]["date"]
+                    days = (pd.to_datetime(dt_str) - obs_dt).days
+                    lab_freshness = "FRESH" if days <= 90 else "AGING"
+            else:
+                lab_freshness = "FRESH"
+                
+        if lab_freshness == "STALE":
             missing.append("Arbeitsmarkt")
         else:
-            lab_dev = (5.0 - unrate) / 3.0 * 100.0
-            lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
-            lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
-            scores["Arbeitsmarkt"] = np.clip(lab_dev + lab_trend + lab_surprise, -100.0, 100.0)
+            scores["Arbeitsmarkt"] = np.clip((5.0 - unrate) / 3.0 * 100.0, -100.0, 100.0)
             
         # 4. PMI
         pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
@@ -3334,23 +3477,33 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         m_val = pmi_data.get("m_last")
         s_val = pmi_data.get("s_last")
         pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
-        if not pmi_vals:
+        if pmi_vals:
+            pmi_freshness = "FRESH"
+            
+        if pmi_freshness == "STALE":
             missing.append("PMI")
         else:
             pmi_avg = np.mean(pmi_vals)
-            pmi_score = (pmi_avg - 50.0) / 10.0 * 100.0
-            pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
-            pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
-            scores["PMI"] = np.clip(pmi_score + pmi_trend + pmi_surprise, -100.0, 100.0)
+            scores["PMI"] = np.clip((pmi_avg - 50.0) / 10.0 * 100.0, -100.0, 100.0)
             
         # 5. GDP
         gdp = get_gdp_yoy_value(curr, dt_str)
-        if gdp is None:
+        if gdp is not None:
+            series_id = GDP_SERIES.get(curr, "GDPC1")
+            df_gdp, _, _ = get_fred_data(series_id, fred_key)
+            if df_gdp is not None and not df_gdp.empty:
+                df_filtered = df_gdp[df_gdp["date"] <= pd.to_datetime(dt_str)].sort_values("date")
+                if not df_filtered.empty:
+                    obs_dt = df_filtered.iloc[-1]["date"]
+                    days = (pd.to_datetime(dt_str) - obs_dt).days
+                    gdp_freshness = "FRESH" if days <= 135 else "AGING"
+            else:
+                gdp_freshness = "FRESH"
+                
+        if gdp_freshness == "STALE":
             missing.append("GDP")
         else:
-            gdp_score = (gdp - 1.5) / 1.5 * 100.0
-            gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
-            scores["GDP"] = np.clip(gdp_score + gdp_trend, -100.0, 100.0)
+            scores["GDP"] = np.clip((gdp - 1.5) / 1.5 * 100.0, -100.0, 100.0)
             
     except Exception:
         pass
@@ -3363,11 +3516,17 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         
     scores["_missing"] = missing
     scores["_completeness"] = (5.0 - len(missing)) / 5.0 * 100.0
+    scores["_freshness"] = {
+        "Geldpolitik": gp_freshness,
+        "Inflation": cpi_freshness,
+        "Arbeitsmarkt": lab_freshness,
+        "PMI": pmi_freshness,
+        "GDP": gdp_freshness
+    }
     return scores
 
+
 def compute_currency_professional_score_and_regime(curr: str, target_date=None):
-    regime = detect_market_regime(curr, target_date)
-    scores = compute_currency_details(curr, target_date)
     
     # Load dynamically from session state if promoted, otherwise default to CORE v1 Baseline
     weights = st.session_state.get("active_live_model_weights")
@@ -3385,101 +3544,7 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
             "Correction": 100.0
         }
         
-    w_gp = weights.get("Geldpolitik", 35.0) / 100.0
-    w_inf = weights.get("Inflation", 20.0) / 100.0
-    w_lab = weights.get("Arbeitsmarkt", 20.0) / 100.0
-    w_pmi = weights.get("PMI", 20.0) / 100.0
-    w_gdp = weights.get("GDP", 5.0) / 100.0
-    w_fw = weights.get("ForwardRates", 0.0) / 100.0
-    w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
-    w_surp = weights.get("EconomicSurprises", 0.0) / 100.0
-    w_bci = weights.get("BCI", 0.0) / 100.0
-    w_corr = weights.get("Correction", 100.0) / 100.0
-    
-    fw_score = 0.0
-    fw_available = False
-    if w_fw > 0.0:
-        try:
-            fd = get_forward_rates_data(curr, target_date)
-            exp_chg = fd.get("expected_change")
-            if exp_chg is not None:
-                fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
-                fw_available = True
-        except Exception:
-            pass
-            
-    inf_exp_score = 0.0
-    inf_exp_available = False
-    if w_inf_exp > 0.0:
-        try:
-            ed = get_inflation_expectations_data(curr, target_date)
-            oecd_val = ed.get("oecd_expectation")
-            if oecd_val is not None:
-                expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
-                if expect_id:
-                    df, _, is_live = get_fred_data(expect_id, FRED_KEY)
-                    if df is not None and not df.empty:
-                        target_dt = pd.to_datetime(target_date) if target_date else datetime.now()
-                        df_past = df[df["date"] <= target_dt]
-                        if len(df_past) >= 24:
-                            mean_past = float(df_past["value"].mean())
-                            std_past = float(df_past["value"].std())
-                            if std_past > 0:
-                                z = (float(oecd_val) - mean_past) / std_past
-                                z_clipped = float(np.clip(z, -2.0, 2.0))
-                                inf_exp_score = z_clipped * 5.0
-                                inf_exp_available = True
-        except Exception:
-            pass
-            
-    surp_score = 0.0
-    surp_available = False
-    if w_surp > 0.0:
-        try:
-            s_val, _ = compute_currency_surprise_score(curr, target_date=target_date)
-            if s_val is not None:
-                surp_score = float(s_val)
-                surp_available = True
-        except Exception:
-            pass
-
-    # Dynamic Weight Normalization
-    available_factors = {}
-    if scores.get("Geldpolitik") is not None:
-        available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
-    if scores.get("Inflation") is not None:
-        available_factors["Inflation"] = (scores["Inflation"], w_inf)
-    if scores.get("Arbeitsmarkt") is not None:
-        available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
-    if scores.get("PMI") is not None:
-        available_factors["PMI"] = (scores["PMI"], w_pmi)
-    if scores.get("GDP") is not None:
-        available_factors["GDP"] = (scores["GDP"], w_gdp)
-        
-    if w_fw > 0.0 and fw_available:
-        available_factors["ForwardRates"] = (fw_score, w_fw)
-    if w_inf_exp > 0.0 and inf_exp_available:
-        available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
-    if w_surp > 0.0 and surp_available:
-        available_factors["EconomicSurprises"] = (surp_score, w_surp)
-    if w_bci > 0.0 and scores.get("BCI") is not None:
-        available_factors["BCI"] = (scores["BCI"], w_bci)
-
-    total_weight = sum(weight for val, weight in available_factors.values())
-    if total_weight > 0.0:
-        core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
-    else:
-        core_score = 0.0
-
-    corr_score = compute_correction_score(curr, target_date) * w_corr
-    final_score = np.clip(core_score + corr_score, -100.0, 100.0)
-    
-    # Preserve key integrity for callers
-    for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
-        if scores[k] is None:
-            scores[k] = 0.0
-            
-    return final_score, regime, core_score, corr_score, scores
+    return compute_currency_professional_score_and_regime_custom(curr, weights, target_date)
 
 def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict, target_date=None):
     regime = detect_market_regime(curr, target_date)
@@ -3531,7 +3596,7 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
                                 inf_exp_available = True
         except Exception:
             pass
- 
+            
     surp_score = 0.0
     surp_available = False
     if w_surp > 0.0:
@@ -3542,18 +3607,35 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
                 surp_available = True
         except Exception:
             pass
-            
-    # Dynamic Weight Normalization
+
+    # Extract target date string for trend and surprise lookups
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date else datetime.now().strftime("%Y-%m-%d")
+    
+    # Calculate trend points
+    gp_trend = get_series_trend_points(YIELD_2Y_SERIES.get(curr, "DGS2"), dt_str)
+    cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
+    lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
+    pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
+    gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
+    
+    gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
+    cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
+    lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
+    pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
+
+    # Dynamic Weight Normalization for BASE CORE
     available_factors = {}
-    if scores.get("Geldpolitik") is not None:
+    missing_factors = scores.get("_missing", [])
+    
+    if "Geldpolitik" not in missing_factors and scores.get("Geldpolitik") is not None:
         available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
-    if scores.get("Inflation") is not None:
+    if "Inflation" not in missing_factors and scores.get("Inflation") is not None:
         available_factors["Inflation"] = (scores["Inflation"], w_inf)
-    if scores.get("Arbeitsmarkt") is not None:
+    if "Arbeitsmarkt" not in missing_factors and scores.get("Arbeitsmarkt") is not None:
         available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
-    if scores.get("PMI") is not None:
+    if "PMI" not in missing_factors and scores.get("PMI") is not None:
         available_factors["PMI"] = (scores["PMI"], w_pmi)
-    if scores.get("GDP") is not None:
+    if "GDP" not in missing_factors and scores.get("GDP") is not None:
         available_factors["GDP"] = (scores["GDP"], w_gdp)
         
     if w_fw > 0.0 and fw_available:
@@ -3564,15 +3646,49 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
         available_factors["EconomicSurprises"] = (surp_score, w_surp)
     if w_bci > 0.0 and scores.get("BCI") is not None:
         available_factors["BCI"] = (scores["BCI"], w_bci)
- 
+
     total_weight = sum(weight for val, weight in available_factors.values())
     if total_weight > 0.0:
         core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
     else:
         core_score = 0.0
-    
+
+    # Calculate isolated trends and surprises scores
+    core_total_weight = sum(weights[k] / 100.0 for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"] if k not in missing_factors)
+    active_trend = 0.0
+    active_surprise = 0.0
+    if "Geldpolitik" not in missing_factors:
+        active_trend += gp_trend * w_gp
+        active_surprise += gp_surprise * w_gp
+    if "Inflation" not in missing_factors:
+        active_trend += cpi_trend * w_inf
+        active_surprise += cpi_surprise * w_inf
+    if "Arbeitsmarkt" not in missing_factors:
+        active_trend += lab_trend * w_lab
+        active_surprise += lab_surprise * w_lab
+    if "PMI" not in missing_factors:
+        active_trend += pmi_trend * w_pmi
+        active_surprise += pmi_surprise * w_pmi
+    if "GDP" not in missing_factors:
+        active_trend += gdp_trend * w_gdp
+        
+    trend_score = active_trend / core_total_weight if core_total_weight > 0.0 else 0.0
+    surprise_score = active_surprise / core_total_weight if core_total_weight > 0.0 else 0.0
+
     corr_score = compute_correction_score(curr, target_date) * w_corr
-    final_score = np.clip(core_score + corr_score, -100.0, 100.0)
+    final_score = np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0)
+    
+    # Store context scores inside the returned details dict
+    scores["_trend_score"] = trend_score
+    scores["_surprise_score"] = surprise_score
+    scores["_trend_details"] = {
+        "gp_trend": gp_trend, "cpi_trend": cpi_trend, "lab_trend": lab_trend,
+        "pmi_trend": pmi_trend, "gdp_trend": gdp_trend
+    }
+    scores["_surprise_details"] = {
+        "gp_surprise": gp_surprise, "cpi_surprise": cpi_surprise, "lab_surprise": lab_surprise,
+        "pmi_surprise": pmi_surprise
+    }
     
     # Preserve key integrity for callers
     for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
@@ -5011,7 +5127,12 @@ def load_live_signals():
         return {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            signals = json.load(f)
+            # Inject legacy label for versioning
+            for snap_id, snap in signals.items():
+                if isinstance(snap, dict) and "model_version" not in snap:
+                    snap["model_version"] = "LEGACY_PRE_CORE_FIX"
+            return signals
     except Exception:
         return {}
 
@@ -5313,20 +5434,38 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         if tot_w > 0:
             eff_weights = {k: round(model_weights.get(k, 0.0) / tot_w * 100.0, 1) for k in active_factors}
             
+    # Get raw values for saving
+    raw_values = {
+        "policy_rate": defaults.get(f"manual_rate_{curr}"),
+        "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
+        "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
+        "cpi_yoy": get_cpi_yoy_value(curr, today_str),
+        "unrate": get_unemployment_value(curr, today_str),
+        "gdp_yoy": get_gdp_yoy_value(curr, today_str)
+    }
+
     snapshot = {
         "type": "CURRENCY",
         "currency": curr,
         "date": today_str,
         "time": datetime.now().strftime("%H:%M:%S"),
+        "model_version": "CORE_V2_2026_08",
+        "schema_version": "2.0",
         "total_score": float(total_score),
         "core_score": float(core_score),
         "correction_score": float(corr_score),
+        "trend_score": float(details.get("_trend_score", 0.0)) if details else 0.0,
+        "surprise_score": float(details.get("_surprise_score", 0.0)) if details else 0.0,
         "regime": regime,
         "factor_scores": {k: float(v) if v is not None else None for k, v in details.items() if not k.startswith("_")},
         "original_weights": model_weights,
         "effective_weights": eff_weights,
         "data_quality": details.get("_completeness", 100.0) if details else 100.0,
-        "missing_factors": details.get("_missing", []) if details else []
+        "missing_factors": details.get("_missing", []) if details else [],
+        "freshness": details.get("_freshness", {}) if details else {},
+        "raw_values": raw_values,
+        "trend_details": details.get("_trend_details", {}) if details else {},
+        "surprise_details": details.get("_surprise_details", {}) if details else {}
     }
     signals[snap_id] = snapshot
     save_live_signals(signals)
@@ -5553,36 +5692,74 @@ with tab2:
     
     col_deep1, col_deep2 = st.columns([1.2, 1])
     with col_deep1:
-        st.subheader("📋 Rohdaten & Indikatoren")
+        st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
         rate_val, rate_bps, _ = get_country_rate(CURRENCIES[sel_curr_fund]["wb_code"], FRED_KEY)
         cpi_val = get_cpi_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-        unemp_val = get_unemp_rate_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
+        unemp_val = get_unemployment_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
         pmi_val, _, _, _ = get_composite_pmi_score(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
         gdp_val = get_gdp_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
         y2_det = get_yield_details(sel_curr_fund, YIELD_2Y_SERIES, FRED_KEY)
         y2_val = y2_det.get("value") if y2_det else None
         
         raw_metrics = [
-            {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Trend (1M)": f"{rate_bps:+d} bps"},
-            {"Kategorie": "2Y Benchmark Rendite", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Trend (1M)": "Stabil"},
-            {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Trend (1M)": "Monatlich / Quartal"},
-            {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Trend (1M)": "Monatlich"},
-            {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Trend (1M)": "S&P Global / ISM"},
-            {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Trend (1M)": "Quartalsweise"}
+            {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
+            {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
+            {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Inflation', 0.0):+.1f}"},
+            {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}"},
+            {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('PMI', 0.0):+.1f}"},
+            {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('GDP', 0.0):+.1f}"}
         ]
         st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
+
+        st.subheader("📈 TREND & MOMENTUM CONTEXT")
+        y_trends = get_yield_trends(sel_curr_fund)
+        cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), datetime.now().strftime("%Y-%m-%d"))
+        unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), datetime.now().strftime("%Y-%m-%d"), reverse=True)
+        pmi_trend_pts = get_series_trend_points(PMI_SERIES.get(sel_curr_fund, "MANEMP") if sel_curr_fund in PMI_SERIES else "USISMT", datetime.now().strftime("%Y-%m-%d"))
+        gdp_trend_pts = get_series_trend_points(GDP_SERIES.get(sel_curr_fund, "GDPC1"), datetime.now().strftime("%Y-%m-%d"))
+
+        trend_metrics = [
+            {"Faktor": "2Y Sovereign Yield (1W Change)", "Wert": f"{y_trends.get('chg_1w', 0.0):+.3f}%" if y_trends.get('chg_1w') is not None else "N/A"},
+            {"Faktor": "2Y Sovereign Yield (1M Change)", "Wert": f"{y_trends.get('chg_1m', 0.0):+.3f}%" if y_trends.get('chg_1m') is not None else "N/A"},
+            {"Faktor": "2Y Sovereign Yield (3M Change)", "Wert": f"{y_trends.get('chg_3m', 0.0):+.3f}%" if y_trends.get('chg_3m') is not None else "N/A"},
+            {"Faktor": "Inflation (CPI Trend Points)", "Wert": f"{cpi_trend_pts:+.1f} pts"},
+            {"Faktor": "Arbeitsmarkt (Unemp Trend Points)", "Wert": f"{unemp_trend_pts:+.1f} pts"},
+            {"Faktor": "PMI Trend Points", "Wert": f"{pmi_trend_pts:+.1f} pts"},
+            {"Faktor": "GDP Trend Points", "Wert": f"{gdp_trend_pts:+.1f} pts"},
+            {"Faktor": "Gesamte Trend-Korrektur (Trend Score)", "Wert": f"{details_f.get('_trend_score', 0.0):+.2f}"}
+        ]
+        st.dataframe(pd.DataFrame(trend_metrics), hide_index=True, use_container_width=True)
         
     with col_deep2:
-        st.subheader("⚖️ Gewichtung & Datenqualität")
-        st.write(f"- **Gesamt-Score:** `{f_score_d:+.1f}`")
-        st.write(f"- **CORE Score:** `{core_d:+.1f}`")
-        st.write(f"- **Korrektur-Faktoren:** `{corr_d:+.1f}`")
+        st.subheader("⚖️ Core Weights & Model Isolation")
+        st.write(f"- **Gesamt-Score (Final Score):** `{f_score_d:+.1f}`")
+        st.write(f"- **BASE CORE Score:** `{core_d:+.1f}`")
+        st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`")
+        st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`")
+        st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`")
         st.write(f"- **Markt-Regime:** `{reg_d}`")
+        st.write(f"- **Model Version:** `CORE_V2_2026_08` (Schema: `2.0`)")
+        
+        st.subheader("🟢 Freshness & Data Quality Indicators")
         st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
+        freshness_map = details_f.get("_freshness", {})
+        for factor, status in freshness_map.items():
+            badge_color = "🟢" if status == "FRESH" else "🟡" if status == "AGING" else "🔴"
+            st.write(f"- **{factor} Freshness:** {badge_color} `{status}`")
+            
         if details_f.get("_missing"):
-            st.warning(f"⚠️ Fehlende Faktoren: {', '.join(details_f.get('_missing'))}")
+            st.warning(f"⚠️ Fehlende/Stale Faktoren: {', '.join(details_f.get('_missing'))}")
         else:
-            st.success("🟢 Alle CORE-Faktoren vollständig verfügbar (100% Valid).")
+            st.success("🟢 Alle CORE-Faktoren vollständig & aktuell (100% Valid).")
+
+        st.subheader("🌎 MARKET CONTEXT & RESEARCH FACTORS")
+        y5_det = get_yield_details(sel_curr_fund, YIELD_5Y_SERIES, FRED_KEY)
+        y5_val = y5_det.get("value") if y5_det else None
+        oecd_exp = get_inflation_expectations_data(sel_curr_fund)
+        oecd_val = oecd_exp.get("oecd_expectation") if oecd_exp else None
+        
+        st.write(f"- **5Y Sovereign Bond Yield:** `{y5_val:.3f}%`" if y5_val is not None else "- **5Y Sovereign Bond Yield:** `5Y YIELD UNAVAILABLE`")
+        st.write(f"- **OECD Inflation Expectations:** `{oecd_val:.2f}%`" if oecd_val is not None else "- **OECD Inflation Expectations:** `OECD Expectations unavailable`")
 
 # ----------------- TAB 3: INTEREST RATES & 2Y YIELDS -----------------
 with tab3:
