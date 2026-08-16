@@ -2907,7 +2907,7 @@ def get_cpi_yoy_value(curr: str, target_date=None):
                         obs_date = df_filtered.iloc[-1]["date"]
                         days_diff = (target_dt - obs_date).days
                         is_quarterly = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
-                        threshold = 270 if is_quarterly else 180
+                        threshold = 180 if is_quarterly else 90
                         if days_diff > threshold:
                             return None  # Stale!
                             
@@ -2973,7 +2973,7 @@ def get_unemployment_value(curr: str, target_date=None):
                 if not df_filtered.empty:
                     obs_date = df_filtered.iloc[-1]["date"]
                     days_diff = (target_dt - obs_date).days
-                    if days_diff > 180:
+                    if days_diff > 90:
                         return None  # Stale!
                     val = df_filtered.iloc[-1]["value"]
                     if pd.notna(val):
@@ -3025,7 +3025,7 @@ def get_gdp_yoy_value(curr: str, target_date=None):
                     # Check freshness first (quarterly, max 270 days)
                     obs_date = df_filtered.iloc[-1]["date"]
                     days_diff = (target_dt - obs_date).days
-                    if days_diff > 270:
+                    if days_diff > 180:
                         return None  # Stale!
                         
                     if series_id == "GDPC1":
@@ -3410,26 +3410,17 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         
         if policy_rate is not None and yield_2y is not None:
             days_2y = (pd.to_datetime(dt_str) - pd.to_datetime(act_dt)).days if act_dt else 999
-            if days_2y <= 30:
+            if days_2y <= 5:
                 gp_freshness = "FRESH"
-            elif days_2y <= 180:
+            elif days_2y <= 15:
                 gp_freshness = "AGING"
                 
         if gp_freshness == "STALE":
             missing.append("Geldpolitik")
         else:
-            cpi = get_cpi_yoy_value(curr, dt_str)
-            if cpi is None:
-                real_policy_rate = policy_rate - 2.0
-            else:
-                real_policy_rate = policy_rate - cpi
-                
             gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
-            gp_real_score = real_policy_rate / 3.0 * 100.0
-            gp_policy_blend = 0.80 * gp_nominal_score + 0.20 * gp_real_score
             gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
-            
-            scores["Geldpolitik"] = np.clip(0.50 * gp_policy_blend + 0.50 * gp_market_score, -100.0, 100.0)
+            scores["Geldpolitik"] = np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0)
             
         # 2. Inflation
         cpi = get_cpi_yoy_value(curr, dt_str)
@@ -3442,8 +3433,10 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
                     obs_dt = df_filtered.iloc[-1]["date"]
                     days = (pd.to_datetime(dt_str) - obs_dt).days
                     is_q = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
-                    threshold = 270 if is_q else 180
-                    cpi_freshness = "FRESH" if days <= threshold / 2 else "AGING"
+                    if is_q:
+                        cpi_freshness = "FRESH" if days <= 120 else "AGING" if days <= 180 else "STALE"
+                    else:
+                        cpi_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
             else:
                 cpi_freshness = "FRESH"
                 
@@ -3462,7 +3455,7 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
                 if not df_filtered.empty:
                     obs_dt = df_filtered.iloc[-1]["date"]
                     days = (pd.to_datetime(dt_str) - obs_dt).days
-                    lab_freshness = "FRESH" if days <= 90 else "AGING"
+                    lab_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
             else:
                 lab_freshness = "FRESH"
                 
@@ -3496,7 +3489,7 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
                 if not df_filtered.empty:
                     obs_dt = df_filtered.iloc[-1]["date"]
                     days = (pd.to_datetime(dt_str) - obs_dt).days
-                    gdp_freshness = "FRESH" if days <= 135 else "AGING"
+                    gdp_freshness = "FRESH" if days <= 120 else "AGING" if days <= 180 else "STALE"
             else:
                 gdp_freshness = "FRESH"
                 
@@ -3515,7 +3508,17 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         scores["BCI"] = None
         
     scores["_missing"] = missing
-    scores["_completeness"] = (5.0 - len(missing)) / 5.0 * 100.0
+    
+    # Weighted completeness: GP=35, CPI=20, LAB=20, PMI=20, GDP=5
+    weights_map = {
+        "Geldpolitik": 35.0,
+        "Inflation": 20.0,
+        "Arbeitsmarkt": 20.0,
+        "PMI": 20.0,
+        "GDP": 5.0
+    }
+    scores["_completeness"] = sum(weights_map[k] for k in weights_map if k not in missing)
+    
     scores["_freshness"] = {
         "Geldpolitik": gp_freshness,
         "Inflation": cpi_freshness,
@@ -3677,6 +3680,13 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
 
     corr_score = compute_correction_score(curr, target_date) * w_corr
     final_score = np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0)
+    
+    # Enforce minimum data coverage of 50.0%
+    if scores.get("_completeness", 100.0) < 50.0:
+        core_score = None
+        final_score = None
+        trend_score = 0.0
+        surprise_score = 0.0
     
     # Store context scores inside the returned details dict
     scores["_trend_score"] = trend_score
@@ -5449,7 +5459,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "currency": curr,
         "date": today_str,
         "time": datetime.now().strftime("%H:%M:%S"),
-        "model_version": "CORE_V2_2026_08",
+        "model_version": "CORE_V2_1_2026_08",
         "schema_version": "2.0",
         "total_score": float(total_score),
         "core_score": float(core_score),
@@ -5568,10 +5578,17 @@ with tab1:
             "details": details
         }
         
-    sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["score"], reverse=True)
-    strongest_c = sorted_curr_keys[0]
-    weakest_c = sorted_curr_keys[-1]
+    sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["score"] if g8_data[k]["score"] is not None else -999.0, reverse=True)
     
+    valid_scores = [k for k in CURRENCIES.keys() if g8_data[k]["score"] is not None]
+    if valid_scores:
+        sorted_valid = sorted(valid_scores, key=lambda k: g8_data[k]["score"], reverse=True)
+        strongest_c = sorted_valid[0]
+        weakest_c = sorted_valid[-1]
+    else:
+        strongest_c = "N/A"
+        weakest_c = "N/A"
+        
     vix = get_vix_value()
     cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
     gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
@@ -5587,9 +5604,15 @@ with tab1:
         
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     with m_col1:
-        st.metric("🟢 Stärkste Währung", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['score']:+.1f})")
+        if strongest_c != "N/A":
+            st.metric("🟢 Stärkste Währung", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['score']:+.1f})")
+        else:
+            st.metric("🟢 Stärkste Währung", "N/A (Insufficient Data)")
     with m_col2:
-        st.metric("🔴 Schwächste Währung", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['score']:+.1f})")
+        if weakest_c != "N/A":
+            st.metric("🔴 Schwächste Währung", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['score']:+.1f})")
+        else:
+            st.metric("🔴 Schwächste Währung", "N/A (Insufficient Data)")
     with m_col3:
         st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})")
     with m_col4:
@@ -5598,28 +5621,32 @@ with tab1:
     st.write("")
     
     # Visual horizontal bar chart
-    fig_rank = go.Figure(go.Bar(
-        x=[g8_data[k]["score"] for k in reversed(sorted_curr_keys)],
-        y=[f"{CURRENCIES[k]['flag']} {k}" for k in reversed(sorted_curr_keys)],
-        orientation='h',
-        marker=dict(
-            color=['#10b981' if g8_data[k]["score"] >= 15.0 else '#f87171' if g8_data[k]["score"] <= -15.0 else '#e2b13c' for k in reversed(sorted_curr_keys)]
-        ),
-        text=[f"{g8_data[k]['score']:+.1f}" for k in reversed(sorted_curr_keys)],
-        textposition='outside'
-    ))
-    fig_rank.update_layout(
-        title="<b>Fundamental Score Ranking (Strongest ➔ Weakest)</b>",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#d1d5db", size=12),
-        xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.1)', zeroline=True, zerolinecolor='#4b5563'),
-        yaxis=dict(showgrid=False),
-        height=340,
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    st.plotly_chart(fig_rank, use_container_width=True)
-    
+    plot_keys = [k for k in sorted_curr_keys if g8_data[k]["score"] is not None]
+    if plot_keys:
+        fig_rank = go.Figure(go.Bar(
+            x=[g8_data[k]["score"] for k in reversed(plot_keys)],
+            y=[f"{CURRENCIES[k]['flag']} {k}" for k in reversed(plot_keys)],
+            orientation='h',
+            marker=dict(
+                color=['#10b981' if g8_data[k]["score"] >= 15.0 else '#f87171' if g8_data[k]["score"] <= -15.0 else '#e2b13c' for k in reversed(plot_keys)]
+            ),
+            text=[f"{g8_data[k]['score']:+.1f}" for k in reversed(plot_keys)],
+            textposition='outside'
+        ))
+        fig_rank.update_layout(
+            title="<b>Fundamental Score Ranking (Strongest ➔ Weakest)</b>",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color="#d1d5db", size=12),
+            xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.1)', zeroline=True, zerolinecolor='#4b5563'),
+            yaxis=dict(showgrid=False),
+            height=340,
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
+        st.plotly_chart(fig_rank, use_container_width=True)
+    else:
+        st.warning("⚠️ Keine ausreichenden Daten zur Erstellung des Rankings vorhanden (Coverage < 50%).")
+        
     st.subheader("📋 Einzelwährungs-Fundamentaltabelle (G8)")
     table_rows = []
     for rank_idx, curr in enumerate(sorted_curr_keys, 1):
@@ -5630,7 +5657,9 @@ with tab1:
         comp = det.get("_completeness", 100.0)
         missing = det.get("_missing", [])
         
-        if d["score"] >= 25.0:
+        if d["score"] is None:
+            badge_str = "⚪ INSUFFICIENT DATA"
+        elif d["score"] >= 25.0:
             badge_str = "🟢 STRONG BULLISH"
         elif d["score"] >= 10.0:
             badge_str = "🟢 BULLISH"
@@ -5646,15 +5675,15 @@ with tab1:
         table_rows.append({
             "Rang": f"#{rank_idx}",
             "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-            "CORE Score": f"{d['core']:+.1f}",
-            "Gesamt-Score": f"{d['score']:+.1f}",
+            "CORE Score": f"{d['core']:+.1f}" if d['core'] is not None else "N/A",
+            "Gesamt-Score": f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
             "Signal / Tendenz": badge_str,
-            "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}",
-            "Inflation (20%)": f"{cats.get('Inflation', 0.0):+.1f}",
-            "Arbeitsmarkt (20%)": f"{cats.get('Arbeitsmarkt', 0.0):+.1f}",
-            "PMI (20%)": f"{cats.get('PMI', 0.0):+.1f}",
-            "GDP (5%)": f"{cats.get('GDP', 0.0):+.1f}",
-            "Korrektur": f"{d['corr']:+.1f}",
+            "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}" if cats.get('Geldpolitik') is not None else "N/A",
+            "Inflation (20%)": f"{cats.get('Inflation', 0.0):+.1f}" if cats.get('Inflation') is not None else "N/A",
+            "Arbeitsmarkt (20%)": f"{cats.get('Arbeitsmarkt', 0.0):+.1f}" if cats.get('Arbeitsmarkt') is not None else "N/A",
+            "PMI (20%)": f"{cats.get('PMI', 0.0):+.1f}" if cats.get('PMI') is not None else "N/A",
+            "GDP (5%)": f"{cats.get('GDP', 0.0):+.1f}" if cats.get('GDP') is not None else "N/A",
+            "Korrektur": f"{d['corr']:+.1f}" if d['corr'] is not None else "N/A",
             "Regime": d["regime"],
             "Datenqualität": status_dq
         })
@@ -5732,13 +5761,15 @@ with tab2:
         
     with col_deep2:
         st.subheader("⚖️ Core Weights & Model Isolation")
-        st.write(f"- **Gesamt-Score (Final Score):** `{f_score_d:+.1f}`")
-        st.write(f"- **BASE CORE Score:** `{core_d:+.1f}`")
-        st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`")
-        st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`")
-        st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`")
+        f_score_str = f"{f_score_d:+.1f}" if f_score_d is not None else "N/A"
+        core_str = f"{core_d:+.1f}" if core_d is not None else "N/A"
+        st.write(f"- **Gesamt-Score (Final Score):** `{f_score_str}`")
+        st.write(f"- **BASE CORE Score:** `{core_str}`")
+        st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`" if details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
+        st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
+        st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
         st.write(f"- **Markt-Regime:** `{reg_d}`")
-        st.write(f"- **Model Version:** `CORE_V2_2026_08` (Schema: `2.0`)")
+        st.write(f"- **Model Version:** `CORE_V2_1_2026_08` (Schema: `2.0`)")
         
         st.subheader("🟢 Freshness & Data Quality Indicators")
         st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
