@@ -2737,7 +2737,7 @@ CPI_SERIES = {
     "EUR": "CP0000EZ19M086NEST",
     "GBP": "GBRCPIALLMINMEI",
     "JPY": "JPNCPIALLMINMEI",
-    "CHF": "CPALTT01CHM657N",
+    "CHF": "CP0000CHM086NEST",
     "CAD": "CPALTT01CAM657N",
     "AUD": "AUSCPIALLQINMEI",
     "NZD": "NZLCPIALLQINMEI"
@@ -2883,7 +2883,7 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
         bullets.append("⚪ Neutrale fundamentale Gesamtlage")
     return bullets
 
-def get_cpi_yoy_value(curr: str, target_date=None):
+def get_cpi_yoy_details(curr: str, target_date=None):
     try:
         fred_key = FRED_KEY
         if target_date is None:
@@ -2891,68 +2891,92 @@ def get_cpi_yoy_value(curr: str, target_date=None):
         else:
             dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
             
-        series_id = CPI_SERIES.get(curr, "CPIAUCSL")
-        df, _, is_live = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                df_c = df.copy()
-                if series_id != "FP.CPI.TOTL.ZG":
+        series_id = CPI_SERIES.get(curr)
+        metric_type = "CPI_YOY"
+        source = "FRED"
+        
+        # Switzerland uses Eurostat HICP CP0000CHM086NEST
+        if curr == "CHF":
+            series_id = "CP0000CHM086NEST"
+            metric_type = "HICP_YOY"
+            source = "Eurostat HICP"
+            
+        if series_id and fred_key:
+            df, _, is_live = get_fred_data(series_id, fred_key)
+            if df is not None and not df.empty:
+                if not is_live and not check_demo_active():
+                    pass
+                else:
                     target_dt = pd.to_datetime(dt_str)
-                    df_filtered = df_c[df_c["date"] <= target_dt].sort_values("date")
+                    df_filtered = df[df["date"] <= target_dt].sort_values("date")
                     
                     if not df_filtered.empty:
-                        # Check freshness/staleness first
                         obs_date = df_filtered.iloc[-1]["date"]
                         days_diff = (target_dt - obs_date).days
+                        
                         is_quarterly = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
                         threshold = 180 if is_quarterly else 90
-                        if days_diff > threshold:
-                            return None  # Stale!
+                        
+                        # Determine freshness
+                        if days_diff <= threshold / 2:
+                            freshness = "🟢 FRESH"
+                        elif days_diff <= threshold:
+                            freshness = "🟡 AGING"
+                        else:
+                            freshness = "🔴 STALE"
                             
+                        # If stale, do NOT return value
+                        if days_diff > threshold:
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                            
+                        val = None
                         if series_id in ["CPALTT01CHM657N", "CPALTT01CAM657N"]:
                             # Compounding last 12 MoM rates
                             if len(df_filtered) >= 12:
                                 last_12 = df_filtered.tail(12)["value"].astype(float).values
                                 val = (np.prod(1.0 + last_12 / 100.0) - 1.0) * 100.0
-                            else:
-                                val = None
                         else:
                             periods_offset = 4 if is_quarterly else 12
-                            df_c["yoy"] = df_c["value"].pct_change(periods=periods_offset) * 100
-                            # Refilter after calculation to get the yoy value
+                            df_c = df.copy()
+                            df_c["yoy"] = df_c["value"].pct_change(periods=periods_offset) * 100.0
                             df_f_yoy = df_c[df_c["date"] <= target_dt].sort_values("date")
                             val = df_f_yoy.iloc[-1]["yoy"] if not df_f_yoy.empty else None
                             
                         if val is not None and pd.notna(val):
-                            # Sanity check
-                            if abs(val) > 25.0:
-                                return None
-                            return float(val)
+                            if abs(val) <= 25.0:
+                                return float(val), obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                            else:
+                                return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, "🔴 DATA VALIDATION FAILED"
+                        else:
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
     except Exception:
         pass
+        
     try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, act_dt, is_live = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
-        if val is not None:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                # Check freshness for World Bank fallback
-                target_dt = pd.to_datetime(target_date)
-                if act_dt is not None:
-                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
-                    if days_diff > 365 * 2:  # World Bank lag can be long, but max 2 years
-                        return None
-                if abs(val) > 25.0:
-                    return None
-                return float(val)
+        # Fallback to World Bank only for historical research (>365 days ago)
+        if target_date is not None:
+            target_dt = pd.to_datetime(target_date)
+            is_historical = (datetime.now() - target_dt).days > 365
+            if is_historical:
+                code = CURRENCIES[curr]["wb_code"]
+                val, act_dt, is_live = get_worldbank_data_historical(code, "FP.CPI.TOTL.ZG", target_date)
+                if val is not None:
+                    if is_live or check_demo_active():
+                        days_diff = (target_dt - pd.to_datetime(act_dt)).days
+                        if days_diff <= 365 * 2:
+                            if abs(val) <= 25.0:
+                                return float(val), pd.to_datetime(act_dt).strftime("%Y-%m-%d"), "HISTORICAL_ANNUAL", "World Bank (Historical)", "FP.CPI.TOTL.ZG", "🟢 HISTORICAL"
     except Exception:
         pass
+        
     if check_demo_active():
-        return 2.0
-    return None
+        return 2.0, datetime.now().strftime("%Y-%m-%d"), "CPI_YOY", "Demo", "DEMO", "🟢 FRESH"
+        
+    return None, None, "CPI_YOY", "UNAVAILABLE", "NONE", "🔴 UNAVAILABLE"
+
+def get_cpi_yoy_value(curr: str, target_date=None):
+    val, _, _, _, _, _ = get_cpi_yoy_details(curr, target_date)
+    return val
 
 def get_unemployment_value(curr: str, target_date=None):
     try:
@@ -3088,15 +3112,25 @@ def get_series_trend_points(series_id: str, target_date=None, reverse=False) -> 
         df, _, _ = get_fred_data(series_id, fred_key)
         if df is not None and not df.empty:
             df_filtered = df[df["date"] <= target_dt].sort_values("date")
-            if len(df_filtered) >= 3:
-                v1 = float(df_filtered.iloc[-3]["value"])
-                v2 = float(df_filtered.iloc[-2]["value"])
-                v3 = float(df_filtered.iloc[-1]["value"])
-                
-                if v1 < v2 < v3:
-                    return -15.0 if reverse else 15.0
-                elif v1 > v2 > v3:
-                    return 15.0 if reverse else -15.0
+            if not df_filtered.empty:
+                obs_date = df_filtered.iloc[-1]["date"]
+                days_diff = (target_dt - obs_date).days
+                is_q = ("Q" in series_id or "q" in series_id)
+                threshold = 180 if is_q else 90
+                if "IRLTLT" in series_id or "TB3MS" in series_id or "FEDFUNDS" in series_id:
+                    threshold = 15
+                if days_diff > threshold:
+                    return 0.0
+                    
+                if len(df_filtered) >= 3:
+                    v1 = float(df_filtered.iloc[-3]["value"])
+                    v2 = float(df_filtered.iloc[-2]["value"])
+                    v3 = float(df_filtered.iloc[-1]["value"])
+                    
+                    if v1 < v2 < v3:
+                        return -15.0 if reverse else 15.0
+                    elif v1 > v2 > v3:
+                        return 15.0 if reverse else -15.0
     except Exception:
         pass
     return 0.0
@@ -4871,23 +4905,19 @@ def get_inflation_expectations_data(curr, target_date=None):
         except Exception:
             dt_str = datetime.now().strftime("%Y-%m-%d")
             
-    fred_key = FRED_KEY
+    cpi_val, obs_date_cur, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, dt_str)
     
-    # Actual CPI / Inflation
-    cpi_id = CPI_SERIES.get(curr)
-    cpi_val = None
     cpi_trend = None
-    if cpi_id and fred_key:
-        try:
-            cpi_val, _, _ = get_fred_data_historical(cpi_id, dt_str, fred_key)
-            # Calculate trend as 3-month change
-            dt_3m = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
-            cpi_3m, _, _ = get_fred_data_historical(cpi_id, dt_3m, fred_key)
-            if cpi_val is not None and cpi_3m is not None:
-                cpi_trend = cpi_val - cpi_3m
-        except Exception:
-            pass
+    if cpi_val is not None:
+        # 90 days lookback for trend comparison (1 quarter for AUD/NZD, 3 months for monthly)
+        dt_prev = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+        cpi_prev, obs_date_prev, _, _, _, _ = get_cpi_yoy_details(curr, dt_prev)
+        
+        # Only compute trend if obs dates are different (prevents false 0.00% trends on same data)
+        if cpi_prev is not None and obs_date_prev != obs_date_cur:
+            cpi_trend = cpi_val - cpi_prev
             
+    fred_key = FRED_KEY
     expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
     expect_val = None
     if expect_id and fred_key:
@@ -4896,7 +4926,6 @@ def get_inflation_expectations_data(curr, target_date=None):
         except Exception:
             pass
             
-    # Specific Market Breakeven (USD only in FRED)
     breakeven_val = None
     if curr == "USD" and fred_key:
         try:
@@ -4910,7 +4939,7 @@ def get_inflation_expectations_data(curr, target_date=None):
         "oecd_expectation": expect_val,
         "market_breakeven": breakeven_val,
         "date": dt_str,
-        "source": "FRED / OECD Consumer Survey" if curr != "USD" else "FRED / US Treasury"
+        "source": source
     }
 
 def get_inflation_expectation_signal(base, quote, target_date=None):
@@ -5444,14 +5473,30 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         if tot_w > 0:
             eff_weights = {k: round(model_weights.get(k, 0.0) / tot_w * 100.0, 1) for k in active_factors}
             
+    cpi_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_str)
+    inf_data = get_inflation_expectations_data(curr, today_str)
+    c_trend = inf_data.get("cpi_trend")
+    c_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
+
     # Get raw values for saving
     raw_values = {
         "policy_rate": defaults.get(f"manual_rate_{curr}"),
         "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
         "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
-        "cpi_yoy": get_cpi_yoy_value(curr, today_str),
+        "cpi_yoy": cpi_val,
         "unrate": get_unemployment_value(curr, today_str),
-        "gdp_yoy": get_gdp_yoy_value(curr, today_str)
+        "gdp_yoy": get_gdp_yoy_value(curr, today_str),
+        
+        # V2.2 CPI Snapshot requirements
+        "cpi_value": cpi_val,
+        "cpi_metric_type": metric_type,
+        "cpi_source": source,
+        "cpi_series": series_id,
+        "cpi_observation_date": obs_date,
+        "cpi_release_date": obs_date,
+        "cpi_freshness": freshness,
+        "cpi_change_pp": c_trend,
+        "cpi_trend": c_trend_str
     }
 
     snapshot = {
@@ -5459,11 +5504,11 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "currency": curr,
         "date": today_str,
         "time": datetime.now().strftime("%H:%M:%S"),
-        "model_version": "CORE_V2_1_2026_08",
+        "model_version": "CORE_V2_2_2026_08",
         "schema_version": "2.0",
-        "total_score": float(total_score),
-        "core_score": float(core_score),
-        "correction_score": float(corr_score),
+        "total_score": float(total_score) if total_score is not None else None,
+        "core_score": float(core_score) if core_score is not None else None,
+        "correction_score": float(corr_score) if corr_score is not None else None,
         "trend_score": float(details.get("_trend_score", 0.0)) if details else 0.0,
         "surprise_score": float(details.get("_surprise_score", 0.0)) if details else 0.0,
         "regime": regime,
@@ -5475,7 +5520,18 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "freshness": details.get("_freshness", {}) if details else {},
         "raw_values": raw_values,
         "trend_details": details.get("_trend_details", {}) if details else {},
-        "surprise_details": details.get("_surprise_details", {}) if details else {}
+        "surprise_details": details.get("_surprise_details", {}) if details else {},
+        
+        # Root level V2.2 snapshot keys
+        "cpi_value": cpi_val,
+        "cpi_metric_type": metric_type,
+        "cpi_source": source,
+        "cpi_series": series_id,
+        "cpi_observation_date": obs_date,
+        "cpi_release_date": obs_date,
+        "cpi_freshness": freshness,
+        "cpi_change_pp": c_trend,
+        "cpi_trend": c_trend_str
     }
     signals[snap_id] = snapshot
     save_live_signals(signals)
@@ -5769,7 +5825,7 @@ with tab2:
         st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
         st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
         st.write(f"- **Markt-Regime:** `{reg_d}`")
-        st.write(f"- **Model Version:** `CORE_V2_1_2026_08` (Schema: `2.0`)")
+        st.write(f"- **Model Version:** `CORE_V2_2_2026_08` (Schema: `2.0`)")
         
         st.subheader("🟢 Freshness & Data Quality Indicators")
         st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
@@ -5890,19 +5946,27 @@ with tab4:
     today_s = datetime.now().strftime("%Y-%m-%d")
     cpi_rows = []
     for curr, info in CURRENCIES.items():
-        c_val = get_cpi_yoy_value(curr, today_s)
+        c_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_s)
         inf_data = get_inflation_expectations_data(curr, today_s)
         c_trend = inf_data.get("cpi_trend")
         oecd_val = inf_data.get("oecd_expectation")
         
-        oecd_str = f"{oecd_val:.1f} (% Saldo)" if oecd_val is not None else "N/A – OECD Consumer Inflation Expectations unavailable"
+        # Display label for Swiss HICP
+        metric_label = "Eurostat HICP YoY" if curr == "CHF" else "CPI YoY"
+        inflation_yoy_str = f"{c_val:.2f}% ({metric_label})" if c_val is not None else "N/A"
+        
+        cpi_change_str = f"{c_trend:+.2f} pp" if c_trend is not None else "N/A"
+        cpi_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
+        oecd_str = f"{oecd_val:.1f} (% Saldo)" if oecd_val is not None else "N/A"
+        
         cpi_rows.append({
             "Währung": f"{info['flag']} {curr}",
-            "CPI Rate (YoY)": f"{c_val:.2f}%" if c_val is not None else "N/A",
-            "Inflationstrend (3M)": f"{c_trend:+.2f}%" if c_trend is not None else "N/A",
-            "OECD Inflation Expectations": oecd_str,
-            "Frequenz": "Quartalsweise" if curr in ["AUD", "NZD"] else "Monatlich",
-            "Zielwert": "2.00%"
+            "Inflation YoY": inflation_yoy_str,
+            "Change": cpi_change_str,
+            "Trend": cpi_trend_str,
+            "Freshness": freshness,
+            "Source": source,
+            "OECD Expectations": oecd_str
         })
         
     st.dataframe(pd.DataFrame(cpi_rows), hide_index=True, use_container_width=True)

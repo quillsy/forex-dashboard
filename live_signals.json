@@ -58151,14 +58151,14 @@
         "type": "CURRENCY",
         "currency": "USD",
         "date": "2026-08-16",
-        "time": "22:14:11",
-        "model_version": "CORE_V2_1_2026_08",
+        "time": "03:50:27",
+        "model_version": "CORE_V2_2_2026_08",
         "schema_version": "2.0",
-        "total_score": 51.23691248035134,
+        "total_score": 53.48691248035134,
         "core_score": 51.73691248035134,
-        "correction_score": 2.0,
-        "trend_score": 1.5,
-        "surprise_score": -4.0,
+        "correction_score": 1.0,
+        "trend_score": 0.75,
+        "surprise_score": 0.0,
         "regime": "Inflation",
         "factor_scores": {
             "Geldpolitik": 56.66666666666667,
@@ -58173,12 +58173,7 @@
             "Inflation": 20.0,
             "Arbeitsmarkt": 20.0,
             "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
+            "GDP": 5.0
         },
         "effective_weights": {
             "Geldpolitik": 35.0,
@@ -58202,21 +58197,39 @@
             "yield_5y": 4.32,
             "cpi_yoy": 3.5397514271936714,
             "unrate": 4.1,
-            "gdp_yoy": 2.1018194625243902
+            "gdp_yoy": 2.1018194625243902,
+            "cpi_value": 3.5397514271936714,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "FRED",
+            "cpi_series": "CPIAUCSL",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_freshness": "🟡 AGING",
+            "cpi_change_pp": -0.7302812294865735,
+            "cpi_trend": "↓ FALLING"
         },
         "trend_details": {
             "gp_trend": -15.0,
             "cpi_trend": 0.0,
             "lab_trend": 15.0,
             "pmi_trend": 15.0,
-            "gdp_trend": 15.0
+            "gdp_trend": 0.0
         },
         "surprise_details": {
             "gp_surprise": 0.0,
             "cpi_surprise": 0.0,
-            "lab_surprise": -20.0,
+            "lab_surprise": 0.0,
             "pmi_surprise": 0.0
-        }
+        },
+        "cpi_value": 3.5397514271936714,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "FRED",
+        "cpi_series": "CPIAUCSL",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟡 AGING",
+        "cpi_change_pp": -0.7302812294865735,
+        "cpi_trend": "↓ FALLING"
     },
     "CURR_EUR_2026-08-16": {
         "type": "CURRENCY",
@@ -58466,6 +58479,7 @@
                 "mfe": null,
                 "mae": null
             }
-        }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
     }
 }
