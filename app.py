@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
+CURRENT_MODEL_VERSION = "CORE_V2_2_2026_08"
+
 # Set up page config
 st.set_page_config(
     page_title="Institutional Forex Fundamental Dashboard",
@@ -5169,8 +5171,11 @@ def load_live_signals():
             signals = json.load(f)
             # Inject legacy label for versioning
             for snap_id, snap in signals.items():
-                if isinstance(snap, dict) and "model_version" not in snap:
-                    snap["model_version"] = "LEGACY_PRE_CORE_FIX"
+                if isinstance(snap, dict):
+                    if "model_version" not in snap:
+                        snap["model_version"] = "LEGACY_PRE_CORE_FIX"
+                    if "metadata" in snap and isinstance(snap["metadata"], dict) and "model_version" not in snap["metadata"]:
+                        snap["metadata"]["model_version"] = "LEGACY_PRE_CORE_FIX"
             return signals
     except Exception:
         return {}
@@ -5250,19 +5255,19 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
     today_str = datetime.now().strftime("%Y-%m-%d")
     signals = load_live_signals()
     
-    # Duplicate Check (prevent duplicate snapshot if same signal on same day)
+    # Duplicate Check (prevent duplicate snapshot if same signal on same day for same model version)
     duplicate_found = False
     for s_id, s_data in signals.items():
         if s_data.get("metadata", {}).get("pair") == selected_pair and s_data.get("metadata", {}).get("date") == today_str:
-            if s_data.get("pair_signal", {}).get("signal") == badge:
-                duplicate_found = True
-                break
-                
+            if s_data.get("metadata", {}).get("model_version") == CURRENT_MODEL_VERSION:
+                if s_data.get("pair_signal", {}).get("signal") == badge:
+                    duplicate_found = True
+                    break
+                    
     if duplicate_found:
         return
         
-    time_str = datetime.now().strftime("%H%M")
-    snapshot_id = f"{today_str}_{time_str}_{selected_pair.replace('/', '')}_{model_name.replace(' ', '_')}"
+    snapshot_id = f"PAIR_{selected_pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
     
     checklist_copy = compute_checklist_snapshot(model_weights)
     
@@ -5314,6 +5319,7 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
             "quote_currency": quote_curr,
             "core_model_name": model_name,
             "core_model_weights": model_weights,
+            "model_version": CURRENT_MODEL_VERSION,
             "app_version": "v1.0"
         },
         "pair_signal": {
@@ -5464,7 +5470,7 @@ def update_open_outcomes():
 
 def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, details, model_weights, today_str):
     signals = load_live_signals()
-    snap_id = f"CURR_{curr}_{today_str}"
+    snap_id = f"CURR_{curr}_{today_str}_{CURRENT_MODEL_VERSION}"
     
     eff_weights = {}
     if details and "_completeness" in details:
@@ -6227,19 +6233,32 @@ with tab12:
             if curr_snapshots:
                 c_rows = []
                 for s_id, s in curr_snapshots.items():
-                    meta = s.get("metadata", {})
-                    factors = s.get("factors", {})
+                    meta = s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {}
+                    factors = s.get("factors", {}) if isinstance(s.get("factors"), dict) else {}
+                    
+                    s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
+                    s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
+                    
+                    # Score fallback
+                    score_val = s.get("score")
+                    if score_val is None:
+                        score_val = s.get("core_score")
+                    if score_val is None:
+                        score_val = s.get("total_score", 0.0)
+                        
+                    s_factors = factors if factors else s.get("factor_scores", {})
+                    
                     c_rows.append({
                         "Snapshot ID": s_id,
-                        "Datum": meta.get("date"),
-                        "Währung": meta.get("currency"),
-                        "Score": f"{s.get('score', 0.0):+.1f}",
+                        "Datum": s_date,
+                        "Währung": s_curr,
+                        "Score": f"{score_val:+.1f}" if score_val is not None else "N/A",
                         "Regime": s.get("regime", "Neutral"),
-                        "Geldpolitik (35%)": f"{factors.get('Geldpolitik', 0.0):+.1f}",
-                        "Inflation (20%)": f"{factors.get('Inflation', 0.0):+.1f}",
-                        "Arbeitsmarkt (20%)": f"{factors.get('Arbeitsmarkt', 0.0):+.1f}",
-                        "PMI (20%)": f"{factors.get('PMI', 0.0):+.1f}",
-                        "GDP (5%)": f"{factors.get('GDP', 0.0):+.1f}"
+                        "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
+                        "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
+                        "Arbeitsmarkt (20%)": f"{s_factors.get('Arbeitsmarkt', 0.0):+.1f}" if s_factors.get('Arbeitsmarkt') is not None else "N/A",
+                        "PMI (20%)": f"{s_factors.get('PMI', 0.0):+.1f}" if s_factors.get('PMI') is not None else "N/A",
+                        "GDP (5%)": f"{s_factors.get('GDP', 0.0):+.1f}" if s_factors.get('GDP') is not None else "N/A"
                     })
                 df_c_hist = pd.DataFrame(c_rows).sort_values("Datum", ascending=False)
                 st.dataframe(df_c_hist, hide_index=True, use_container_width=True)
