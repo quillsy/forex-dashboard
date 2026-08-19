@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
-CURRENT_MODEL_VERSION = "CORE_V2_2_2026_08"
+CURRENT_MODEL_VERSION = "CORE_V2_3_2026_08"
 
 # Set up page config
 st.set_page_config(
@@ -1334,6 +1334,77 @@ def is_data_valid(val, is_live):
     return True
 
 # ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_ons_cpi_data():
+    """
+    Fetches the Consumer Price Index (CPI) 12-month rate (series D7G7) from the ONS timeseries API.
+    Returns: (df, last_update_time, is_live)
+             df has columns: 'date' (pd.Timestamp), 'value' (float) and 'release_date' (pd.Timestamp)
+    """
+    try:
+        url = "https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data"
+        res = requests.get(url, timeout=15)
+        if res.status_code != 200:
+            raise ValueError(f"ONS HTTP Error {res.status_code}")
+        
+        data = res.json()
+        months = data.get("months", [])
+        if not months:
+            raise ValueError("No monthly observations found in ONS response")
+            
+        records = []
+        for m in months:
+            # Parse observation date (e.g. '2026 JUL')
+            try:
+                obs_dt = pd.to_datetime(m["date"])
+            except Exception:
+                continue
+                
+            # Parse value
+            try:
+                val = float(m["value"])
+            except ValueError:
+                continue
+                
+            # Parse update/release date (e.g. '2026-08-18T23:00:00.000Z')
+            release_dt = None
+            if "updateDate" in m and m["updateDate"]:
+                try:
+                    release_dt = pd.to_datetime(m["updateDate"]).tz_localize(None)
+                except Exception:
+                    pass
+            
+            # Fallback if release_date is missing
+            if release_dt is None:
+                release_dt = obs_dt + timedelta(days=25)
+                
+            records.append({
+                "date": obs_dt,
+                "value": val,
+                "release_date": release_dt
+            })
+            
+        if not records:
+            raise ValueError("No valid records parsed from ONS data")
+            
+        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+        return df, datetime.now(), True
+    except Exception:
+        if check_demo_active():
+            # Generate clean mock data
+            mock_records = []
+            now = datetime.now()
+            for i in range(24):
+                dt = (now - timedelta(days=30 * (23 - i))).replace(day=1)
+                mock_records.append({
+                    "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
+                    "value": 2.0 + 0.1 * i,
+                    "release_date": pd.to_datetime((dt + timedelta(days=20)).strftime("%Y-%m-%d"))
+                })
+            df_mock = pd.DataFrame(mock_mock_records if 'mock_mock_records' in locals() else mock_records)
+            return df_mock, datetime.now(), False
+        return None, datetime.now(), False
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fred_data(series_id, key):
     if not key:
@@ -2903,6 +2974,44 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             metric_type = "HICP_YOY"
             source = "Eurostat HICP"
             
+        # GBP uses ONS API (D7G7 series)
+        if curr == "GBP":
+            metric_type = "CPI_YOY"
+            source = "ONS"
+            series_id = "D7G7"
+            
+            res_ons = get_ons_cpi_data()
+            if res_ons is not None:
+                df, _, is_live = res_ons
+                if df is not None and not df.empty:
+                    target_dt = pd.to_datetime(dt_str)
+                    df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
+                    if not df_filtered.empty:
+                        obs_row = df_filtered.iloc[-1]
+                        obs_date = obs_row["date"]
+                        val = obs_row["value"]
+                        
+                        days_diff = (target_dt - obs_date).days
+                        threshold = 90
+                        if days_diff <= threshold / 2:
+                            freshness = "🟢 FRESH"
+                        elif days_diff <= threshold:
+                            freshness = "🟡 AGING"
+                        else:
+                            freshness = "🔴 STALE"
+                            
+                        if days_diff > threshold:
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                            
+                        if val is not None and pd.notna(val):
+                            if abs(val) <= 25.0:
+                                return float(val), obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                            else:
+                                return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, "🔴 DATA VALIDATION FAILED"
+                        else:
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+            return None, None, metric_type, source, series_id, "🔴 UNAVAILABLE"
+            
         if series_id and fred_key:
             df, _, is_live = get_fred_data(series_id, fred_key)
             if df is not None and not df.empty:
@@ -3459,27 +3568,11 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
             scores["Geldpolitik"] = np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0)
             
         # 2. Inflation
-        cpi = get_cpi_yoy_value(curr, dt_str)
-        if cpi is not None:
-            series_id = CPI_SERIES.get(curr, "CPIAUCSL")
-            df_cpi, _, _ = get_fred_data(series_id, fred_key)
-            if df_cpi is not None and not df_cpi.empty:
-                df_filtered = df_cpi[df_cpi["date"] <= pd.to_datetime(dt_str)].sort_values("date")
-                if not df_filtered.empty:
-                    obs_dt = df_filtered.iloc[-1]["date"]
-                    days = (pd.to_datetime(dt_str) - obs_dt).days
-                    is_q = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
-                    if is_q:
-                        cpi_freshness = "FRESH" if days <= 120 else "AGING" if days <= 180 else "STALE"
-                    else:
-                        cpi_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
-            else:
-                cpi_freshness = "FRESH"
-                
-        if cpi_freshness == "STALE":
+        cpi_val, obs_date, metric_type, source, series_id, cpi_freshness = get_cpi_yoy_details(curr, dt_str)
+        if cpi_val is None or "STALE" in cpi_freshness or "UNAVAILABLE" in cpi_freshness or "FAILED" in cpi_freshness:
             missing.append("Inflation")
         else:
-            scores["Inflation"] = np.clip((cpi - 2.0) * 50.0, -100.0, 100.0)
+            scores["Inflation"] = np.clip((cpi_val - 2.0) * 50.0, -100.0, 100.0)
             
         # 3. Arbeitsmarkt
         unrate = get_unemployment_value(curr, dt_str)
@@ -5486,7 +5579,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
 
     # Get raw values for saving
     raw_values = {
-        "policy_rate": defaults.get(f"manual_rate_{curr}"),
+        "policy_rate": st.session_state.get(f"manual_rate_{curr}", defaults.get(f"manual_rate_{curr}")),
         "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
         "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
         "cpi_yoy": cpi_val,
@@ -6125,6 +6218,11 @@ with tab10:
         b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime(base_sel)
         q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime(quote_sel)
         
+        b_score_str = f"{b_score:+.1f}" if b_score is not None else "N/A"
+        q_score_str = f"{q_score:+.1f}" if q_score is not None else "N/A"
+        if b_score is None or q_score is None:
+            print(f"[DEBUG] Tab 10 import: base={base_sel} score={b_score}, quote={quote_sel} score={q_score}")
+            
         badge_name, badge_color, sig_val = get_pair_signal_and_badge(base_sel, quote_sel)
         
         st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
@@ -6133,7 +6231,7 @@ with tab10:
         col_pb1, col_pb2 = st.columns(2)
         with col_pb1:
             st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
-            st.metric("Gesamt-Score", f"{b_score:+.1f}", delta=f"Regime: {b_reg}")
+            st.metric("Gesamt-Score", b_score_str, delta=f"Regime: {b_reg}")
             st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
             st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
             st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
@@ -6141,7 +6239,7 @@ with tab10:
             st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
         with col_pb2:
             st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
-            st.metric("Gesamt-Score", f"{q_score:+.1f}", delta=f"Regime: {q_reg}")
+            st.metric("Gesamt-Score", q_score_str, delta=f"Regime: {q_reg}")
             st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
             st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
             st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
