@@ -3324,7 +3324,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         obs_date = obs_row["date"]
                         val = obs_row["value"]
                         
-                        days_diff = (target_dt - obs_date).days
+                        ref_end = obs_date + pd.offsets.MonthEnd(0)
+                        days_diff = max(0, (target_dt - ref_end).days)
                         threshold = 90
                         if days_diff <= threshold / 2:
                             freshness = "🟢 FRESH"
@@ -3372,7 +3373,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                             prev_row = prev_rows.iloc[0]
                             val = float((obs_row["value"] / prev_row["value"] - 1) * 100)
                             
-                            days_diff = (target_dt - obs_date).days
+                            ref_end = obs_date + pd.offsets.MonthEnd(0)
+                            days_diff = max(0, (target_dt - ref_end).days)
                             threshold = 90
                             if days_diff <= threshold / 2:
                                 freshness = "🟢 FRESH"
@@ -3420,7 +3422,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         obs_date = obs_row["date"]
                         val = obs_row["value"]
                         
-                        days_diff = (target_dt - obs_date).days
+                        ref_end = obs_date + pd.offsets.MonthEnd(0)
+                        days_diff = max(0, (target_dt - ref_end).days)
                         threshold = 90
                         if days_diff <= threshold / 2:
                             freshness = "🟢 FRESH"
@@ -3467,7 +3470,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         obs_date = obs_row["date"]
                         val = obs_row["value"]
                         
-                        days_diff = (target_dt - obs_date).days
+                        ref_end = obs_date + pd.offsets.MonthEnd(0)
+                        days_diff = max(0, (target_dt - ref_end).days)
                         threshold = 90
                         if days_diff <= threshold / 2:
                             freshness = "🟢 FRESH"
@@ -3515,7 +3519,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         obs_date = obs_row["date"]
                         val = obs_row["value"]
                         
-                        days_diff = (target_dt - obs_date).days
+                        ref_end = obs_date + pd.offsets.QuarterEnd(0)
+                        days_diff = max(0, (target_dt - ref_end).days)
                         threshold = 180
                         if days_diff <= threshold / 2:
                             freshness = "🟢 FRESH"
@@ -3557,10 +3562,11 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                     
                     if not df_filtered.empty:
                         obs_date = df_filtered.iloc[-1]["date"]
-                        days_diff = (target_dt - obs_date).days
-                        
                         is_quarterly = (curr in ["AUD", "NZD"] or series_id.endswith("Q") or "Q" in series_id)
                         threshold = 180 if is_quarterly else 90
+                        
+                        ref_end = obs_date if is_quarterly else (obs_date + pd.offsets.MonthEnd(0))
+                        days_diff = max(0, (target_dt - ref_end).days)
                         
                         # Determine freshness
                         if days_diff <= threshold / 2:
@@ -4117,7 +4123,7 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
                 df_filtered = df_un[df_un["date"] <= pd.to_datetime(dt_str)].sort_values("date")
                 if not df_filtered.empty:
                     obs_dt = df_filtered.iloc[-1]["date"]
-                    days = (pd.to_datetime(dt_str) - obs_dt).days
+                    days = max(0, (pd.to_datetime(dt_str) - (obs_dt + pd.offsets.MonthEnd(0))).days)
                     lab_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
             else:
                 lab_freshness = "FRESH"
