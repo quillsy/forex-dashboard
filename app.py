@@ -1368,20 +1368,29 @@ def get_ons_cpi_data():
                 
             # Parse update/release date (e.g. '2026-08-18T23:00:00.000Z')
             release_dt = None
+            is_pit_ltd = False
             if "updateDate" in m and m["updateDate"]:
                 try:
-                    release_dt = pd.to_datetime(m["updateDate"]).tz_localize(None)
+                    raw_dt = pd.to_datetime(m["updateDate"]).tz_localize(None)
+                    # 2015-10-12 is the global migration date
+                    if raw_dt.strftime("%Y-%m-%d") == "2015-10-12":
+                        release_dt = obs_dt + timedelta(days=25)
+                        is_pit_ltd = True
+                    else:
+                        release_dt = raw_dt
                 except Exception:
                     pass
             
             # Fallback if release_date is missing
             if release_dt is None:
                 release_dt = obs_dt + timedelta(days=25)
+                is_pit_ltd = True
                 
             records.append({
                 "date": obs_dt,
                 "value": val,
-                "release_date": release_dt
+                "release_date": release_dt,
+                "is_pit_limited": is_pit_ltd
             })
             
         if not records:
@@ -3000,17 +3009,21 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         else:
                             freshness = "🔴 STALE"
                             
+                        is_ltd = obs_row.get("is_pit_limited", False)
+                        actual_source = "ONS (PIT_LIMITED)" if is_ltd else "ONS"
+                        actual_freshness = f"{freshness} (PIT_LIMITED)" if is_ltd else freshness
+                        
                         if days_diff > threshold:
-                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
                             
                         if val is not None and pd.notna(val):
                             if abs(val) <= 25.0:
-                                return float(val), obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
+                                return float(val), obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
                             else:
-                                return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, "🔴 DATA VALIDATION FAILED"
+                                return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, "🔴 DATA VALIDATION FAILED"
                         else:
-                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
-            return None, None, metric_type, source, series_id, "🔴 UNAVAILABLE"
+                            return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
+            return None, None, metric_type, "ONS", series_id, "🔴 UNAVAILABLE"
             
         if series_id and fred_key:
             df, _, is_live = get_fred_data(series_id, fred_key)
