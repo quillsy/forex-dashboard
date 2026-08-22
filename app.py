@@ -3197,6 +3197,15 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                                 else:
                                     return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
 
+            # If StatCan failed or is empty, only allow historical fallback if target date is > 90 days ago
+            target_dt = pd.to_datetime(dt_str)
+            is_historical = (datetime.now() - target_dt).days > 90
+            if is_historical:
+                series_id = "CPALTT01CAM657N"
+                source = "FRED"
+            else:
+                return None, None, metric_type, "Statistics Canada", series_id, "🔴 UNAVAILABLE"
+
         # AUD uses ABS API
         if curr == "AUD":
             metric_type = "CPI_YOY"
@@ -3235,6 +3244,14 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                                     return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, "🔴 DATA VALIDATION FAILED"
                             else:
                                 return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
+            # If ABS failed or is empty, only allow historical fallback if target date is > 90 days ago
+            target_dt = pd.to_datetime(dt_str)
+            is_historical = (datetime.now() - target_dt).days > 90
+            if is_historical:
+                series_id = "AUSCPIALLQINMEI"
+                source = "FRED"
+            else:
+                return None, None, metric_type, "ABS", series_id, "🔴 UNAVAILABLE"
             
         if series_id and fred_key:
             df, _, is_live = get_fred_data(series_id, fred_key)
@@ -5819,7 +5836,8 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "cpi_release_date": obs_date,
         "cpi_freshness": freshness,
         "cpi_change_pp": c_trend,
-        "cpi_trend": c_trend_str
+        "cpi_trend": c_trend_str,
+        "metric_calculation": "DERIVED_FROM_INDEX" if curr == "CAD" else "DIRECT_FROM_SOURCE"
     }
 
     snapshot = {
@@ -5827,7 +5845,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "currency": curr,
         "date": today_str,
         "time": datetime.now().strftime("%H:%M:%S"),
-        "model_version": "CORE_V2_2_2026_08",
+        "model_version": CURRENT_MODEL_VERSION,
         "schema_version": "2.0",
         "total_score": float(total_score) if total_score is not None else None,
         "core_score": float(core_score) if core_score is not None else None,
