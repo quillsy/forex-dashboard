@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
-CURRENT_MODEL_VERSION = "CORE_V2_3_2026_08"
+CURRENT_MODEL_VERSION = "CORE_V2_4_2026_08"
 
 # Set up page config
 st.set_page_config(
@@ -1411,6 +1411,133 @@ def get_ons_cpi_data():
                     "release_date": pd.to_datetime((dt + timedelta(days=20)).strftime("%Y-%m-%d"))
                 })
             df_mock = pd.DataFrame(mock_mock_records if 'mock_mock_records' in locals() else mock_records)
+            return df_mock, datetime.now(), False
+        return None, datetime.now(), False
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_statcan_cpi_data():
+    """
+    Fetches CPI index levels (series v41690973) from Statistics Canada WDS API.
+    Returns: (df, last_update_time, is_live)
+             df has columns: 'date' (pd.Timestamp), 'value' (float),
+             'release_date' (pd.Timestamp) and 'is_pit_limited' (bool)
+    """
+    try:
+        url = "https://www150.statcan.gc.ca/t1/wds/rest/getDataFromVectorsAndLatestNPeriods"
+        res = requests.post(url, json=[{"vectorId": 41690973, "latestN": 300}], timeout=15)
+        if res.status_code != 200:
+            raise ValueError(f"StatCan HTTP Error {res.status_code}")
+        
+        data = res.json()
+        if not data or data[0].get("status") != "SUCCESS":
+            raise ValueError(f"StatCan API status: {data[0].get('status') if data else 'Empty'}")
+            
+        vector_data = data[0].get("object", {}).get("vectorDataPoint", [])
+        if not vector_data:
+            raise ValueError("No vectorDataPoint found in StatCan response")
+            
+        records = []
+        for dp in vector_data:
+            try:
+                obs_dt = pd.to_datetime(dp["refPer"])
+                val = float(dp["value"])
+                # StatCan releaseTime is e.g. '2026-08-17T08:30'
+                release_dt = pd.to_datetime(dp["releaseTime"]).tz_localize(None)
+            except Exception:
+                continue
+                
+            records.append({
+                "date": obs_dt,
+                "value": val,
+                "release_date": release_dt,
+                "is_pit_limited": False
+            })
+            
+        if not records:
+            raise ValueError("No valid records parsed from StatCan data")
+            
+        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+        return df, datetime.now(), True
+    except Exception:
+        if check_demo_active():
+            mock_records = []
+            now = datetime.now()
+            for i in range(300):
+                dt = (now - timedelta(days=30 * (299 - i))).replace(day=1)
+                mock_records.append({
+                    "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
+                    "value": 100.0 + 0.25 * i,
+                    "release_date": pd.to_datetime((dt + timedelta(days=20)).strftime("%Y-%m-%d")),
+                    "is_pit_limited": False
+                })
+            df_mock = pd.DataFrame(mock_records)
+            return df_mock, datetime.now(), False
+        return None, datetime.now(), False
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_abs_cpi_data():
+    """
+    Fetches Monthly Headline CPI YoY (3.10001.10.50.M) from the Australian Bureau of Statistics SDMX API.
+    Returns: (df, last_update_time, is_live)
+             df has columns: 'date' (pd.Timestamp), 'value' (float),
+             'release_date' (pd.Timestamp) and 'is_pit_limited' (bool)
+    """
+    try:
+        url = "https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M?lastNObservations=100"
+        res = requests.get(url, headers={"Accept": "application/json"}, timeout=15)
+        if res.status_code != 200:
+            raise ValueError(f"ABS HTTP Error {res.status_code}")
+            
+        data = res.json()
+        datasets = data.get("dataSets", [])
+        if not datasets or not datasets[0].get("series"):
+            raise ValueError("No series data found in ABS response")
+            
+        series_data = next(iter(datasets[0].get("series", {}).values()))
+        obs = series_data.get("observations", {})
+        if not obs:
+            raise ValueError("No observations found in ABS response")
+            
+        time_periods = data.get("structure", {}).get("dimensions", {}).get("observation", [])[0].get("values", [])
+        
+        records = []
+        for t_idx, obs_val in obs.items():
+            try:
+                t_str = time_periods[int(t_idx)].get("id")
+                # Parse period (e.g. '2026-06') to day-1 of that month
+                obs_dt = pd.to_datetime(t_str + "-01")
+                val = float(obs_val[0])
+                # Conservative release date approximation: MonthEnd + 30 days
+                release_dt = obs_dt + pd.offsets.MonthEnd(0) + pd.Timedelta(days=30)
+            except Exception:
+                continue
+                
+            records.append({
+                "date": obs_dt,
+                "value": val,
+                "release_date": release_dt,
+                "is_pit_limited": True
+            })
+            
+        if not records:
+            raise ValueError("No valid records parsed from ABS data")
+            
+        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+        return df, datetime.now(), True
+    except Exception:
+        if check_demo_active():
+            mock_records = []
+            now = datetime.now()
+            for i in range(15):
+                dt = (now - timedelta(days=30 * (14 - i))).replace(day=1)
+                mock_records.append({
+                    "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
+                    "value": 2.5 + 0.1 * i,
+                    "release_date": pd.to_datetime((dt + timedelta(days=30)).strftime("%Y-%m-%d")),
+                    "is_pit_limited": True
+                })
+            df_mock = pd.DataFrame(mock_records)
             return df_mock, datetime.now(), False
         return None, datetime.now(), False
 
@@ -3024,6 +3151,90 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                         else:
                             return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
             return None, None, metric_type, "ONS", series_id, "🔴 UNAVAILABLE"
+            
+        # CAD uses Statistics Canada API
+        if curr == "CAD":
+            metric_type = "CPI_YOY"
+            source = "Statistics Canada"
+            series_id = "v41690973"
+            
+            res_statcan = get_statcan_cpi_data()
+            if res_statcan is not None:
+                df, _, is_live = res_statcan
+                if df is not None and not df.empty:
+                    target_dt = pd.to_datetime(dt_str)
+                    df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
+                    if not df_filtered.empty:
+                        obs_row = df_filtered.iloc[-1]
+                        obs_date = obs_row["date"]
+                        
+                        # Find row 12 months ago to calculate YoY
+                        target_prev = obs_date - pd.DateOffset(months=12)
+                        prev_rows = df_filtered[df_filtered["date"] == target_prev]
+                        if not prev_rows.empty:
+                            prev_row = prev_rows.iloc[0]
+                            val = float((obs_row["value"] / prev_row["value"] - 1) * 100)
+                            
+                            days_diff = (target_dt - obs_date).days
+                            threshold = 90
+                            if days_diff <= threshold / 2:
+                                freshness = "🟢 FRESH"
+                            elif days_diff <= threshold:
+                                freshness = "🟡 AGING"
+                            else:
+                                freshness = "🔴 STALE"
+                                
+                            is_ltd = obs_row.get("is_pit_limited", False)
+                            actual_source = "Statistics Canada (PIT_LIMITED)" if is_ltd else "Statistics Canada"
+                            actual_freshness = f"{freshness} (PIT_LIMITED)" if is_ltd else freshness
+                            
+                            if days_diff <= threshold:
+                                if val is not None and pd.notna(val):
+                                    if abs(val) <= 25.0:
+                                        return val, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
+                                    else:
+                                        return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, "🔴 DATA VALIDATION FAILED"
+                                else:
+                                    return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
+
+        # AUD uses ABS API
+        if curr == "AUD":
+            metric_type = "CPI_YOY"
+            source = "ABS"
+            series_id = "3.10001.10.50.M"
+            
+            res_abs = get_abs_cpi_data()
+            if res_abs is not None:
+                df, _, is_live = res_abs
+                if df is not None and not df.empty:
+                    target_dt = pd.to_datetime(dt_str)
+                    df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
+                    if not df_filtered.empty:
+                        obs_row = df_filtered.iloc[-1]
+                        obs_date = obs_row["date"]
+                        val = obs_row["value"]
+                        
+                        days_diff = (target_dt - obs_date).days
+                        threshold = 90
+                        if days_diff <= threshold / 2:
+                            freshness = "🟢 FRESH"
+                        elif days_diff <= threshold:
+                            freshness = "🟡 AGING"
+                        else:
+                            freshness = "🔴 STALE"
+                            
+                        is_ltd = obs_row.get("is_pit_limited", False)
+                        actual_source = "ABS (PIT_LIMITED)" if is_ltd else "ABS"
+                        actual_freshness = f"{freshness} (PIT_LIMITED)" if is_ltd else freshness
+                        
+                        if days_diff <= threshold:
+                            if val is not None and pd.notna(val):
+                                if abs(val) <= 25.0:
+                                    return float(val), obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
+                                else:
+                                    return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, "🔴 DATA VALIDATION FAILED"
+                            else:
+                                return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
             
         if series_id and fred_key:
             df, _, is_live = get_fred_data(series_id, fred_key)
