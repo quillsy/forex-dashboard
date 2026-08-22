@@ -1374,7 +1374,7 @@ def get_ons_cpi_data():
                     raw_dt = pd.to_datetime(m["updateDate"]).tz_localize(None)
                     # 2015-10-12 is the global migration date
                     if raw_dt.strftime("%Y-%m-%d") == "2015-10-12":
-                        release_dt = obs_dt + timedelta(days=25)
+                        release_dt = obs_dt + pd.offsets.MonthEnd(0) + pd.Timedelta(days=25)
                         is_pit_ltd = True
                     else:
                         release_dt = raw_dt
@@ -1383,7 +1383,7 @@ def get_ons_cpi_data():
             
             # Fallback if release_date is missing
             if release_dt is None:
-                release_dt = obs_dt + timedelta(days=25)
+                release_dt = obs_dt + pd.offsets.MonthEnd(0) + pd.Timedelta(days=25)
                 is_pit_ltd = True
                 
             records.append({
