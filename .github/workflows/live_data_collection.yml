@@ -34,6 +34,7 @@ jobs:
           TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           FCS_API_KEY: ${{ secrets.FCS_API_KEY }}
+          ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
         run: |
           python run_data_collection.py
 

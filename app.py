@@ -208,21 +208,34 @@ st.markdown("""
 
 # ----------------- Load API Keys from Env & Secrets -----------------
 def load_api_key(name, alt_names=None):
+    """
+    Central, secure resolver for API keys across Streamlit Cloud (st.secrets),
+    local development (.env / os.environ), and GitHub Actions CI (env variables).
+    Never prints, logs, or leaks secrets into exception messages or tracebacks.
+    """
     candidates = [name]
     if alt_names:
         candidates.extend(alt_names)
         
     for key_name in candidates:
         val = os.getenv(key_name)
-        if val:
-            return val
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
         try:
-            val = st.secrets.get(key_name) or st.secrets.get(key_name.lower())
-            if val:
-                return val
+            if hasattr(st, "secrets"):
+                val = st.secrets.get(key_name) or st.secrets.get(key_name.lower())
+                if val and isinstance(val, str) and val.strip():
+                    return val.strip()
         except Exception:
             pass
     return None
+
+def get_estat_app_id():
+    """
+    Central resolver for Japan e-Stat Application ID (ESTAT_APP_ID).
+    Returns the sanitized secret string if configured, otherwise None.
+    """
+    return load_api_key("ESTAT_APP_ID")
 
 FRED_KEY = load_api_key("FRED_API_KEY")
 AV_KEY = load_api_key("ALPHA_VANTAGE_API_KEY")
@@ -237,7 +250,7 @@ TIINGO_KEY = load_api_key("TIINGO_API_KEY")
 BLS_KEY = load_api_key("BLS_API_KEY")
 APIFREAKS_KEY = load_api_key("APIFREAKS_API_KEY")
 EODHD_KEY = load_api_key("EODHD_API_KEY")
-ESTAT_APP_ID = load_api_key("ESTAT_APP_ID")
+ESTAT_APP_ID = get_estat_app_id()
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {
@@ -4935,25 +4948,31 @@ else:
         base_score = compute_currency_score(base_curr, FRED_KEY)
         quote_score = compute_currency_score(quote_curr, FRED_KEY)
         
-        raw_diff = quote_score - base_score
-        signal_value = raw_diff / 2.0
-        signal_value = max(-50.0, min(50.0, signal_value))
-        
-        if signal_value >= 25.0:
-            sig = "SB"
-            badge = "STRONG BUY"
-        elif 10.0 <= signal_value < 25.0:
-            sig = "MB"
-            badge = "MID BUY"
-        elif -10.0 < signal_value < 10.0:
-            sig = "NT"
-            badge = "NEUTRAL"
-        elif -25.0 < signal_value <= -10.0:
-            sig = "MS"
-            badge = "MID SELL"
+        if base_score is None or quote_score is None:
+            raw_diff = None
+            signal_value = None
+            sig = "INSUFFICIENT DATA"
+            badge = "INSUFFICIENT FUNDAMENTAL DATA"
         else:
-            sig = "SS"
-            badge = "STRONG SELL"
+            raw_diff = quote_score - base_score
+            signal_value = raw_diff / 2.0
+            signal_value = max(-50.0, min(50.0, signal_value))
+            
+            if signal_value >= 25.0:
+                sig = "SB"
+                badge = "STRONG BUY"
+            elif 10.0 <= signal_value < 25.0:
+                sig = "MB"
+                badge = "MID BUY"
+            elif -10.0 < signal_value < 10.0:
+                sig = "NT"
+                badge = "NEUTRAL"
+            elif -25.0 < signal_value <= -10.0:
+                sig = "MS"
+                badge = "MID SELL"
+            else:
+                sig = "SS"
+                badge = "STRONG SELL"
             
         itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
         latest_close = itick_data["close"] if itick_data else 0.0
