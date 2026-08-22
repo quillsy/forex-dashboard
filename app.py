@@ -251,6 +251,7 @@ BLS_KEY = load_api_key("BLS_API_KEY")
 APIFREAKS_KEY = load_api_key("APIFREAKS_API_KEY")
 EODHD_KEY = load_api_key("EODHD_API_KEY")
 ESTAT_APP_ID = get_estat_app_id()
+OCP_APIM_KEY = load_api_key("OCP_APIM_SUBSCRIPTION_KEY", alt_names=["STATSNZ_API_KEY", "STATS_NZ_API_KEY", "OCP_APIM_KEY"])
 
 # ----------------- Constants & Configuration -----------------
 CURRENCIES = {

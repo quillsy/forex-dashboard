@@ -35,6 +35,7 @@ jobs:
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
           FCS_API_KEY: ${{ secrets.FCS_API_KEY }}
           ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
+          OCP_APIM_SUBSCRIPTION_KEY: ${{ secrets.OCP_APIM_SUBSCRIPTION_KEY }}
         run: |
           python run_data_collection.py
 
