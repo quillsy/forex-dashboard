@@ -4053,10 +4053,16 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
     
     # Enforce minimum data coverage of 50.0%
     if scores.get("_completeness", 100.0) < 50.0:
+        diagnostic_partial_core = core_score
         core_score = None
         final_score = None
         trend_score = 0.0
         surprise_score = 0.0
+        scores["_core_status"] = "INSUFFICIENT DATA"
+        scores["_diagnostic_partial_score"] = diagnostic_partial_core
+    else:
+        scores["_core_status"] = "VALID"
+        scores["_diagnostic_partial_score"] = core_score
     
     # Store context scores inside the returned details dict
     scores["_trend_score"] = trend_score
@@ -4080,10 +4086,12 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
 def compute_currency_score_historical(curr: str, target_date) -> float:
     try:
         final_score, _, _, _, _ = compute_currency_professional_score_and_regime(curr, target_date)
+        if final_score is None:
+            return None
         mapped_score = (final_score + 100.0) / 2.0
         return float(mapped_score)
     except Exception:
-        return 50.0
+        return None
 
 
 def load_backtest_decisions():
@@ -4427,10 +4435,12 @@ def get_country_rate(country_code, fred_key):
 def compute_currency_score(curr, fred_key):
     try:
         final_score, _, _, _, _ = compute_currency_professional_score_and_regime(curr, None)
+        if final_score is None:
+            return None
         mapped_score = (final_score + 100.0) / 2.0
         return float(mapped_score)
     except Exception:
-        return 50.0
+        return None
 
 
 COT_SYMBOLS = {
@@ -4570,7 +4580,14 @@ def get_latest_cot_percentile(curr, target_date=None):
 # ----------------- UI RENDERERS -----------------
 def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_total_score, sig):
     """Renders the Divergence Trading Bias banner with dynamic G8 quantitative signaling."""
-    if sig == "SB":
+    if sig == "INSUFFICIENT DATA" or signal_val is None:
+        bg_color = "rgba(132, 142, 156, 0.05)"
+        border_color = "#444c56"
+        text_color = "#8b949e"
+        title = f"INSUFFICIENT FUNDAMENTAL DATA ({base_curr}/{quote_curr})"
+        desc = f"Mindestabdeckung von 50.0% für mindestens eine der Währungen ({base_curr} oder {quote_curr}) nicht erreicht. Pair Divergence Signal blockiert."
+        badge = "INSUFFICIENT DATA"
+    elif sig == "SB":
         bg_color = "rgba(16, 185, 129, 0.08)"
         border_color = "#10b981"
         text_color = "#10b981"
@@ -4613,6 +4630,8 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
         desc = "Unzureichende Daten zur Bestimmung des Biases."
         badge = "ERR"
 
+    sig_val_str = f"{signal_val:+.1f}" if signal_val is not None else "N/A"
+
     html_content = f"""
     <div style="
         background-color: {bg_color};
@@ -4628,7 +4647,7 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
                 text-transform: uppercase;
                 letter-spacing: 1.2px;
                 color: #8b949e;
-            ">{base_curr}/{quote_curr} Fundamental-Signal: {signal_val:+.1f}</span>
+            ">{base_curr}/{quote_curr} Fundamental-Signal: {sig_val_str}</span>
             <span style="
                 background-color: {border_color}22;
                 color: {text_color};
@@ -4959,8 +4978,17 @@ else:
 
 # ----------------- 6. TABS MODULES -----------------
 def get_pair_signal_and_badge(base, quote):
-    b_score = compute_currency_score(base, FRED_KEY)
-    q_score = compute_currency_score(quote, FRED_KEY)
+    b_f_score, _, _, _, b_details = compute_currency_professional_score_and_regime(base)
+    q_f_score, _, _, _, q_details = compute_currency_professional_score_and_regime(quote)
+    
+    b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
+    q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
+    
+    if b_f_score is None or q_f_score is None or b_comp < 50.0 or q_comp < 50.0:
+        return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
+        
+    b_score = (b_f_score + 100.0) / 2.0
+    q_score = (q_f_score + 100.0) / 2.0
     r_diff = b_score - q_score
     sig_val = r_diff / 2.0
     sig_val = max(-50.0, min(50.0, sig_val))
@@ -4986,7 +5014,7 @@ def get_pair_signal_and_badge(base, quote):
         b = "STRONG SELL"
         c = "#ef4444"
         
-    return b, c, sig_val
+    return b, c, sig_val, s
 
 def get_historical_indicator_values(series_id, dt_str, fred_key):
     try:
@@ -5849,6 +5877,8 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "schema_version": "2.0",
         "total_score": float(total_score) if total_score is not None else None,
         "core_score": float(core_score) if core_score is not None else None,
+        "core_status": "INSUFFICIENT DATA" if (details and details.get("_completeness", 100.0) < 50.0) else "VALID",
+        "diagnostic_partial_score": float(details.get("_diagnostic_partial_score", 0.0)) if (details and "_diagnostic_partial_score" in details and details["_diagnostic_partial_score"] is not None) else None,
         "correction_score": float(corr_score) if corr_score is not None else None,
         "trend_score": float(details.get("_trend_score", 0.0)) if details else 0.0,
         "surprise_score": float(details.get("_surprise_score", 0.0)) if details else 0.0,
@@ -6465,10 +6495,10 @@ with tab10:
         if b_score is None or q_score is None:
             print(f"[DEBUG] Tab 10 import: base={base_sel} score={b_score}, quote={quote_sel} score={q_score}")
             
-        badge_name, badge_color, sig_val = get_pair_signal_and_badge(base_sel, quote_sel)
+        badge_name, badge_color, sig_val, s_code = get_pair_signal_and_badge(base_sel, quote_sel)
         
         st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
-        render_bias_box(sig_val, base_sel, quote_sel, b_score, q_score, "NT")
+        render_bias_box(sig_val, base_sel, quote_sel, b_score, q_score, s_code)
         
         col_pb1, col_pb2 = st.columns(2)
         with col_pb1:
