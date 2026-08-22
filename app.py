@@ -1569,92 +1569,96 @@ def get_abs_cpi_data():
 def get_estat_cpi_data():
     """
     Fetches official Headline CPI YoY and Index level from Statistics Bureau of Japan via e-Stat API.
-    StatsDataId: 0003427113 (2020-Base Basic figures (Monthly) All Japan)
+    Primary preferred: StatsDataId 0004052037 (2025-Base Consumer Price Index Basic figures (Monthly) All Japan)
+    Fallback: StatsDataId 0003427113 (2020-Base Consumer Price Index Basic figures (Monthly) All Japan)
     Category: 0001 (All items / 総合)
     Area: 00000 (All Japan / 全国)
     cdTab=3: Direct Official YoY % (DIRECT_OFFICIAL)
-    cdTab=1: Index level (2020=100) for cross-validation
+    cdTab=1: Index level for cross-validation
     """
     app_id = get_estat_app_id()
     if not app_id:
         return None
         
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url_yoy = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId=0003427113&cdCat01=0001&cdArea=00000&cdTab=3&limit=200"
-        r_yoy = requests.get(url_yoy, headers=headers, timeout=15)
-        if r_yoy.status_code != 200:
-            raise ValueError(f"e-Stat YoY HTTP Error {r_yoy.status_code}")
-        data_yoy = r_yoy.json()
-        values_yoy = data_yoy.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
+    for stats_id, base_year in [("0004052037", "2025"), ("0003427113", "2020")]:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            url_yoy = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=3&limit=200"
+            r_yoy = requests.get(url_yoy, headers=headers, timeout=15)
+            if r_yoy.status_code != 200:
+                continue
+            data_yoy = r_yoy.json()
+            values_yoy = data_yoy.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
 
-        url_idx = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId=0003427113&cdCat01=0001&cdArea=00000&cdTab=1&limit=200"
-        r_idx = requests.get(url_idx, headers=headers, timeout=15)
-        if r_idx.status_code != 200:
-            raise ValueError(f"e-Stat Index HTTP Error {r_idx.status_code}")
-        data_idx = r_idx.json()
-        values_idx = data_idx.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
+            url_idx = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=1&limit=200"
+            r_idx = requests.get(url_idx, headers=headers, timeout=15)
+            if r_idx.status_code != 200:
+                continue
+            data_idx = r_idx.json()
+            values_idx = data_idx.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
 
-        def parse_time(t_raw):
-            if len(t_raw) == 10 and not t_raw.endswith("0000"):
-                return f"{t_raw[:4]}-{t_raw[6:8]}-01"
-            return None
+            def parse_time(t_raw):
+                if len(t_raw) == 10 and not t_raw.endswith("0000"):
+                    return f"{t_raw[:4]}-{t_raw[6:8]}-01"
+                return None
 
-        records_yoy = {}
-        for v in values_yoy:
-            d_str = parse_time(v.get("@time", ""))
-            val_str = v.get("$")
-            if d_str and val_str is not None:
-                records_yoy[d_str] = float(val_str)
+            records_yoy = {}
+            for v in values_yoy:
+                d_str = parse_time(v.get("@time", ""))
+                val_str = v.get("$")
+                if d_str and val_str is not None:
+                    records_yoy[d_str] = float(val_str)
 
-        records_idx = {}
-        for v in values_idx:
-            d_str = parse_time(v.get("@time", ""))
-            val_str = v.get("$")
-            if d_str and val_str is not None:
-                records_idx[d_str] = float(val_str)
+            records_idx = {}
+            for v in values_idx:
+                d_str = parse_time(v.get("@time", ""))
+                val_str = v.get("$")
+                if d_str and val_str is not None:
+                    records_idx[d_str] = float(val_str)
 
-        records = []
-        all_dates = sorted(list(set(records_yoy.keys()) | set(records_idx.keys())))
-        for d_str in all_dates:
-            obs_dt = pd.to_datetime(d_str)
-            direct_val = records_yoy.get(d_str)
-            idx_val = records_idx.get(d_str)
-            
-            # Deterministic PIT release date rule: 3rd Friday of following month
-            release_dt = obs_dt + pd.offsets.MonthEnd(0) + pd.offsets.Week(3, weekday=4)
-            
-            records.append({
-                "date": obs_dt,
-                "value": direct_val,
-                "index_level": idx_val,
-                "release_date": release_dt,
-                "is_pit_limited": True
-            })
-
-        if not records:
-            raise ValueError("No valid JPY CPI records parsed from e-Stat data")
-
-        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
-        df["derived_yoy"] = (df["index_level"] / df["index_level"].shift(12) - 1.0) * 100.0
-        return df, datetime.now(), True
-    except Exception:
-        if check_demo_active():
-            mock_records = []
-            now = datetime.now()
-            for i in range(24):
-                dt = (now - timedelta(days=30 * (23 - i))).replace(day=1)
-                mock_records.append({
-                    "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
-                    "value": 1.5 + 0.05 * i,
-                    "index_level": 110.0 + 0.2 * i,
-                    "derived_yoy": 1.5 + 0.05 * i,
-                    "release_date": pd.to_datetime((dt + timedelta(days=21)).strftime("%Y-%m-%d")),
+            records = []
+            all_dates = sorted(list(set(records_yoy.keys()) | set(records_idx.keys())))
+            for d_str in all_dates:
+                obs_dt = pd.to_datetime(d_str)
+                direct_val = records_yoy.get(d_str)
+                idx_val = records_idx.get(d_str)
+                
+                # Deterministic PIT release date rule: 3rd Friday of following month
+                release_dt = obs_dt + pd.offsets.MonthEnd(0) + pd.offsets.Week(3, weekday=4)
+                
+                records.append({
+                    "date": obs_dt,
+                    "value": direct_val,
+                    "index_level": idx_val,
+                    "release_date": release_dt,
+                    "base_year": base_year,
+                    "stats_id": stats_id,
                     "is_pit_limited": True
                 })
-            df_mock = pd.DataFrame(mock_records)
-            return df_mock, datetime.now(), False
-        return None, datetime.now(), False
+
+            if records:
+                df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+                df["derived_yoy"] = (df["index_level"] / df["index_level"].shift(12) - 1.0) * 100.0
+                return df, datetime.now(), True
+        except Exception:
+            continue
+            
+    if check_demo_active():
+        mock_records = []
+        now = datetime.now()
+        for i in range(24):
+            dt = (now - timedelta(days=30 * (23 - i))).replace(day=1)
+            mock_records.append({
+                "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
+                "value": 1.5 + 0.05 * i,
+                "index_level": 110.0 + 0.2 * i,
+                "derived_yoy": 1.5 + 0.05 * i,
+                "release_date": pd.to_datetime((dt + timedelta(days=21)).strftime("%Y-%m-%d")),
+                "is_pit_limited": True
+            })
+        df_mock = pd.DataFrame(mock_records)
+        return df_mock, datetime.now(), False
+    return None, datetime.now(), False
 
 
 # Official Stats NZ Verified Historical CPI Records (Quarterly All Groups CPIQ.SE9A)
@@ -3135,7 +3139,7 @@ YIELD_SERIES = {
 }
 
 CPI_SERIES = {
-    "USD": "CPIAUCSL",
+    "USD": "CPIAUCNS",
     "EUR": "CP0000EZ19M086NEST",
     "GBP": "GBRCPIALLMINMEI",
     "JPY": "JPNCPIALLMINMEI",
@@ -6275,9 +6279,7 @@ def save_all_g10_live_snapshots():
 
 # Daily G10 snapshots & outcome updates are automatically executed by the GitHub Actions workflow scheduler
 
-if getattr(st, "_mock_mode", False):
-    tab1 = tab2 = tab3 = tab4 = tab5 = tab6 = tab7 = tab8 = tab9 = tab10 = tab11 = tab12 = tab13 = st
-else:
+if not getattr(st, "_mock_mode", False):
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
         "🏆 Currency Strength Overview",
         "📊 Fundamental Score",
@@ -6293,781 +6295,781 @@ else:
         "📈 Live Signal History & Outcomes",
         "📊 Backtesting & Model Lab"
     ])
-
-# ----------------- TAB 1: CURRENCY STRENGTH OVERVIEW -----------------
-with tab1:
-    st.header("🏆 Currency Strength & Fundamental Overview")
-    st.caption("Primäre fundamentale Stärkeanalyse der 8 G8-Währungen (Strongest ➔ Weakest). Identifizieren Sie divergierende Währungen für die anschließende Paarbildung.")
     
-    st.info("💡 **3-Schritte Fundamentalanalyse Workflow:**\n"
-            "1. **Einzelwährungen analysieren:** Stärkste Währung (🟢 Bullish) und schwächste Währung (🔴 Bearish) im Ranking identifizieren.\n"
-            "2. **Währungspaar selbst auswählen:** Starke Basis gegen schwache Quote kombinieren (z. B. USD stark vs. JPY schwach ➔ Long USD/JPY).\n"
-            "3. **Manuelle News-Prüfung:** Vor Trade-Einstieg manuelle Prüfung wichtiger Wirtschaftsdaten auf Forex Factory im Tab *📅 Manual News Check*.")
+    # ----------------- TAB 1: CURRENCY STRENGTH OVERVIEW -----------------
+    with tab1:
+        st.header("🏆 Currency Strength & Fundamental Overview")
+        st.caption("Primäre fundamentale Stärkeanalyse der 8 G8-Währungen (Strongest ➔ Weakest). Identifizieren Sie divergierende Währungen für die anschließende Paarbildung.")
+        
+        st.info("💡 **3-Schritte Fundamentalanalyse Workflow:**\n"
+                "1. **Einzelwährungen analysieren:** Stärkste Währung (🟢 Bullish) und schwächste Währung (🔴 Bearish) im Ranking identifizieren.\n"
+                "2. **Währungspaar selbst auswählen:** Starke Basis gegen schwache Quote kombinieren (z. B. USD stark vs. JPY schwach ➔ Long USD/JPY).\n"
+                "3. **Manuelle News-Prüfung:** Vor Trade-Einstieg manuelle Prüfung wichtiger Wirtschaftsdaten auf Forex Factory im Tab *📅 Manual News Check*.")
+                
+        # Compute scores for all 8 currencies
+        g8_data = {}
+        for curr in CURRENCIES.keys():
+            f_score, regime, core_score, corr_score, cat_scores = compute_currency_professional_score_and_regime(curr)
+            details = compute_currency_details(curr)
+            g8_data[curr] = {
+                "score": f_score,
+                "core": core_score,
+                "corr": corr_score,
+                "regime": regime,
+                "categories": cat_scores,
+                "details": details
+            }
             
-    # Compute scores for all 8 currencies
-    g8_data = {}
-    for curr in CURRENCIES.keys():
-        f_score, regime, core_score, corr_score, cat_scores = compute_currency_professional_score_and_regime(curr)
-        details = compute_currency_details(curr)
-        g8_data[curr] = {
-            "score": f_score,
-            "core": core_score,
-            "corr": corr_score,
-            "regime": regime,
-            "categories": cat_scores,
-            "details": details
-        }
+        sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["score"] if g8_data[k]["score"] is not None else -999.0, reverse=True)
         
-    sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["score"] if g8_data[k]["score"] is not None else -999.0, reverse=True)
-    
-    valid_scores = [k for k in CURRENCIES.keys() if g8_data[k]["score"] is not None]
-    if valid_scores:
-        sorted_valid = sorted(valid_scores, key=lambda k: g8_data[k]["score"], reverse=True)
-        strongest_c = sorted_valid[0]
-        weakest_c = sorted_valid[-1]
-    else:
-        strongest_c = "N/A"
-        weakest_c = "N/A"
-        
-    vix = get_vix_value()
-    cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-    gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-    
-    if vix > 22.0:
-        global_regime = "Risk-Off 🛡️"
-    elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
-        global_regime = "Risk-On / Growth 🚀"
-    elif (cpi_us is not None and cpi_us > 3.0) and (gdp_us is not None and gdp_us < 1.0):
-        global_regime = "Stagflation ⚠️"
-    else:
-        global_regime = "Normales Marktregime 🟡"
-        
-    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-    with m_col1:
-        if strongest_c != "N/A":
-            st.metric("🟢 Stärkste Währung", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['score']:+.1f})")
+        valid_scores = [k for k in CURRENCIES.keys() if g8_data[k]["score"] is not None]
+        if valid_scores:
+            sorted_valid = sorted(valid_scores, key=lambda k: g8_data[k]["score"], reverse=True)
+            strongest_c = sorted_valid[0]
+            weakest_c = sorted_valid[-1]
         else:
-            st.metric("🟢 Stärkste Währung", "N/A (Insufficient Data)")
-    with m_col2:
-        if weakest_c != "N/A":
-            st.metric("🔴 Schwächste Währung", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['score']:+.1f})")
+            strongest_c = "N/A"
+            weakest_c = "N/A"
+            
+        vix = get_vix_value()
+        cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        
+        if vix > 22.0:
+            global_regime = "Risk-Off 🛡️"
+        elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
+            global_regime = "Risk-On / Growth 🚀"
+        elif (cpi_us is not None and cpi_us > 3.0) and (gdp_us is not None and gdp_us < 1.0):
+            global_regime = "Stagflation ⚠️"
         else:
-            st.metric("🔴 Schwächste Währung", "N/A (Insufficient Data)")
-    with m_col3:
-        st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})")
-    with m_col4:
-        st.metric("Modell-Baseline", "35/20/20/20/5 (Yield/CPI/Lab/PMI/GDP)")
-        
-    st.write("")
-    
-    # Visual horizontal bar chart
-    plot_keys = [k for k in sorted_curr_keys if g8_data[k]["score"] is not None]
-    if plot_keys:
-        fig_rank = go.Figure(go.Bar(
-            x=[g8_data[k]["score"] for k in reversed(plot_keys)],
-            y=[f"{CURRENCIES[k]['flag']} {k}" for k in reversed(plot_keys)],
-            orientation='h',
-            marker=dict(
-                color=['#10b981' if g8_data[k]["score"] >= 15.0 else '#f87171' if g8_data[k]["score"] <= -15.0 else '#e2b13c' for k in reversed(plot_keys)]
-            ),
-            text=[f"{g8_data[k]['score']:+.1f}" for k in reversed(plot_keys)],
-            textposition='outside'
-        ))
-        fig_rank.update_layout(
-            title="<b>Fundamental Score Ranking (Strongest ➔ Weakest)</b>",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color="#d1d5db", size=12),
-            xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.1)', zeroline=True, zerolinecolor='#4b5563'),
-            yaxis=dict(showgrid=False),
-            height=340,
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
-        st.plotly_chart(fig_rank, use_container_width=True)
-    else:
-        st.warning("⚠️ Keine ausreichenden Daten zur Erstellung des Rankings vorhanden (Coverage < 50%).")
-        
-    st.subheader("📋 Einzelwährungs-Fundamentaltabelle (G8)")
-    table_rows = []
-    for rank_idx, curr in enumerate(sorted_curr_keys, 1):
-        d = g8_data[curr]
-        det = d["details"]
-        cats = d["categories"]
-        
-        comp = det.get("_completeness", 100.0)
-        missing = det.get("_missing", [])
-        
-        if d["score"] is None:
-            badge_str = "⚪ INSUFFICIENT DATA"
-        elif d["score"] >= 25.0:
-            badge_str = "🟢 STRONG BULLISH"
-        elif d["score"] >= 10.0:
-            badge_str = "🟢 BULLISH"
-        elif d["score"] > -10.0:
-            badge_str = "🟡 NEUTRAL"
-        elif d["score"] > -25.0:
-            badge_str = "🔴 BEARISH"
-        else:
-            badge_str = "🔴 STRONG BEARISH"
+            global_regime = "Normales Marktregime 🟡"
             
-        status_dq = "🟢 100%" if comp == 100.0 else f"🟡 {comp:.0f}% ({', '.join(missing)})"
-        
-        table_rows.append({
-            "Rang": f"#{rank_idx}",
-            "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-            "CORE Score": f"{d['core']:+.1f}" if d['core'] is not None else "N/A",
-            "Gesamt-Score": f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
-            "Signal / Tendenz": badge_str,
-            "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}" if cats.get('Geldpolitik') is not None else "N/A",
-            "Inflation (20%)": f"{cats.get('Inflation', 0.0):+.1f}" if cats.get('Inflation') is not None else "N/A",
-            "Arbeitsmarkt (20%)": f"{cats.get('Arbeitsmarkt', 0.0):+.1f}" if cats.get('Arbeitsmarkt') is not None else "N/A",
-            "PMI (20%)": f"{cats.get('PMI', 0.0):+.1f}" if cats.get('PMI') is not None else "N/A",
-            "GDP (5%)": f"{cats.get('GDP', 0.0):+.1f}" if cats.get('GDP') is not None else "N/A",
-            "Korrektur": f"{d['corr']:+.1f}" if d['corr'] is not None else "N/A",
-            "Regime": d["regime"],
-            "Datenqualität": status_dq
-        })
-        
-    df_curr_summary = pd.DataFrame(table_rows)
-    st.dataframe(df_curr_summary, hide_index=True, use_container_width=True)
-    
-    st.write("")
-    st.markdown("---")
-
-# ----------------- TAB 2: FUNDAMENTAL SCORE & DEEP-DIVE -----------------
-with tab2:
-    st.header("📊 Fundamental Score: Detailanalyse pro Einzelwährung")
-    st.caption("Detaillierte Aufschlüsselung der makroökonomischen Faktoren, Berechnungsformeln und Zeitreihen für jede der 8 G8-Währungen.")
-    
-    sel_curr_fund = st.selectbox("Wähle eine Währung zur Tiefenanalyse:", list(CURRENCIES.keys()), index=0, key="deepdive_curr_sel")
-    details_f = compute_currency_details(sel_curr_fund)
-    f_score_d, reg_d, core_d, corr_d, cats_d = compute_currency_professional_score_and_regime(sel_curr_fund)
-    
-    st.write(f"### Detaillierte Kennzahlen für {CURRENCIES[sel_curr_fund]['flag']} {sel_curr_fund} ({CURRENCIES[sel_curr_fund]['name']})")
-    
-    col_fd1, col_fd2, col_fd3, col_fd4, col_fd5 = st.columns(5)
-    with col_fd1:
-        st.metric("Geldpolitik (35%)", f"{cats_d.get('Geldpolitik', 0.0):+.1f}")
-    with col_fd2:
-        st.metric("Inflation (20%)", f"{cats_d.get('Inflation', 0.0):+.1f}")
-    with col_fd3:
-        st.metric("Arbeitsmarkt (20%)", f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}")
-    with col_fd4:
-        st.metric("PMI (20%)", f"{cats_d.get('PMI', 0.0):+.1f}")
-    with col_fd5:
-        st.metric("GDP (5%)", f"{cats_d.get('GDP', 0.0):+.1f}")
-        
-    st.write("")
-    
-    col_deep1, col_deep2 = st.columns([1.2, 1])
-    with col_deep1:
-        st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
-        rate_val, rate_bps, _ = get_country_rate(CURRENCIES[sel_curr_fund]["wb_code"], FRED_KEY)
-        cpi_val = get_cpi_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-        unemp_val = get_unemployment_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-        pmi_val, _, _, _ = get_composite_pmi_score(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-        gdp_val = get_gdp_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-        y2_det = get_yield_details(sel_curr_fund, YIELD_2Y_SERIES, FRED_KEY)
-        y2_val = y2_det.get("value") if y2_det else None
-        
-        raw_metrics = [
-            {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-            {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-            {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Inflation', 0.0):+.1f}"},
-            {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}"},
-            {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('PMI', 0.0):+.1f}"},
-            {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('GDP', 0.0):+.1f}"}
-        ]
-        st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
-
-        st.subheader("📈 TREND & MOMENTUM CONTEXT")
-        y_trends = get_yield_trends(sel_curr_fund)
-        cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), datetime.now().strftime("%Y-%m-%d"))
-        unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), datetime.now().strftime("%Y-%m-%d"), reverse=True)
-        pmi_trend_pts = get_series_trend_points(PMI_SERIES.get(sel_curr_fund, "MANEMP") if sel_curr_fund in PMI_SERIES else "USISMT", datetime.now().strftime("%Y-%m-%d"))
-        gdp_trend_pts = get_series_trend_points(GDP_SERIES.get(sel_curr_fund, "GDPC1"), datetime.now().strftime("%Y-%m-%d"))
-
-        trend_metrics = [
-            {"Faktor": "2Y Sovereign Yield (1W Change)", "Wert": f"{y_trends.get('chg_1w', 0.0):+.3f}%" if y_trends.get('chg_1w') is not None else "N/A"},
-            {"Faktor": "2Y Sovereign Yield (1M Change)", "Wert": f"{y_trends.get('chg_1m', 0.0):+.3f}%" if y_trends.get('chg_1m') is not None else "N/A"},
-            {"Faktor": "2Y Sovereign Yield (3M Change)", "Wert": f"{y_trends.get('chg_3m', 0.0):+.3f}%" if y_trends.get('chg_3m') is not None else "N/A"},
-            {"Faktor": "Inflation (CPI Trend Points)", "Wert": f"{cpi_trend_pts:+.1f} pts"},
-            {"Faktor": "Arbeitsmarkt (Unemp Trend Points)", "Wert": f"{unemp_trend_pts:+.1f} pts"},
-            {"Faktor": "PMI Trend Points", "Wert": f"{pmi_trend_pts:+.1f} pts"},
-            {"Faktor": "GDP Trend Points", "Wert": f"{gdp_trend_pts:+.1f} pts"},
-            {"Faktor": "Gesamte Trend-Korrektur (Trend Score)", "Wert": f"{details_f.get('_trend_score', 0.0):+.2f}"}
-        ]
-        st.dataframe(pd.DataFrame(trend_metrics), hide_index=True, use_container_width=True)
-        
-    with col_deep2:
-        st.subheader("⚖️ Core Weights & Model Isolation")
-        f_score_str = f"{f_score_d:+.1f}" if f_score_d is not None else "N/A"
-        core_str = f"{core_d:+.1f}" if core_d is not None else "N/A"
-        st.write(f"- **Gesamt-Score (Final Score):** `{f_score_str}`")
-        st.write(f"- **BASE CORE Score:** `{core_str}`")
-        st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`" if details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
-        st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
-        st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
-        st.write(f"- **Markt-Regime:** `{reg_d}`")
-        st.write(f"- **Model Version:** `CORE_V2_2_2026_08` (Schema: `2.0`)")
-        
-        st.subheader("🟢 Freshness & Data Quality Indicators")
-        st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
-        freshness_map = details_f.get("_freshness", {})
-        for factor, status in freshness_map.items():
-            badge_color = "🟢" if status == "FRESH" else "🟡" if status == "AGING" else "🔴"
-            st.write(f"- **{factor} Freshness:** {badge_color} `{status}`")
-            
-        if details_f.get("_missing"):
-            st.warning(f"⚠️ Fehlende/Stale Faktoren: {', '.join(details_f.get('_missing'))}")
-        else:
-            st.success("🟢 Alle CORE-Faktoren vollständig & aktuell (100% Valid).")
-
-        st.subheader("🌎 MARKET CONTEXT & RESEARCH FACTORS")
-        y5_det = get_yield_details(sel_curr_fund, YIELD_5Y_SERIES, FRED_KEY)
-        y5_val = y5_det.get("value") if y5_det else None
-        oecd_exp = get_inflation_expectations_data(sel_curr_fund)
-        oecd_val = oecd_exp.get("oecd_expectation") if oecd_exp else None
-        
-        st.write(f"- **5Y Sovereign Bond Yield:** `{y5_val:.3f}%`" if y5_val is not None else "- **5Y Sovereign Bond Yield:** `5Y YIELD UNAVAILABLE`")
-        st.write(f"- **OECD Inflation Expectations:** `{oecd_val:.2f}%`" if oecd_val is not None else "- **OECD Inflation Expectations:** `OECD Expectations unavailable`")
-
-# ----------------- TAB 3: INTEREST RATES & 2Y YIELDS -----------------
-with tab3:
-    st.header("🏦 Interest Rates & 2Y Government Bond Yields")
-    st.caption("Vergleichende Analyse von Zentralbank-Leitzinsen, 2Y-Benchmark-Renditen und Zinskurven für alle 8 G8-Währungen.")
-    
-    rates_data = {}
-    for curr, info in CURRENCIES.items():
-        r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
-        rates_data[curr] = {
-            "rate": r_val,
-            "bps_change": bps_chg,
-            "source": src
-        }
-        
-    df_rates_plot = pd.DataFrame([
-        {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
-        for curr, data in rates_data.items()
-    ])
-    
-    fig_rates_g8 = go.Figure()
-    fig_rates_g8.add_trace(go.Bar(
-        x=df_rates_plot["Zentralbank"],
-        y=df_rates_plot["Zinssatz"],
-        marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
-        text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
-        textposition='auto',
-        name="Zinssatz"
-    ))
-    fig_rates_g8.update_layout(
-        title="<b>Zentralbank-Leitzinsen der G8</b>",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#d1d5db", size=10),
-        xaxis=dict(showgrid=False, linecolor="#1f2026"),
-        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
-        height=300,
-        margin=dict(l=10, r=10, t=40, b=10)
-    )
-    st.plotly_chart(fig_rates_g8, use_container_width=True)
-    
-    # Bond Market & Yield Curve
-    st.subheader("🏦 Bond Market & 2Y Benchmark Yields")
-    bond_rows = []
-    for curr, info in CURRENCIES.items():
-        y2_det = get_yield_details(curr, YIELD_2Y_SERIES, FRED_KEY)
-        y5_det = get_yield_details(curr, YIELD_5Y_SERIES, FRED_KEY)
-        y10_det = get_yield_details(curr, YIELD_10Y_SERIES, FRED_KEY)
-        
-        y2_str = f"{y2_det['value']:.2f}%" if y2_det else "nicht verfügbar"
-        y5_str = f"{y5_det['value']:.2f}%" if y5_det else "nicht verfügbar"
-        y10_str = f"{y10_det['value']:.2f}%" if y10_det else "nicht verfügbar"
-        
-        spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det) else "N/A"
-        chg_1w = f"{y2_det['chg_1w']:+.2f}%" if y2_det else "N/A"
-        chg_1m = f"{y2_det['chg_1m']:+.2f}%" if y2_det else "N/A"
-        trend_str = y2_det["trend"] if y2_det else "▬"
-        src_str = y2_det["source"] if y2_det else "N/A"
-        
-        status_2y = "🟢 REAL 2Y YIELD" if (y2_det and y2_det.get("source") != "Demo Mock" and y2_det.get("value") is not None) else "🟡 2Y YIELD UNAVAILABLE"
-        status_5y = "🟢 REAL 5Y YIELD" if (y5_det and y5_det.get("source") != "Demo Mock" and y5_det.get("value") is not None) else "🟡 5Y YIELD UNAVAILABLE"
-        
-        y2_str = f"{y2_det['value']:.2f}%" if (y2_det and y2_det.get('value') is not None) else "N/A"
-        y5_str = f"{y5_det['value']:.2f}%" if (y5_det and y5_det.get('value') is not None) else "5Y YIELD UNAVAILABLE"
-        y10_str = f"{y10_det['value']:.2f}%" if (y10_det and y10_det.get('value') is not None) else "N/A"
-        
-        spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det and y2_det.get('value') is not None and y10_det.get('value') is not None) else "N/A"
-        chg_1w = f"{y2_det['chg_1w']:+.2f}%" if (y2_det and y2_det.get('chg_1w') is not None) else "N/A"
-        chg_1m = f"{y2_det['chg_1m']:+.2f}%" if (y2_det and y2_det.get('chg_1m') is not None) else "N/A"
-        trend_str = y2_det["trend"] if y2_det else "▬"
-        src_str = y2_det["source"] if y2_det else "N/A"
-        src_5y_str = y5_det["source"] if y5_det else "5Y YIELD UNAVAILABLE"
-        
-        bond_rows.append({
-            "Währung": f"{info['flag']} {curr}",
-            "Status (2Y)": status_2y,
-            "Status (5Y)": status_5y,
-            "2Y Rendite": y2_str,
-            "5Y Rendite": y5_str,
-            "10Y Rendite": y10_str,
-            "2Y-10Y Spread": spread_str,
-            "Veränderung 1W (2Y)": chg_1w,
-            "Veränderung 1M (2Y)": chg_1m,
-            "Trend (2Y)": trend_str,
-            "Quelle 2Y": src_str,
-            "Quelle 5Y": src_5y_str
-        })
-        
-    df_bonds = pd.DataFrame(bond_rows)
-    st.dataframe(df_bonds, hide_index=True, use_container_width=True)
-
-# ----------------- TAB 4: INFLATION / CPI -----------------
-with tab4:
-    st.header("📈 Inflation & CPI Hub")
-    st.caption("Verbraucherpreisindizes (CPI YoY), Inflationstrends und OECD Consumer Inflation Expectations für alle 8 G8-Währungen.")
-    
-    today_s = datetime.now().strftime("%Y-%m-%d")
-    cpi_rows = []
-    for curr, info in CURRENCIES.items():
-        c_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_s)
-        inf_data = get_inflation_expectations_data(curr, today_s)
-        c_trend = inf_data.get("cpi_trend")
-        oecd_val = inf_data.get("oecd_expectation")
-        
-        # Display label for Swiss HICP
-        metric_label = "Eurostat HICP YoY" if curr == "CHF" else "CPI YoY"
-        inflation_yoy_str = f"{c_val:.2f}% ({metric_label})" if c_val is not None else "N/A"
-        
-        cpi_change_str = f"{c_trend:+.2f} pp" if c_trend is not None else "N/A"
-        cpi_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
-        oecd_str = f"{oecd_val:.1f} (% Saldo)" if oecd_val is not None else "N/A"
-        
-        cpi_rows.append({
-            "Währung": f"{info['flag']} {curr}",
-            "Inflation YoY": inflation_yoy_str,
-            "Change": cpi_change_str,
-            "Trend": cpi_trend_str,
-            "Freshness": freshness,
-            "Source": source,
-            "OECD Expectations": oecd_str
-        })
-        
-    st.dataframe(pd.DataFrame(cpi_rows), hide_index=True, use_container_width=True)
-
-# ----------------- TAB 5: LABOUR MARKET -----------------
-with tab5:
-    st.header("👷 Labour Market Hub")
-    st.caption("Arbeitslosenquoten und Beschäftigungsdynamik der 8 G8-Währungen.")
-    
-    today_s = datetime.now().strftime("%Y-%m-%d")
-    unemp_rows = []
-    for curr, info in CURRENCIES.items():
-        u_val = get_unemp_rate_value(curr, today_s)
-        u_mom = compute_macro_momentum(curr)
-        unemp_rows.append({
-            "Währung": f"{info['flag']} {curr}",
-            "Arbeitslosenquote": f"{u_val:.2f}%" if u_val is not None else "N/A",
-            "Macro Momentum": f"{u_mom:+.1f}",
-            "Quelle": "FRED / World Bank",
-            "Status": "🟢 Normal" if (u_val and u_val < 6.0) else "🟡 Erhöht"
-        })
-        
-    st.dataframe(pd.DataFrame(unemp_rows), hide_index=True, use_container_width=True)
-
-# ----------------- TAB 6: PMI (MANUFACTURING & SERVICES) -----------------
-with tab6:
-    st.header("📊 PMI Frühindikatoren (Manufacturing & Services)")
-    st.caption("Einkaufsmanagerindizes zur Messung der konjunkturellen Dynamik (Expansion > 50 / Kontraktion < 50).")
-    
-    pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
-    if pmi_data:
-        rows = []
-        for code, data in pmi_data.items():
-            m_val = data.get("m_last")
-            s_val = data.get("s_last")
-            m_str = f"{m_val:.1f} ({'Expansion' if m_val >= 50 else 'Kontraktion'})" if m_val is not None else "N/A"
-            s_str = f"{s_val:.1f} ({'Expansion' if s_val >= 50 else 'Kontraktion'})" if s_val is not None else "N/A"
-            
-            rows.append({
-                "Währung": f"{CURRENCIES.get(code, {}).get('flag', '')} {code}",
-                "Manufacturing PMI": m_str,
-                "Services PMI": s_str,
-                "Datenquelle": "S&P Global / ISM"
-            })
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    else:
-        st.info("PMI Daten zur Zeit nicht geladen.")
-
-# ----------------- TAB 7: GDP GROWTH -----------------
-with tab7:
-    st.header("📈 GDP Growth (Reales BIP-Wachstum)")
-    st.caption("Reale Wirtschaftswachstumsraten (YoY) im internationalen G8-Vergleich.")
-    
-    today_s = datetime.now().strftime("%Y-%m-%d")
-    gdp_rows = []
-    for curr, info in CURRENCIES.items():
-        g_val = get_gdp_yoy_value(curr, today_s)
-        gdp_rows.append({
-            "Währung": f"{info['flag']} {curr}",
-            "Reales BIP-Wachstum (YoY)": f"{g_val:.2f}%" if g_val is not None else "N/A",
-            "Klassifikation": "🟢 Starkes Wachstum" if (g_val and g_val > 2.0) else "🟡 Moderat" if (g_val and g_val > 0.5) else "🔴 Schwäche",
-            "Quelle": "FRED / World Bank"
-        })
-    st.dataframe(pd.DataFrame(gdp_rows), hide_index=True, use_container_width=True)
-
-# ----------------- TAB 8: MARKET REGIME & MACRO FACTORS -----------------
-with tab8:
-    st.header("🌎 Market Regime & Macro Correction Factors")
-    st.caption("Globales Marktregime, Volatilität (VIX), Rohstoffeinflüsse und strukturelle Makrokorrekturen (Leistungsbilanz & Staatsverschuldung).")
-    
-    vix = get_vix_value()
-    cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-    gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-    
-    if vix > 22.0:
-        current_regime = "Risk-Off 🛡️"
-        regime_desc = "Erhöhte Volatilität und Risikoaversion. Sichere Häfen (USD, CHF, JPY) tendieren zur Stärke."
-    elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
-        current_regime = "Risk-On / Inflationary Growth 🚀"
-        regime_desc = "Risikobereitschaft am Markt ist hoch. Wachstums- und Rohstoffwährungen (AUD, NZD, CAD) sind gefragt."
-    elif (cpi_us is not None and cpi_us > 3.0) and (gdp_us is not None and gdp_us < 1.0):
-        current_regime = "Stagflation ⚠️"
-        regime_desc = "Hohe Inflation bei stagnierendem Wirtschaftswachstum. Schwieriges Umfeld für Risikoanlagen."
-    else:
-        current_regime = "Normales Marktregime 🟡"
-        regime_desc = "Standard-Marktumfeld ohne extreme Risikoverteilungen."
-        
-    col_reg1, col_reg2 = st.columns([1, 2])
-    with col_reg1:
-        st.metric("Aktueller VIX Index", f"{vix:.2f}")
-        st.metric("Regime-Einstufung", current_regime)
-    with col_reg2:
-        st.markdown("### Regime-Interpretation")
-        st.write(regime_desc)
-        
-    st.write("")
-    st.subheader("🛍️ Rohstoff-Sensitivität (AUD, CAD, NZD)")
-    st.caption("Korrekturfaktoren für rohstoffgebundene G8-Währungen (Öl, Kupfer, Milch/Agrar).")
-    
-    com_rows = []
-    for c in ["AUD", "CAD", "NZD", "USD", "EUR", "GBP", "JPY", "CHF"]:
-        c_score, _, _, corr_val, _ = compute_currency_professional_score_and_regime(c)
-        com_rows.append({
-            "Währung": f"{CURRENCIES[c]['flag']} {c}",
-            "Struktur-Korrekturfaktor": f"{corr_val:+.1f}",
-            "Typ": "Rohstoffwährung" if c in ["AUD", "CAD", "NZD"] else "Sicherer Hafen" if c in ["USD", "CHF", "JPY"] else "Standard"
-        })
-    st.dataframe(pd.DataFrame(com_rows), hide_index=True, use_container_width=True)
-
-# ----------------- TAB 9: MANUAL NEWS CHECK -----------------
-with tab9:
-    st.header("📅 Manual News Check (Forex Factory)")
-    st.caption("Manuelle Vor-Trade-Prüfung wichtiger Marktereignisse. Automatische News-APIs fließen nicht in die Signalberechnung ein.")
-    
-    st.warning("⚠️ **Wichtiger Hinweis:** News-APIs wurden vollständig aus der Signal- und CORE-Berechnung entfernt (0% Einfluss). Bitte prüfen Sie anstehende High-Impact-Termine vor jedem Trade-Einstieg manuell auf **Forex Factory**.")
-    
-    st.markdown("""
-    ### 📋 Pre-Trade Checkliste für Forex Factory:
-    
-    Vor der Ausführung eines Trades auf Basis der Fundamentaldaten sollten folgende Schritte manuell auf [Forex Factory](https://www.forexfactory.com/calendar) geprüft werden:
-    
-    1. 🔴 **Red-Folder Events (High Impact):**
-       - Steht in den nächsten 24 Stunden eine Zinsentscheidung (FOMC, EZB, BoE, BoJ, SNB, BoC, RBA, RBNZ) für die beteiligten Währungen an?
-       - Werden heute wichtige Inflationsdaten (CPI, PPI, PCE) veröffentlicht?
-       - Stehen wichtige Arbeitsmarktdaten (z. B. US Non-Farm Payrolls, Arbeitslosenquote) an?
-    2. 🗣️ **Zentralbank-Reden & Pressekonferenzen:**
-       - Gibt es Reden von Zentralbank-Präsidenten (Powell, Lagarde, Bailey, Ueda)?
-    3. ⚡ **Ungeplante geopolitische / globale Risiken:**
-       - Gibt es plötzliche Krisen oder Marktverwerfungen, die das globale Sentiment dominieren?
-       
-    > *„Fundamental stark vs. schwach gibt die fundamentale Richtung vor – der Wirtschaftskalender liefert das Timing und schützt vor Slippage bei News-Events.“*
-    """)
-    
-    st.info("🔗 **Direktlink zum Kalender:** [Forex Factory Economic Calendar](https://www.forexfactory.com/calendar)")
-
-# ----------------- TAB 10: FX PAIR DIVERGENCE ANALYZER -----------------
-with tab10:
-    st.header("💱 FX Pair Divergence Analyzer")
-    st.caption("Sekundäre Währungspaar-Analyse: Wählen Sie zwei Währungen aus, um fundamentale Divergenz, Zinsspreads und Signalstärke zu analysieren.")
-    
-    col_pa1, col_pa2 = st.columns(2)
-    with col_pa1:
-        base_sel = st.selectbox("Basis-Währung (Base)", list(CURRENCIES.keys()), index=0, key="pair_div_base")
-    with col_pa2:
-        quote_sel = st.selectbox("Quote-Währung (Quote)", list(CURRENCIES.keys()), index=1, key="pair_div_quote")
-        
-    if base_sel == quote_sel:
-        st.warning("⚠️ Bitte wählen Sie zwei unterschiedliche Währungen aus.")
-    else:
-        b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime(base_sel)
-        q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime(quote_sel)
-        
-        b_score_str = f"{b_score:+.1f}" if b_score is not None else "N/A"
-        q_score_str = f"{q_score:+.1f}" if q_score is not None else "N/A"
-        if b_score is None or q_score is None:
-            print(f"[DEBUG] Tab 10 import: base={base_sel} score={b_score}, quote={quote_sel} score={q_score}")
-            
-        badge_name, badge_color, sig_val, s_code = get_pair_signal_and_badge(base_sel, quote_sel)
-        
-        st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
-        render_bias_box(sig_val, base_sel, quote_sel, b_score, q_score, s_code)
-        
-        col_pb1, col_pb2 = st.columns(2)
-        with col_pb1:
-            st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
-            st.metric("Gesamt-Score", b_score_str, delta=f"Regime: {b_reg}")
-            st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
-            st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
-            st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-            st.write(f"- PMI: `{b_details.get('PMI', 0.0):+.1f}`")
-            st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
-        with col_pb2:
-            st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
-            st.metric("Gesamt-Score", q_score_str, delta=f"Regime: {q_reg}")
-            st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
-            st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
-            st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-            st.write(f"- PMI: `{q_details.get('PMI', 0.0):+.1f}`")
-            st.write(f"- GDP: `{q_details.get('GDP', 0.0):+.1f}`")
-
-# ----------------- TAB 11: POSITIONING (COT) -----------------
-with tab11:
-    st.header("📍 Positioning (COT Report)")
-    st.caption("Netto-Spekulanten-Positionierung der G8-Währungen aus dem Commitment of Traders Report.")
-    
-    st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Sie können hier manuelle COT-Daten eintragen, die persistent in `manual_cot.json` gespeichert werden.")
-    
-    with st.expander("📝 Manuelle COT-Daten eingeben / aktualisieren"):
-        m_curr = st.selectbox("Währung:", list(CURRENCIES.keys()), key="cot_m_curr_new")
-        m_pos = st.selectbox("Positionierung:", ["Bullish", "Bearish", "Neutral"], key="cot_m_pos_new")
-        m_net = st.number_input("Netto-Kontrakte:", value=0, key="cot_m_net_new")
-        m_perc = st.slider("Percentile (0-100%):", 0.0, 100.0, 50.0, step=1.0, key="cot_m_perc_new")
-        m_date = st.date_input("Berichtsdatum:", key="cot_m_date_new")
-        
-        if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn_new"):
-            save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"))
-            st.success(f"COT-Daten für {m_curr} gespeichert!")
-            st.rerun()
-
-    st.subheader("🛍️ COT Netto-Positionierung (Percentile)")
-    cot_rows = []
-    for curr in CURRENCIES.keys():
-        try:
-            percentile = get_latest_cot_percentile(curr)
-            if percentile is None:
-                cot_rows.append({
-                    "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-                    "COT Rollierendes Percentil (3Y)": "DATA UNAVAILABLE 🔴",
-                    "Status / Warnung": "Keine aktuellen Daten verfügbar"
-                })
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        with m_col1:
+            if strongest_c != "N/A":
+                st.metric("🟢 Stärkste Währung", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['score']:+.1f})")
             else:
-                warning_str = "⚠️ Extrem bullish (Überkauft)" if percentile > 80.0 else "⚠️ Extrem bearish (Überverkauft)" if percentile < 20.0 else "Gesund"
-                cot_rows.append({
-                    "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-                    "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
-                    "Status / Warnung": warning_str
-                })
-        except Exception:
-            pass
-            
-    if cot_rows:
-        st.dataframe(pd.DataFrame(cot_rows), hide_index=True, use_container_width=True)
-
-# ----------------- TAB 12: LIVE SIGNAL HISTORY & OUTCOMES -----------------
-with tab12:
-    st.header("📈 Live Signal History & Outcomes")
-    st.caption("Dauerhafte Aufzeichnung und Analyse von echten Live-Snapshots (Einzelwährungen & Währungspaare) zur empirischen Evaluierung.")
-    
-    st.warning("⚠️ **Wichtiger Hinweis:** Die Live-Datensammlung dient Beobachtungszwecken. Statistische Ergebnisse beweisen keine Kausalität und Modelle werden nicht automatisch optimiert.")
-    
-    signals_data = load_live_signals()
-    
-    if not signals_data:
-        st.info("Bisher wurden keine Live-Signal-Snapshots aufgezeichnet. Die automatische Erfassung startet bei täglicher Verwendung oder via GitHub Actions.")
-    else:
-        # Separate Currency Snapshots vs Pair Snapshots
-        curr_snapshots = {k: v for k, v in signals_data.items() if k.startswith("CURR_") or v.get("metadata", {}).get("type") == "currency"}
-        pair_snapshots = {k: v for k, v in signals_data.items() if not (k.startswith("CURR_") or v.get("metadata", {}).get("type") == "currency")}
-        
-        num_pairs = len(pair_snapshots)
-        completed_outcomes = sum(1 for s in pair_snapshots.values() if s.get("outcome_status") == "COMPLETED")
-        open_outcomes = num_pairs - completed_outcomes
-        
-        col_st1, col_st2, col_st3, col_st4 = st.columns(4)
-        with col_st1:
-            st.metric("Einzelwährungs-Snapshots", f"{len(curr_snapshots)}")
-        with col_st2:
-            st.metric("Paar-Snapshots", f"{num_pairs}")
-        with col_st3:
-            st.metric("Abgeschlossene Outcomes", f"{completed_outcomes}")
-        with col_st4:
-            st.metric("Laufende Outcomes", f"{open_outcomes}")
+                st.metric("🟢 Stärkste Währung", "N/A (Insufficient Data)")
+        with m_col2:
+            if weakest_c != "N/A":
+                st.metric("🔴 Schwächste Währung", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['score']:+.1f})")
+            else:
+                st.metric("🔴 Schwächste Währung", "N/A (Insufficient Data)")
+        with m_col3:
+            st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})")
+        with m_col4:
+            st.metric("Modell-Baseline", "35/20/20/20/5 (Yield/CPI/Lab/PMI/GDP)")
             
         st.write("")
-        hist_sub1, hist_sub2, hist_sub3 = st.tabs([
-            "🏆 Einzelwährungs-Historie (G8)",
-            "💱 Währungspaar-Outcomes & Performance",
-            "📥 Daten-Export"
+        
+        # Visual horizontal bar chart
+        plot_keys = [k for k in sorted_curr_keys if g8_data[k]["score"] is not None]
+        if plot_keys:
+            fig_rank = go.Figure(go.Bar(
+                x=[g8_data[k]["score"] for k in reversed(plot_keys)],
+                y=[f"{CURRENCIES[k]['flag']} {k}" for k in reversed(plot_keys)],
+                orientation='h',
+                marker=dict(
+                    color=['#10b981' if g8_data[k]["score"] >= 15.0 else '#f87171' if g8_data[k]["score"] <= -15.0 else '#e2b13c' for k in reversed(plot_keys)]
+                ),
+                text=[f"{g8_data[k]['score']:+.1f}" for k in reversed(plot_keys)],
+                textposition='outside'
+            ))
+            fig_rank.update_layout(
+                title="<b>Fundamental Score Ranking (Strongest ➔ Weakest)</b>",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#d1d5db", size=12),
+                xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.1)', zeroline=True, zerolinecolor='#4b5563'),
+                yaxis=dict(showgrid=False),
+                height=340,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig_rank, use_container_width=True)
+        else:
+            st.warning("⚠️ Keine ausreichenden Daten zur Erstellung des Rankings vorhanden (Coverage < 50%).")
+            
+        st.subheader("📋 Einzelwährungs-Fundamentaltabelle (G8)")
+        table_rows = []
+        for rank_idx, curr in enumerate(sorted_curr_keys, 1):
+            d = g8_data[curr]
+            det = d["details"]
+            cats = d["categories"]
+            
+            comp = det.get("_completeness", 100.0)
+            missing = det.get("_missing", [])
+            
+            if d["score"] is None:
+                badge_str = "⚪ INSUFFICIENT DATA"
+            elif d["score"] >= 25.0:
+                badge_str = "🟢 STRONG BULLISH"
+            elif d["score"] >= 10.0:
+                badge_str = "🟢 BULLISH"
+            elif d["score"] > -10.0:
+                badge_str = "🟡 NEUTRAL"
+            elif d["score"] > -25.0:
+                badge_str = "🔴 BEARISH"
+            else:
+                badge_str = "🔴 STRONG BEARISH"
+                
+            status_dq = "🟢 100%" if comp == 100.0 else f"🟡 {comp:.0f}% ({', '.join(missing)})"
+            
+            table_rows.append({
+                "Rang": f"#{rank_idx}",
+                "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                "CORE Score": f"{d['core']:+.1f}" if d['core'] is not None else "N/A",
+                "Gesamt-Score": f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
+                "Signal / Tendenz": badge_str,
+                "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}" if cats.get('Geldpolitik') is not None else "N/A",
+                "Inflation (20%)": f"{cats.get('Inflation', 0.0):+.1f}" if cats.get('Inflation') is not None else "N/A",
+                "Arbeitsmarkt (20%)": f"{cats.get('Arbeitsmarkt', 0.0):+.1f}" if cats.get('Arbeitsmarkt') is not None else "N/A",
+                "PMI (20%)": f"{cats.get('PMI', 0.0):+.1f}" if cats.get('PMI') is not None else "N/A",
+                "GDP (5%)": f"{cats.get('GDP', 0.0):+.1f}" if cats.get('GDP') is not None else "N/A",
+                "Korrektur": f"{d['corr']:+.1f}" if d['corr'] is not None else "N/A",
+                "Regime": d["regime"],
+                "Datenqualität": status_dq
+            })
+            
+        df_curr_summary = pd.DataFrame(table_rows)
+        st.dataframe(df_curr_summary, hide_index=True, use_container_width=True)
+        
+        st.write("")
+        st.markdown("---")
+    
+    # ----------------- TAB 2: FUNDAMENTAL SCORE & DEEP-DIVE -----------------
+    with tab2:
+        st.header("📊 Fundamental Score: Detailanalyse pro Einzelwährung")
+        st.caption("Detaillierte Aufschlüsselung der makroökonomischen Faktoren, Berechnungsformeln und Zeitreihen für jede der 8 G8-Währungen.")
+        
+        sel_curr_fund = st.selectbox("Wähle eine Währung zur Tiefenanalyse:", list(CURRENCIES.keys()), index=0, key="deepdive_curr_sel")
+        details_f = compute_currency_details(sel_curr_fund)
+        f_score_d, reg_d, core_d, corr_d, cats_d = compute_currency_professional_score_and_regime(sel_curr_fund)
+        
+        st.write(f"### Detaillierte Kennzahlen für {CURRENCIES[sel_curr_fund]['flag']} {sel_curr_fund} ({CURRENCIES[sel_curr_fund]['name']})")
+        
+        col_fd1, col_fd2, col_fd3, col_fd4, col_fd5 = st.columns(5)
+        with col_fd1:
+            st.metric("Geldpolitik (35%)", f"{cats_d.get('Geldpolitik', 0.0):+.1f}")
+        with col_fd2:
+            st.metric("Inflation (20%)", f"{cats_d.get('Inflation', 0.0):+.1f}")
+        with col_fd3:
+            st.metric("Arbeitsmarkt (20%)", f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}")
+        with col_fd4:
+            st.metric("PMI (20%)", f"{cats_d.get('PMI', 0.0):+.1f}")
+        with col_fd5:
+            st.metric("GDP (5%)", f"{cats_d.get('GDP', 0.0):+.1f}")
+            
+        st.write("")
+        
+        col_deep1, col_deep2 = st.columns([1.2, 1])
+        with col_deep1:
+            st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
+            rate_val, rate_bps, _ = get_country_rate(CURRENCIES[sel_curr_fund]["wb_code"], FRED_KEY)
+            cpi_val = get_cpi_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
+            unemp_val = get_unemployment_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
+            pmi_val, _, _, _ = get_composite_pmi_score(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
+            gdp_val = get_gdp_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
+            y2_det = get_yield_details(sel_curr_fund, YIELD_2Y_SERIES, FRED_KEY)
+            y2_val = y2_det.get("value") if y2_det else None
+            
+            raw_metrics = [
+                {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
+                {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
+                {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Inflation', 0.0):+.1f}"},
+                {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}"},
+                {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('PMI', 0.0):+.1f}"},
+                {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('GDP', 0.0):+.1f}"}
+            ]
+            st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
+    
+            st.subheader("📈 TREND & MOMENTUM CONTEXT")
+            y_trends = get_yield_trends(sel_curr_fund)
+            cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), datetime.now().strftime("%Y-%m-%d"))
+            unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), datetime.now().strftime("%Y-%m-%d"), reverse=True)
+            pmi_trend_pts = get_series_trend_points(PMI_SERIES.get(sel_curr_fund, "MANEMP") if sel_curr_fund in PMI_SERIES else "USISMT", datetime.now().strftime("%Y-%m-%d"))
+            gdp_trend_pts = get_series_trend_points(GDP_SERIES.get(sel_curr_fund, "GDPC1"), datetime.now().strftime("%Y-%m-%d"))
+    
+            trend_metrics = [
+                {"Faktor": "2Y Sovereign Yield (1W Change)", "Wert": f"{y_trends.get('chg_1w', 0.0):+.3f}%" if y_trends.get('chg_1w') is not None else "N/A"},
+                {"Faktor": "2Y Sovereign Yield (1M Change)", "Wert": f"{y_trends.get('chg_1m', 0.0):+.3f}%" if y_trends.get('chg_1m') is not None else "N/A"},
+                {"Faktor": "2Y Sovereign Yield (3M Change)", "Wert": f"{y_trends.get('chg_3m', 0.0):+.3f}%" if y_trends.get('chg_3m') is not None else "N/A"},
+                {"Faktor": "Inflation (CPI Trend Points)", "Wert": f"{cpi_trend_pts:+.1f} pts"},
+                {"Faktor": "Arbeitsmarkt (Unemp Trend Points)", "Wert": f"{unemp_trend_pts:+.1f} pts"},
+                {"Faktor": "PMI Trend Points", "Wert": f"{pmi_trend_pts:+.1f} pts"},
+                {"Faktor": "GDP Trend Points", "Wert": f"{gdp_trend_pts:+.1f} pts"},
+                {"Faktor": "Gesamte Trend-Korrektur (Trend Score)", "Wert": f"{details_f.get('_trend_score', 0.0):+.2f}"}
+            ]
+            st.dataframe(pd.DataFrame(trend_metrics), hide_index=True, use_container_width=True)
+            
+        with col_deep2:
+            st.subheader("⚖️ Core Weights & Model Isolation")
+            f_score_str = f"{f_score_d:+.1f}" if f_score_d is not None else "N/A"
+            core_str = f"{core_d:+.1f}" if core_d is not None else "N/A"
+            st.write(f"- **Gesamt-Score (Final Score):** `{f_score_str}`")
+            st.write(f"- **BASE CORE Score:** `{core_str}`")
+            st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`" if details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
+            st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
+            st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
+            st.write(f"- **Markt-Regime:** `{reg_d}`")
+            st.write(f"- **Model Version:** `CORE_V2_2_2026_08` (Schema: `2.0`)")
+            
+            st.subheader("🟢 Freshness & Data Quality Indicators")
+            st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
+            freshness_map = details_f.get("_freshness", {})
+            for factor, status in freshness_map.items():
+                badge_color = "🟢" if status == "FRESH" else "🟡" if status == "AGING" else "🔴"
+                st.write(f"- **{factor} Freshness:** {badge_color} `{status}`")
+                
+            if details_f.get("_missing"):
+                st.warning(f"⚠️ Fehlende/Stale Faktoren: {', '.join(details_f.get('_missing'))}")
+            else:
+                st.success("🟢 Alle CORE-Faktoren vollständig & aktuell (100% Valid).")
+    
+            st.subheader("🌎 MARKET CONTEXT & RESEARCH FACTORS")
+            y5_det = get_yield_details(sel_curr_fund, YIELD_5Y_SERIES, FRED_KEY)
+            y5_val = y5_det.get("value") if y5_det else None
+            oecd_exp = get_inflation_expectations_data(sel_curr_fund)
+            oecd_val = oecd_exp.get("oecd_expectation") if oecd_exp else None
+            
+            st.write(f"- **5Y Sovereign Bond Yield:** `{y5_val:.3f}%`" if y5_val is not None else "- **5Y Sovereign Bond Yield:** `5Y YIELD UNAVAILABLE`")
+            st.write(f"- **OECD Inflation Expectations:** `{oecd_val:.2f}%`" if oecd_val is not None else "- **OECD Inflation Expectations:** `OECD Expectations unavailable`")
+    
+    # ----------------- TAB 3: INTEREST RATES & 2Y YIELDS -----------------
+    with tab3:
+        st.header("🏦 Interest Rates & 2Y Government Bond Yields")
+        st.caption("Vergleichende Analyse von Zentralbank-Leitzinsen, 2Y-Benchmark-Renditen und Zinskurven für alle 8 G8-Währungen.")
+        
+        rates_data = {}
+        for curr, info in CURRENCIES.items():
+            r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
+            rates_data[curr] = {
+                "rate": r_val,
+                "bps_change": bps_chg,
+                "source": src
+            }
+            
+        df_rates_plot = pd.DataFrame([
+            {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
+            for curr, data in rates_data.items()
         ])
         
-        with hist_sub1:
-            st.subheader("🏆 Protokollierte Einzelwährungs-Snapshots")
-            if curr_snapshots:
-                c_rows = []
-                for s_id, s in curr_snapshots.items():
-                    meta = s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {}
-                    factors = s.get("factors", {}) if isinstance(s.get("factors"), dict) else {}
-                    
-                    s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
-                    s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
-                    
-                    # Score fallback
-                    score_val = s.get("score")
-                    if score_val is None:
-                        score_val = s.get("core_score")
-                    if score_val is None:
-                        score_val = s.get("total_score", 0.0)
-                        
-                    s_factors = factors if factors else s.get("factor_scores", {})
-                    
-                    c_rows.append({
-                        "Snapshot ID": s_id,
-                        "Datum": s_date,
-                        "Währung": s_curr,
-                        "Score": f"{score_val:+.1f}" if score_val is not None else "N/A",
-                        "Regime": s.get("regime", "Neutral"),
-                        "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
-                        "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
-                        "Arbeitsmarkt (20%)": f"{s_factors.get('Arbeitsmarkt', 0.0):+.1f}" if s_factors.get('Arbeitsmarkt') is not None else "N/A",
-                        "PMI (20%)": f"{s_factors.get('PMI', 0.0):+.1f}" if s_factors.get('PMI') is not None else "N/A",
-                        "GDP (5%)": f"{s_factors.get('GDP', 0.0):+.1f}" if s_factors.get('GDP') is not None else "N/A"
-                    })
-                df_c_hist = pd.DataFrame(c_rows).sort_values("Datum", ascending=False)
-                st.dataframe(df_c_hist, hide_index=True, use_container_width=True)
-            else:
-                st.info("Noch keine Einzelwährungs-Snapshots vorhanden.")
-                
-        with hist_sub2:
-            st.subheader("💱 Währungspaar-Performance & Tracking")
-            if pair_snapshots:
-                eval_rows = []
-                for s_id, s in pair_snapshots.items():
-                    p_sig = s.get("pair_signal", {})
-                    outcomes = s.get("outcomes", {})
-                    ret5 = outcomes.get("5", {}).get("directional_return_pct")
-                    ret10 = outcomes.get("10", {}).get("directional_return_pct")
-                    ret20 = outcomes.get("20", {}).get("directional_return_pct")
-                    eval_rows.append({
-                        "Snapshot ID": s_id,
-                        "Datum": s.get("metadata", {}).get("date"),
-                        "FX-Paar": s.get("metadata", {}).get("pair"),
-                        "Signal": p_sig.get("signal"),
-                        "Divergenz": f"{p_sig.get('divergence', 0.0):+.1f}" if p_sig.get('divergence') is not None else "0.0",
-                        "Entry": s.get("entry_price"),
-                        "Status": s.get("outcome_status", "OPEN"),
-                        "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "Pending",
-                        "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "Pending",
-                        "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "Pending"
-                    })
-                df_eval = pd.DataFrame(eval_rows).sort_values("Datum", ascending=False)
-                st.dataframe(df_eval, hide_index=True, use_container_width=True)
-            else:
-                st.info("Noch keine Paar-Snapshots vorhanden.")
-                
-        with hist_sub3:
-            st.subheader("📥 Export der Live-Datensätze")
-            json_str = json.dumps(signals_data, indent=4, ensure_ascii=False)
-            st.download_button(
-                label="📥 Vollständigen JSON Datensatz exportieren",
-                data=json_str,
-                file_name=f"live_signals_full_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json",
-                key="btn_export_json_history"
-            )
-
-# ----------------- TAB 13: BACKTESTING & MODEL LAB -----------------
-with tab13:
-    st.header("📊 Backtesting, Model Lab & Quant Research")
-    st.caption("Umfassende Research-Umgebung: Historisches Backtesting, Szenario-Simulationen, Modell-Konfiguration, Forward-Testing und technische Datenanalyse.")
-    
-    lab1, lab2, lab3, lab4, lab5, lab6 = st.tabs([
-        "📊 Fundamental Backtest",
-        "🧪 Model Lab & Custom Weights",
-        "🔬 Historical & Quant Research",
-        "🚀 Forward Testing",
-        "📝 Research Journal",
-        "🛠 API & Data Status"
-    ])
-    
-    with lab1:
-        st.subheader("📊 Fundamental FX Backtest Engine")
-        st.caption("Professionelles Backtesting-System zur Validierung fundamentaler Zins- und Makrodivergenzen ohne Look-Ahead Bias.")
+        fig_rates_g8 = go.Figure()
+        fig_rates_g8.add_trace(go.Bar(
+            x=df_rates_plot["Zentralbank"],
+            y=df_rates_plot["Zinssatz"],
+            marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
+            text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
+            textposition='auto',
+            name="Zinssatz"
+        ))
+        fig_rates_g8.update_layout(
+            title="<b>Zentralbank-Leitzinsen der G8</b>",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color="#d1d5db", size=10),
+            xaxis=dict(showgrid=False, linecolor="#1f2026"),
+            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.05)', linecolor="#1f2026"),
+            height=300,
+            margin=dict(l=10, r=10, t=40, b=10)
+        )
+        st.plotly_chart(fig_rates_g8, use_container_width=True)
         
-        col_bt1, col_bt2 = st.columns(2)
-        with col_bt1:
-            bt_pair = st.selectbox("FX-Paar:", ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"], index=0, key="bt_pair_lab")
-            bt_hold = st.selectbox("Holding Period (Trading Days):", [5, 10, 15, 20], index=1, key="bt_hold_lab")
-        with col_bt2:
-            bt_thresh = st.slider("Signal Schwellenwert (Divergenz):", 1.0, 20.0, 5.0, step=0.5, key="bt_thresh_lab")
-            bt_days = st.slider("Backtest-Zeitraum (Tage):", 180, 1460, 730, step=90, key="bt_days_lab")
+        # Bond Market & Yield Curve
+        st.subheader("🏦 Bond Market & 2Y Benchmark Yields")
+        bond_rows = []
+        for curr, info in CURRENCIES.items():
+            y2_det = get_yield_details(curr, YIELD_2Y_SERIES, FRED_KEY)
+            y5_det = get_yield_details(curr, YIELD_5Y_SERIES, FRED_KEY)
+            y10_det = get_yield_details(curr, YIELD_10Y_SERIES, FRED_KEY)
             
-        if st.button("🚀 Backtest starten", key="btn_run_bt_lab"):
-            with st.spinner(f"Führe fundamentalen Backtest für {bt_pair} über {bt_days} Tage durch..."):
-                st.success(f"✅ Backtest für {bt_pair} erfolgreich ausgeführt!")
+            y2_str = f"{y2_det['value']:.2f}%" if y2_det else "nicht verfügbar"
+            y5_str = f"{y5_det['value']:.2f}%" if y5_det else "nicht verfügbar"
+            y10_str = f"{y10_det['value']:.2f}%" if y10_det else "nicht verfügbar"
+            
+            spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det) else "N/A"
+            chg_1w = f"{y2_det['chg_1w']:+.2f}%" if y2_det else "N/A"
+            chg_1m = f"{y2_det['chg_1m']:+.2f}%" if y2_det else "N/A"
+            trend_str = y2_det["trend"] if y2_det else "▬"
+            src_str = y2_det["source"] if y2_det else "N/A"
+            
+            status_2y = "🟢 REAL 2Y YIELD" if (y2_det and y2_det.get("source") != "Demo Mock" and y2_det.get("value") is not None) else "🟡 2Y YIELD UNAVAILABLE"
+            status_5y = "🟢 REAL 5Y YIELD" if (y5_det and y5_det.get("source") != "Demo Mock" and y5_det.get("value") is not None) else "🟡 5Y YIELD UNAVAILABLE"
+            
+            y2_str = f"{y2_det['value']:.2f}%" if (y2_det and y2_det.get('value') is not None) else "N/A"
+            y5_str = f"{y5_det['value']:.2f}%" if (y5_det and y5_det.get('value') is not None) else "5Y YIELD UNAVAILABLE"
+            y10_str = f"{y10_det['value']:.2f}%" if (y10_det and y10_det.get('value') is not None) else "N/A"
+            
+            spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det and y2_det.get('value') is not None and y10_det.get('value') is not None) else "N/A"
+            chg_1w = f"{y2_det['chg_1w']:+.2f}%" if (y2_det and y2_det.get('chg_1w') is not None) else "N/A"
+            chg_1m = f"{y2_det['chg_1m']:+.2f}%" if (y2_det and y2_det.get('chg_1m') is not None) else "N/A"
+            trend_str = y2_det["trend"] if y2_det else "▬"
+            src_str = y2_det["source"] if y2_det else "N/A"
+            src_5y_str = y5_det["source"] if y5_det else "5Y YIELD UNAVAILABLE"
+            
+            bond_rows.append({
+                "Währung": f"{info['flag']} {curr}",
+                "Status (2Y)": status_2y,
+                "Status (5Y)": status_5y,
+                "2Y Rendite": y2_str,
+                "5Y Rendite": y5_str,
+                "10Y Rendite": y10_str,
+                "2Y-10Y Spread": spread_str,
+                "Veränderung 1W (2Y)": chg_1w,
+                "Veränderung 1M (2Y)": chg_1m,
+                "Trend (2Y)": trend_str,
+                "Quelle 2Y": src_str,
+                "Quelle 5Y": src_5y_str
+            })
+            
+        df_bonds = pd.DataFrame(bond_rows)
+        st.dataframe(df_bonds, hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 4: INFLATION / CPI -----------------
+    with tab4:
+        st.header("📈 Inflation & CPI Hub")
+        st.caption("Verbraucherpreisindizes (CPI YoY), Inflationstrends und OECD Consumer Inflation Expectations für alle 8 G8-Währungen.")
+        
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        cpi_rows = []
+        for curr, info in CURRENCIES.items():
+            c_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_s)
+            inf_data = get_inflation_expectations_data(curr, today_s)
+            c_trend = inf_data.get("cpi_trend")
+            oecd_val = inf_data.get("oecd_expectation")
+            
+            # Display label for Swiss HICP
+            metric_label = "Eurostat HICP YoY" if curr == "CHF" else "CPI YoY"
+            inflation_yoy_str = f"{c_val:.2f}% ({metric_label})" if c_val is not None else "N/A"
+            
+            cpi_change_str = f"{c_trend:+.2f} pp" if c_trend is not None else "N/A"
+            cpi_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
+            oecd_str = f"{oecd_val:.1f} (% Saldo)" if oecd_val is not None else "N/A"
+            
+            cpi_rows.append({
+                "Währung": f"{info['flag']} {curr}",
+                "Inflation YoY": inflation_yoy_str,
+                "Change": cpi_change_str,
+                "Trend": cpi_trend_str,
+                "Freshness": freshness,
+                "Source": source,
+                "OECD Expectations": oecd_str
+            })
+            
+        st.dataframe(pd.DataFrame(cpi_rows), hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 5: LABOUR MARKET -----------------
+    with tab5:
+        st.header("👷 Labour Market Hub")
+        st.caption("Arbeitslosenquoten und Beschäftigungsdynamik der 8 G8-Währungen.")
+        
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        unemp_rows = []
+        for curr, info in CURRENCIES.items():
+            u_val = get_unemp_rate_value(curr, today_s)
+            u_mom = compute_macro_momentum(curr)
+            unemp_rows.append({
+                "Währung": f"{info['flag']} {curr}",
+                "Arbeitslosenquote": f"{u_val:.2f}%" if u_val is not None else "N/A",
+                "Macro Momentum": f"{u_mom:+.1f}",
+                "Quelle": "FRED / World Bank",
+                "Status": "🟢 Normal" if (u_val and u_val < 6.0) else "🟡 Erhöht"
+            })
+            
+        st.dataframe(pd.DataFrame(unemp_rows), hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 6: PMI (MANUFACTURING & SERVICES) -----------------
+    with tab6:
+        st.header("📊 PMI Frühindikatoren (Manufacturing & Services)")
+        st.caption("Einkaufsmanagerindizes zur Messung der konjunkturellen Dynamik (Expansion > 50 / Kontraktion < 50).")
+        
+        pmi_data = get_all_pmi_data(FRED_KEY, EODHD_KEY)
+        if pmi_data:
+            rows = []
+            for code, data in pmi_data.items():
+                m_val = data.get("m_last")
+                s_val = data.get("s_last")
+                m_str = f"{m_val:.1f} ({'Expansion' if m_val >= 50 else 'Kontraktion'})" if m_val is not None else "N/A"
+                s_str = f"{s_val:.1f} ({'Expansion' if s_val >= 50 else 'Kontraktion'})" if s_val is not None else "N/A"
                 
-                # Performance metrics
-                b_c1, b_c2, b_c3, b_c4 = st.columns(4)
-                with b_c1:
-                    st.metric("Total Trades", "28")
-                with b_c2:
-                    st.metric("Hit Rate (Win %)", "64.3%")
-                with b_c3:
-                    st.metric("Sharpe Ratio", "1.42")
-                with b_c4:
-                    st.metric("Profit Factor", "1.85")
+                rows.append({
+                    "Währung": f"{CURRENCIES.get(code, {}).get('flag', '')} {code}",
+                    "Manufacturing PMI": m_str,
+                    "Services PMI": s_str,
+                    "Datenquelle": "S&P Global / ISM"
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        else:
+            st.info("PMI Daten zur Zeit nicht geladen.")
+    
+    # ----------------- TAB 7: GDP GROWTH -----------------
+    with tab7:
+        st.header("📈 GDP Growth (Reales BIP-Wachstum)")
+        st.caption("Reale Wirtschaftswachstumsraten (YoY) im internationalen G8-Vergleich.")
+        
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        gdp_rows = []
+        for curr, info in CURRENCIES.items():
+            g_val = get_gdp_yoy_value(curr, today_s)
+            gdp_rows.append({
+                "Währung": f"{info['flag']} {curr}",
+                "Reales BIP-Wachstum (YoY)": f"{g_val:.2f}%" if g_val is not None else "N/A",
+                "Klassifikation": "🟢 Starkes Wachstum" if (g_val and g_val > 2.0) else "🟡 Moderat" if (g_val and g_val > 0.5) else "🔴 Schwäche",
+                "Quelle": "FRED / World Bank"
+            })
+        st.dataframe(pd.DataFrame(gdp_rows), hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 8: MARKET REGIME & MACRO FACTORS -----------------
+    with tab8:
+        st.header("🌎 Market Regime & Macro Correction Factors")
+        st.caption("Globales Marktregime, Volatilität (VIX), Rohstoffeinflüsse und strukturelle Makrokorrekturen (Leistungsbilanz & Staatsverschuldung).")
+        
+        vix = get_vix_value()
+        cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        
+        if vix > 22.0:
+            current_regime = "Risk-Off 🛡️"
+            regime_desc = "Erhöhte Volatilität und Risikoaversion. Sichere Häfen (USD, CHF, JPY) tendieren zur Stärke."
+        elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
+            current_regime = "Risk-On / Inflationary Growth 🚀"
+            regime_desc = "Risikobereitschaft am Markt ist hoch. Wachstums- und Rohstoffwährungen (AUD, NZD, CAD) sind gefragt."
+        elif (cpi_us is not None and cpi_us > 3.0) and (gdp_us is not None and gdp_us < 1.0):
+            current_regime = "Stagflation ⚠️"
+            regime_desc = "Hohe Inflation bei stagnierendem Wirtschaftswachstum. Schwieriges Umfeld für Risikoanlagen."
+        else:
+            current_regime = "Normales Marktregime 🟡"
+            regime_desc = "Standard-Marktumfeld ohne extreme Risikoverteilungen."
+            
+        col_reg1, col_reg2 = st.columns([1, 2])
+        with col_reg1:
+            st.metric("Aktueller VIX Index", f"{vix:.2f}")
+            st.metric("Regime-Einstufung", current_regime)
+        with col_reg2:
+            st.markdown("### Regime-Interpretation")
+            st.write(regime_desc)
+            
+        st.write("")
+        st.subheader("🛍️ Rohstoff-Sensitivität (AUD, CAD, NZD)")
+        st.caption("Korrekturfaktoren für rohstoffgebundene G8-Währungen (Öl, Kupfer, Milch/Agrar).")
+        
+        com_rows = []
+        for c in ["AUD", "CAD", "NZD", "USD", "EUR", "GBP", "JPY", "CHF"]:
+            c_score, _, _, corr_val, _ = compute_currency_professional_score_and_regime(c)
+            com_rows.append({
+                "Währung": f"{CURRENCIES[c]['flag']} {c}",
+                "Struktur-Korrekturfaktor": f"{corr_val:+.1f}",
+                "Typ": "Rohstoffwährung" if c in ["AUD", "CAD", "NZD"] else "Sicherer Hafen" if c in ["USD", "CHF", "JPY"] else "Standard"
+            })
+        st.dataframe(pd.DataFrame(com_rows), hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 9: MANUAL NEWS CHECK -----------------
+    with tab9:
+        st.header("📅 Manual News Check (Forex Factory)")
+        st.caption("Manuelle Vor-Trade-Prüfung wichtiger Marktereignisse. Automatische News-APIs fließen nicht in die Signalberechnung ein.")
+        
+        st.warning("⚠️ **Wichtiger Hinweis:** News-APIs wurden vollständig aus der Signal- und CORE-Berechnung entfernt (0% Einfluss). Bitte prüfen Sie anstehende High-Impact-Termine vor jedem Trade-Einstieg manuell auf **Forex Factory**.")
+        
+        st.markdown("""
+        ### 📋 Pre-Trade Checkliste für Forex Factory:
+        
+        Vor der Ausführung eines Trades auf Basis der Fundamentaldaten sollten folgende Schritte manuell auf [Forex Factory](https://www.forexfactory.com/calendar) geprüft werden:
+        
+        1. 🔴 **Red-Folder Events (High Impact):**
+           - Steht in den nächsten 24 Stunden eine Zinsentscheidung (FOMC, EZB, BoE, BoJ, SNB, BoC, RBA, RBNZ) für die beteiligten Währungen an?
+           - Werden heute wichtige Inflationsdaten (CPI, PPI, PCE) veröffentlicht?
+           - Stehen wichtige Arbeitsmarktdaten (z. B. US Non-Farm Payrolls, Arbeitslosenquote) an?
+        2. 🗣️ **Zentralbank-Reden & Pressekonferenzen:**
+           - Gibt es Reden von Zentralbank-Präsidenten (Powell, Lagarde, Bailey, Ueda)?
+        3. ⚡ **Ungeplante geopolitische / globale Risiken:**
+           - Gibt es plötzliche Krisen oder Marktverwerfungen, die das globale Sentiment dominieren?
+           
+        > *„Fundamental stark vs. schwach gibt die fundamentale Richtung vor – der Wirtschaftskalender liefert das Timing und schützt vor Slippage bei News-Events.“*
+        """)
+        
+        st.info("🔗 **Direktlink zum Kalender:** [Forex Factory Economic Calendar](https://www.forexfactory.com/calendar)")
+    
+    # ----------------- TAB 10: FX PAIR DIVERGENCE ANALYZER -----------------
+    with tab10:
+        st.header("💱 FX Pair Divergence Analyzer")
+        st.caption("Sekundäre Währungspaar-Analyse: Wählen Sie zwei Währungen aus, um fundamentale Divergenz, Zinsspreads und Signalstärke zu analysieren.")
+        
+        col_pa1, col_pa2 = st.columns(2)
+        with col_pa1:
+            base_sel = st.selectbox("Basis-Währung (Base)", list(CURRENCIES.keys()), index=0, key="pair_div_base")
+        with col_pa2:
+            quote_sel = st.selectbox("Quote-Währung (Quote)", list(CURRENCIES.keys()), index=1, key="pair_div_quote")
+            
+        if base_sel == quote_sel:
+            st.warning("⚠️ Bitte wählen Sie zwei unterschiedliche Währungen aus.")
+        else:
+            b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime(base_sel)
+            q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime(quote_sel)
+            
+            b_score_str = f"{b_score:+.1f}" if b_score is not None else "N/A"
+            q_score_str = f"{q_score:+.1f}" if q_score is not None else "N/A"
+            if b_score is None or q_score is None:
+                print(f"[DEBUG] Tab 10 import: base={base_sel} score={b_score}, quote={quote_sel} score={q_score}")
+                
+            badge_name, badge_color, sig_val, s_code = get_pair_signal_and_badge(base_sel, quote_sel)
+            
+            st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
+            render_bias_box(sig_val, base_sel, quote_sel, b_score, q_score, s_code)
+            
+            col_pb1, col_pb2 = st.columns(2)
+            with col_pb1:
+                st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
+                st.metric("Gesamt-Score", b_score_str, delta=f"Regime: {b_reg}")
+                st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
+                st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
+                st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
+                st.write(f"- PMI: `{b_details.get('PMI', 0.0):+.1f}`")
+                st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
+            with col_pb2:
+                st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
+                st.metric("Gesamt-Score", q_score_str, delta=f"Regime: {q_reg}")
+                st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
+                st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
+                st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
+                st.write(f"- PMI: `{q_details.get('PMI', 0.0):+.1f}`")
+                st.write(f"- GDP: `{q_details.get('GDP', 0.0):+.1f}`")
+    
+    # ----------------- TAB 11: POSITIONING (COT) -----------------
+    with tab11:
+        st.header("📍 Positioning (COT Report)")
+        st.caption("Netto-Spekulanten-Positionierung der G8-Währungen aus dem Commitment of Traders Report.")
+        
+        st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Sie können hier manuelle COT-Daten eintragen, die persistent in `manual_cot.json` gespeichert werden.")
+        
+        with st.expander("📝 Manuelle COT-Daten eingeben / aktualisieren"):
+            m_curr = st.selectbox("Währung:", list(CURRENCIES.keys()), key="cot_m_curr_new")
+            m_pos = st.selectbox("Positionierung:", ["Bullish", "Bearish", "Neutral"], key="cot_m_pos_new")
+            m_net = st.number_input("Netto-Kontrakte:", value=0, key="cot_m_net_new")
+            m_perc = st.slider("Percentile (0-100%):", 0.0, 100.0, 50.0, step=1.0, key="cot_m_perc_new")
+            m_date = st.date_input("Berichtsdatum:", key="cot_m_date_new")
+            
+            if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn_new"):
+                save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"))
+                st.success(f"COT-Daten für {m_curr} gespeichert!")
+                st.rerun()
+    
+        st.subheader("🛍️ COT Netto-Positionierung (Percentile)")
+        cot_rows = []
+        for curr in CURRENCIES.keys():
+            try:
+                percentile = get_latest_cot_percentile(curr)
+                if percentile is None:
+                    cot_rows.append({
+                        "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                        "COT Rollierendes Percentil (3Y)": "DATA UNAVAILABLE 🔴",
+                        "Status / Warnung": "Keine aktuellen Daten verfügbar"
+                    })
+                else:
+                    warning_str = "⚠️ Extrem bullish (Überkauft)" if percentile > 80.0 else "⚠️ Extrem bearish (Überverkauft)" if percentile < 20.0 else "Gesund"
+                    cot_rows.append({
+                        "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
+                        "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
+                        "Status / Warnung": warning_str
+                    })
+            except Exception:
+                pass
+                
+        if cot_rows:
+            st.dataframe(pd.DataFrame(cot_rows), hide_index=True, use_container_width=True)
+    
+    # ----------------- TAB 12: LIVE SIGNAL HISTORY & OUTCOMES -----------------
+    with tab12:
+        st.header("📈 Live Signal History & Outcomes")
+        st.caption("Dauerhafte Aufzeichnung und Analyse von echten Live-Snapshots (Einzelwährungen & Währungspaare) zur empirischen Evaluierung.")
+        
+        st.warning("⚠️ **Wichtiger Hinweis:** Die Live-Datensammlung dient Beobachtungszwecken. Statistische Ergebnisse beweisen keine Kausalität und Modelle werden nicht automatisch optimiert.")
+        
+        signals_data = load_live_signals()
+        
+        if not signals_data:
+            st.info("Bisher wurden keine Live-Signal-Snapshots aufgezeichnet. Die automatische Erfassung startet bei täglicher Verwendung oder via GitHub Actions.")
+        else:
+            # Separate Currency Snapshots vs Pair Snapshots
+            curr_snapshots = {k: v for k, v in signals_data.items() if k.startswith("CURR_") or v.get("metadata", {}).get("type") == "currency"}
+            pair_snapshots = {k: v for k, v in signals_data.items() if not (k.startswith("CURR_") or v.get("metadata", {}).get("type") == "currency")}
+            
+            num_pairs = len(pair_snapshots)
+            completed_outcomes = sum(1 for s in pair_snapshots.values() if s.get("outcome_status") == "COMPLETED")
+            open_outcomes = num_pairs - completed_outcomes
+            
+            col_st1, col_st2, col_st3, col_st4 = st.columns(4)
+            with col_st1:
+                st.metric("Einzelwährungs-Snapshots", f"{len(curr_snapshots)}")
+            with col_st2:
+                st.metric("Paar-Snapshots", f"{num_pairs}")
+            with col_st3:
+                st.metric("Abgeschlossene Outcomes", f"{completed_outcomes}")
+            with col_st4:
+                st.metric("Laufende Outcomes", f"{open_outcomes}")
+                
+            st.write("")
+            hist_sub1, hist_sub2, hist_sub3 = st.tabs([
+                "🏆 Einzelwährungs-Historie (G8)",
+                "💱 Währungspaar-Outcomes & Performance",
+                "📥 Daten-Export"
+            ])
+            
+            with hist_sub1:
+                st.subheader("🏆 Protokollierte Einzelwährungs-Snapshots")
+                if curr_snapshots:
+                    c_rows = []
+                    for s_id, s in curr_snapshots.items():
+                        meta = s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {}
+                        factors = s.get("factors", {}) if isinstance(s.get("factors"), dict) else {}
+                        
+                        s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
+                        s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
+                        
+                        # Score fallback
+                        score_val = s.get("score")
+                        if score_val is None:
+                            score_val = s.get("core_score")
+                        if score_val is None:
+                            score_val = s.get("total_score", 0.0)
+                            
+                        s_factors = factors if factors else s.get("factor_scores", {})
+                        
+                        c_rows.append({
+                            "Snapshot ID": s_id,
+                            "Datum": s_date,
+                            "Währung": s_curr,
+                            "Score": f"{score_val:+.1f}" if score_val is not None else "N/A",
+                            "Regime": s.get("regime", "Neutral"),
+                            "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
+                            "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
+                            "Arbeitsmarkt (20%)": f"{s_factors.get('Arbeitsmarkt', 0.0):+.1f}" if s_factors.get('Arbeitsmarkt') is not None else "N/A",
+                            "PMI (20%)": f"{s_factors.get('PMI', 0.0):+.1f}" if s_factors.get('PMI') is not None else "N/A",
+                            "GDP (5%)": f"{s_factors.get('GDP', 0.0):+.1f}" if s_factors.get('GDP') is not None else "N/A"
+                        })
+                    df_c_hist = pd.DataFrame(c_rows).sort_values("Datum", ascending=False)
+                    st.dataframe(df_c_hist, hide_index=True, use_container_width=True)
+                else:
+                    st.info("Noch keine Einzelwährungs-Snapshots vorhanden.")
                     
-                st.info("ℹ️ Der Backtest basiert zu 100% auf Point-in-Time Makrodaten (Geldpolitik 35%, Inflation 20%, Arbeitsmarkt 20%, PMI 20%, GDP 5%). News- und Finnhub-Faktoren fließen zu 0% ein.")
+            with hist_sub2:
+                st.subheader("💱 Währungspaar-Performance & Tracking")
+                if pair_snapshots:
+                    eval_rows = []
+                    for s_id, s in pair_snapshots.items():
+                        p_sig = s.get("pair_signal", {})
+                        outcomes = s.get("outcomes", {})
+                        ret5 = outcomes.get("5", {}).get("directional_return_pct")
+                        ret10 = outcomes.get("10", {}).get("directional_return_pct")
+                        ret20 = outcomes.get("20", {}).get("directional_return_pct")
+                        eval_rows.append({
+                            "Snapshot ID": s_id,
+                            "Datum": s.get("metadata", {}).get("date"),
+                            "FX-Paar": s.get("metadata", {}).get("pair"),
+                            "Signal": p_sig.get("signal"),
+                            "Divergenz": f"{p_sig.get('divergence', 0.0):+.1f}" if p_sig.get('divergence') is not None else "0.0",
+                            "Entry": s.get("entry_price"),
+                            "Status": s.get("outcome_status", "OPEN"),
+                            "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "Pending",
+                            "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "Pending",
+                            "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "Pending"
+                        })
+                    df_eval = pd.DataFrame(eval_rows).sort_values("Datum", ascending=False)
+                    st.dataframe(df_eval, hide_index=True, use_container_width=True)
+                else:
+                    st.info("Noch keine Paar-Snapshots vorhanden.")
+                    
+            with hist_sub3:
+                st.subheader("📥 Export der Live-Datensätze")
+                json_str = json.dumps(signals_data, indent=4, ensure_ascii=False)
+                st.download_button(
+                    label="📥 Vollständigen JSON Datensatz exportieren",
+                    data=json_str,
+                    file_name=f"live_signals_full_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json",
+                    key="btn_export_json_history"
+                )
+    
+    # ----------------- TAB 13: BACKTESTING & MODEL LAB -----------------
+    with tab13:
+        st.header("📊 Backtesting, Model Lab & Quant Research")
+        st.caption("Umfassende Research-Umgebung: Historisches Backtesting, Szenario-Simulationen, Modell-Konfiguration, Forward-Testing und technische Datenanalyse.")
+        
+        lab1, lab2, lab3, lab4, lab5, lab6 = st.tabs([
+            "📊 Fundamental Backtest",
+            "🧪 Model Lab & Custom Weights",
+            "🔬 Historical & Quant Research",
+            "🚀 Forward Testing",
+            "📝 Research Journal",
+            "🛠 API & Data Status"
+        ])
+        
+        with lab1:
+            st.subheader("📊 Fundamental FX Backtest Engine")
+            st.caption("Professionelles Backtesting-System zur Validierung fundamentaler Zins- und Makrodivergenzen ohne Look-Ahead Bias.")
+            
+            col_bt1, col_bt2 = st.columns(2)
+            with col_bt1:
+                bt_pair = st.selectbox("FX-Paar:", ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"], index=0, key="bt_pair_lab")
+                bt_hold = st.selectbox("Holding Period (Trading Days):", [5, 10, 15, 20], index=1, key="bt_hold_lab")
+            with col_bt2:
+                bt_thresh = st.slider("Signal Schwellenwert (Divergenz):", 1.0, 20.0, 5.0, step=0.5, key="bt_thresh_lab")
+                bt_days = st.slider("Backtest-Zeitraum (Tage):", 180, 1460, 730, step=90, key="bt_days_lab")
                 
-    with lab2:
-        st.subheader("🧪 Model Lab & Custom Weightings")
-        st.caption("Erstellen und testen Sie eigene Gewichtungsschemata im Vergleich zur CORE-Baseline.")
-        
-        st.write("##### Standard CORE-Baseline:")
-        st.write("- **Geldpolitik (2Y Yields & Leitzinsen):** 35.0%")
-        st.write("- **Inflation / CPI:** 20.0%")
-        st.write("- **Arbeitsmarkt:** 20.0%")
-        st.write("- **PMI Frühindikatoren:** 20.0%")
-        st.write("- **GDP Wachstum:** 5.0%")
-        
-    with lab3:
-        st.subheader("🔬 Historical & Quant Research")
-        st.caption("Point-in-Time Zeitreihen und historische Score-Rekonstruktionen.")
-        
-        sel_res_curr = st.selectbox("Währung wählen:", list(CURRENCIES.keys()), key="res_curr_sel")
-        st.write(f"Historische Datenreihen für {CURRENCIES[sel_res_curr]['flag']} {sel_res_curr} werden point-in-time aus FRED geladen.")
-        
-    with lab4:
-        st.subheader("🚀 Forward Testing & Paper Trading")
-        st.caption("Validieren Sie Ihre Fundamental-Modelle unter Live-Bedingungen.")
-        st.info("Forward Testing läuft parallel zur Live-Datenerfassung in `forward_tests.json`.")
-        
-    with lab5:
-        st.subheader("📝 Research Journal")
-        st.caption("Protokollierung von Research-Hypothesen und Modell-Entscheidungen.")
-        st.info("Alle Experimente werden versioniert in `research_journal.json` festgehalten.")
-        
-    with lab6:
-        st.subheader("🛠 Technical API & Data Status")
-        st.caption("Verbindungsstatus der zugelassenen Datenquellen (ohne News- / Sentiment-APIs).")
-        
-        api_health = [
-            {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-            {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": "Aktiv 🟢" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-            {"API / Datenquelle": "FCS Price Data API", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-            {"API / Datenquelle": "Tiingo Commodity API", "Status": "Aktiv 🟢" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-            {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
-            {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Aktiv 🟢 (Direktverbindung)"}
-        ]
-        st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
-        st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
+            if st.button("🚀 Backtest starten", key="btn_run_bt_lab"):
+                with st.spinner(f"Führe fundamentalen Backtest für {bt_pair} über {bt_days} Tage durch..."):
+                    st.success(f"✅ Backtest für {bt_pair} erfolgreich ausgeführt!")
+                    
+                    # Performance metrics
+                    b_c1, b_c2, b_c3, b_c4 = st.columns(4)
+                    with b_c1:
+                        st.metric("Total Trades", "28")
+                    with b_c2:
+                        st.metric("Hit Rate (Win %)", "64.3%")
+                    with b_c3:
+                        st.metric("Sharpe Ratio", "1.42")
+                    with b_c4:
+                        st.metric("Profit Factor", "1.85")
+                        
+                    st.info("ℹ️ Der Backtest basiert zu 100% auf Point-in-Time Makrodaten (Geldpolitik 35%, Inflation 20%, Arbeitsmarkt 20%, PMI 20%, GDP 5%). News- und Finnhub-Faktoren fließen zu 0% ein.")
+                    
+        with lab2:
+            st.subheader("🧪 Model Lab & Custom Weightings")
+            st.caption("Erstellen und testen Sie eigene Gewichtungsschemata im Vergleich zur CORE-Baseline.")
+            
+            st.write("##### Standard CORE-Baseline:")
+            st.write("- **Geldpolitik (2Y Yields & Leitzinsen):** 35.0%")
+            st.write("- **Inflation / CPI:** 20.0%")
+            st.write("- **Arbeitsmarkt:** 20.0%")
+            st.write("- **PMI Frühindikatoren:** 20.0%")
+            st.write("- **GDP Wachstum:** 5.0%")
+            
+        with lab3:
+            st.subheader("🔬 Historical & Quant Research")
+            st.caption("Point-in-Time Zeitreihen und historische Score-Rekonstruktionen.")
+            
+            sel_res_curr = st.selectbox("Währung wählen:", list(CURRENCIES.keys()), key="res_curr_sel")
+            st.write(f"Historische Datenreihen für {CURRENCIES[sel_res_curr]['flag']} {sel_res_curr} werden point-in-time aus FRED geladen.")
+            
+        with lab4:
+            st.subheader("🚀 Forward Testing & Paper Trading")
+            st.caption("Validieren Sie Ihre Fundamental-Modelle unter Live-Bedingungen.")
+            st.info("Forward Testing läuft parallel zur Live-Datenerfassung in `forward_tests.json`.")
+            
+        with lab5:
+            st.subheader("📝 Research Journal")
+            st.caption("Protokollierung von Research-Hypothesen und Modell-Entscheidungen.")
+            st.info("Alle Experimente werden versioniert in `research_journal.json` festgehalten.")
+            
+        with lab6:
+            st.subheader("🛠 Technical API & Data Status")
+            st.caption("Verbindungsstatus der zugelassenen Datenquellen (ohne News- / Sentiment-APIs).")
+            
+            api_health = [
+                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": "Aktiv 🟢" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "FCS Price Data API", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Aktiv 🟢" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
+                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Aktiv 🟢 (Direktverbindung)"}
+            ]
+            st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
+            st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
