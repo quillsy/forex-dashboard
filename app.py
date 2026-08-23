@@ -3140,6 +3140,39 @@ YIELD_SERIES = {
     "NZD": "IRLTLT01NZM156N"
 }
 
+YIELD_2Y_SERIES = {
+    "USD": "DGS2",
+    "EUR": "DE2Y.GBOND",
+    "GBP": "UK2Y.GBOND",
+    "JPY": "JP2Y.GBOND",
+    "CHF": "SW2Y.GBOND",
+    "CAD": "CA2Y.GBOND",
+    "AUD": "AU2Y.GBOND",
+    "NZD": "NZ2Y.GBOND"
+}
+
+YIELD_5Y_SERIES = {
+    "USD": "DGS5",
+    "EUR": "DE5Y.GBOND",
+    "GBP": "UK5Y.GBOND",
+    "JPY": "JP5Y.GBOND",
+    "CHF": None,
+    "CAD": "CA5Y.GBOND",
+    "AUD": "AU5Y.GBOND",
+    "NZD": "NZ5Y.GBOND"
+}
+
+YIELD_10Y_SERIES = {
+    "USD": "DGS10",
+    "EUR": "IRLTLT01EZM156N",
+    "GBP": "IRLTLT01GBM156N",
+    "JPY": "IRLTLT01JPM156N",
+    "CHF": "IRLTLT01CHM156N",
+    "CAD": "IRLTLT01CAM156N",
+    "AUD": "IRLTLT01AUM156N",
+    "NZD": "IRLTLT01NZM156N"
+}
+
 CPI_SERIES = {
     "USD": "CPIAUCNS",
     "EUR": "CP0000EZ19M086NEST",
