@@ -5245,12 +5245,13 @@ if not getattr(st, "_mock_mode", False):
         is_live_itick = False
     else:
         with st.spinner("Initialisiere globale Marktdaten..."):
-            _, _, base_core, _, b_details = compute_currency_professional_score_and_regime_custom(base_curr, model_weights)
-            _, _, quote_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote_curr, model_weights)
+            m_weights = st.session_state.get("active_live_model_weights") if hasattr(st, "session_state") else None
+            _, _, base_core, _, b_details = compute_currency_professional_score_and_regime_custom(base_curr, m_weights)
+            _, _, quote_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote_curr, m_weights)
             base_score = base_core
             quote_score = quote_core
             
-            badge, _, raw_diff, sig = get_pair_signal_and_badge(base_curr, quote_curr, model_weights)
+            badge, _, raw_diff, sig = get_pair_signal_and_badge(base_curr, quote_curr, m_weights)
             signal_value = raw_diff
                 
             itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
