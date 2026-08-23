@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
-CURRENT_MODEL_VERSION = "CORE_V2_5_2026_08"
+CURRENT_MODEL_VERSION = "CORE_V2_6_2026_08"
 
 # Set up page config
 st.set_page_config(
@@ -446,8 +446,10 @@ def generate_mock_worldbank(wb_code, indicator):
 
 
 # ----------------- 1. LIVE DATA FETCHING FUNCTIONS -----------------
-def fetch_fred_live(series_id, key):
+def fetch_fred_live(series_id, key, units=None):
     url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={key}&file_type=json&observation_start=2015-01-01"
+    if units:
+        url += f"&units={units}"
     r = requests.get(url, timeout=8)
     r.raise_for_status()
     obs = r.json().get("observations", [])
@@ -1739,13 +1741,13 @@ def get_statsnz_cpi_data():
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_fred_data(series_id, key):
+def get_fred_data(series_id, key, units=None):
     if not key:
         if check_demo_active():
             return generate_mock_fred(series_id), datetime.now(), False
         return None, datetime.now(), False
     try:
-        df = fetch_fred_live(series_id, key)
+        df = fetch_fred_live(series_id, key, units=units)
         return df, datetime.now(), True
     except Exception:
         if check_demo_active():
@@ -3552,7 +3554,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                 return None, None, metric_type, "Stats NZ", series_id, "🔴 UNAVAILABLE"
             
         if series_id and fred_key:
-            df, _, is_live = get_fred_data(series_id, fred_key)
+            units_param = "pc1" if curr == "USD" else None
+            df, _, is_live = get_fred_data(series_id, fred_key, units=units_param)
             if df is not None and not df.empty:
                 if not is_live and not check_demo_active():
                     pass
@@ -3581,7 +3584,11 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                             return None, obs_date.strftime("%Y-%m-%d"), metric_type, source, series_id, freshness
                             
                         val = None
-                        if series_id in ["CPALTT01CHM657N", "CPALTT01CAM657N"]:
+                        if curr == "USD":
+                            raw_pc1 = df_filtered.iloc[-1]["value"]
+                            val = round(float(raw_pc1), 1)
+                            source = "FRED / BLS"
+                        elif series_id in ["CPALTT01CHM657N", "CPALTT01CAM657N"]:
                             # Compounding last 12 MoM rates
                             if len(df_filtered) >= 12:
                                 last_12 = df_filtered.tail(12)["value"].astype(float).values
