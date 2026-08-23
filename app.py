@@ -37,13 +37,13 @@ if os.path.exists(RATES_CONFIG_FILE):
         pass
 
 defaults = {
-    "manual_rate_EUR": 4.00,
-    "manual_rate_USD": 5.25,
-    "manual_rate_GBP": 5.25,
-    "manual_rate_JPY": 0.10,
+    "manual_rate_EUR": 2.25,
+    "manual_rate_USD": 3.50,
+    "manual_rate_GBP": 3.75,
+    "manual_rate_JPY": 1.00,
     "manual_rate_AUD": 4.35,
-    "manual_rate_CAD": 5.00,
-    "manual_rate_NZD": 5.50,
+    "manual_rate_CAD": 2.25,
+    "manual_rate_NZD": 2.50,
     "manual_rate_CHF": 0.00,
     "last_saved_rates": None
 }
@@ -5245,34 +5245,13 @@ if not getattr(st, "_mock_mode", False):
         is_live_itick = False
     else:
         with st.spinner("Initialisiere globale Marktdaten..."):
-            base_score = compute_currency_score(base_curr, FRED_KEY)
-            quote_score = compute_currency_score(quote_curr, FRED_KEY)
+            _, _, base_core, _, b_details = compute_currency_professional_score_and_regime_custom(base_curr, model_weights)
+            _, _, quote_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote_curr, model_weights)
+            base_score = base_core
+            quote_score = quote_core
             
-            if base_score is None or quote_score is None:
-                raw_diff = None
-                signal_value = None
-                sig = "INSUFFICIENT DATA"
-                badge = "INSUFFICIENT FUNDAMENTAL DATA"
-            else:
-                raw_diff = quote_score - base_score
-                signal_value = raw_diff / 2.0
-                signal_value = max(-50.0, min(50.0, signal_value))
-                
-                if signal_value >= 25.0:
-                    sig = "SB"
-                    badge = "STRONG BUY"
-                elif 10.0 <= signal_value < 25.0:
-                    sig = "MB"
-                    badge = "MID BUY"
-                elif -10.0 < signal_value < 10.0:
-                    sig = "NT"
-                    badge = "NEUTRAL"
-                elif -25.0 < signal_value <= -10.0:
-                    sig = "MS"
-                    badge = "MID SELL"
-                else:
-                    sig = "SS"
-                    badge = "STRONG SELL"
+            badge, _, raw_diff, sig = get_pair_signal_and_badge(base_curr, quote_curr, model_weights)
+            signal_value = raw_diff
                 
             itick_data, t_itick, is_live_itick = get_itick_data(selected_pair, ITICK_KEY)
             latest_close = itick_data["close"] if itick_data else 0.0
@@ -5296,35 +5275,46 @@ if not getattr(st, "_mock_mode", False):
         st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
     
 # ----------------- 6. TABS MODULES -----------------
-def get_pair_signal_and_badge(base, quote):
-    b_f_score, _, _, _, b_details = compute_currency_professional_score_and_regime(base)
-    q_f_score, _, _, _, q_details = compute_currency_professional_score_and_regime(quote)
+def get_pair_signal_and_badge(base, quote, model_weights=None):
+    """
+    Canonical pair fundamental divergence function based strictly on BASE CORE.
+    divergence = base_core_score - quote_core_score
+    
+    Thresholds:
+    >= +50.0        => STRONG BUY (SB)
+    +20.0 to <+50.0 => MID BUY (MB)
+    >-20.0 to <+20.0 => NEUTRAL (NT)
+    >-50.0 to <=-20.0 => MID SELL (MS)
+    <= -50.0        => STRONG SELL (SS)
+    """
+    if model_weights is not None:
+        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+    else:
+        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime(base)
+        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime(quote)
     
     b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
     q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
     
-    if b_f_score is None or q_f_score is None or b_comp < 50.0 or q_comp < 50.0:
+    if b_core is None or q_core is None or b_comp < 50.0 or q_comp < 50.0:
         return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
         
-    b_score = (b_f_score + 100.0) / 2.0
-    q_score = (q_f_score + 100.0) / 2.0
-    r_diff = b_score - q_score
-    sig_val = r_diff / 2.0
-    sig_val = max(-50.0, min(50.0, sig_val))
+    divergence = float(b_core - q_core)
     
-    if sig_val >= 25.0:
+    if divergence >= 50.0:
         s = "SB"
         b = "STRONG BUY"
         c = "#10b981"
-    elif 10.0 <= sig_val < 25.0:
+    elif 20.0 <= divergence < 50.0:
         s = "MB"
         b = "MID BUY"
         c = "#34d399"
-    elif -10.0 < sig_val < 10.0:
+    elif -20.0 < divergence < 20.0:
         s = "NT"
         b = "NEUTRAL"
         c = "#8b949e"
-    elif -25.0 < sig_val <= -10.0:
+    elif -50.0 < divergence <= -20.0:
         s = "MS"
         b = "MID SELL"
         c = "#f87171"
@@ -5333,7 +5323,7 @@ def get_pair_signal_and_badge(base, quote):
         b = "STRONG SELL"
         c = "#ef4444"
         
-    return b, c, sig_val, s
+    return b, c, divergence, s
 
 def get_historical_indicator_values(series_id, dt_str, fred_key):
     try:
@@ -5878,40 +5868,31 @@ def compute_checklist_snapshot(model_weights):
     for pair in pairs:
         base, quote = pair.split("/")
         try:
-            # Base
-            b_score, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
-            # Quote
-            q_score, q_reg, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+            badge, _, divergence, code = get_pair_signal_and_badge(base, quote, model_weights)
+            _, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+            _, _, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
             
-            diff = b_score - q_score
-            signal_value = diff / 2.0
-            
-            if signal_value >= 25.0:
-                sig_text = "STRONG BUY"
-                sig_strength = "STARK"
-            elif 10.0 <= signal_value < 25.0:
-                sig_text = "MID BUY"
-                sig_strength = "MITTEL"
-            elif -10.0 < signal_value < 10.0:
-                sig_text = "NEUTRAL"
-                sig_strength = "SCHWACH"
-            elif -25.0 < signal_value <= -10.0:
-                sig_text = "MID SELL"
-                sig_strength = "MITTEL"
-            else:
-                sig_text = "STRONG SELL"
-                sig_strength = "STARK"
-                
-            b_comp = b_details.get("_completeness", 100.0)
-            q_comp = q_details.get("_completeness", 100.0)
+            b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
+            q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
             dq = (b_comp + q_comp) / 2.0
             
+            if divergence is None:
+                sig_text = "INSUFFICIENT DATA"
+                sig_strength = "N/A"
+                diff_val = None
+                conf = 0
+            else:
+                sig_text = badge
+                sig_strength = "STARK" if abs(divergence) >= 50.0 else "MITTEL" if abs(divergence) >= 20.0 else "SCHWACH"
+                diff_val = round(divergence, 1)
+                conf = min(int(abs(divergence) / 50.0 * 100.0), 100)
+                
             checklist.append({
                 "pair": pair,
                 "signal": sig_text,
                 "signal_strength": sig_strength,
-                "divergence": round(diff, 1),
-                "confidence": min(int(abs(diff) / 10.0 * 100.0), 100),
+                "divergence": diff_val,
+                "confidence": conf,
                 "data_quality": dq,
                 "regime": b_reg
             })
@@ -6009,11 +5990,11 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
         "pair_signal": {
             "base_core": float(base_score),
             "quote_core": float(quote_score),
-            "divergence": float(signal_value * 2.0),
+            "divergence": float(signal_value),
             "final_score": float(signal_value),
             "signal": badge,
-            "signal_strength": "STARK" if abs(signal_value * 2.0) >= 25.0 else "MITTEL" if abs(signal_value * 2.0) >= 10.0 else "SCHWACH",
-            "confidence": min(int(abs(signal_value * 2.0) / 10.0 * 100.0), 100),
+            "signal_strength": "STARK" if abs(signal_value) >= 50.0 else "MITTEL" if abs(signal_value) >= 20.0 else "SCHWACH",
+            "confidence": min(int(abs(signal_value) / 50.0 * 100.0), 100),
             "regime": base_details_raw.get("regime", "Normal"),
             "risk_on_off": "Risk-Off" if (vix_val and vix_val > 22.0) else "Risk-On",
             "data_quality": (base_details_raw.get("_completeness", 100.0) + quote_details_raw.get("_completeness", 100.0)) / 2.0
@@ -6168,6 +6149,46 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     c_trend = inf_data.get("cpi_trend")
     c_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
 
+    # Dynamic CPI release date, dataset, metric calculation, and PIT status resolution
+    cpi_dataset_val = series_id
+    cpi_release_date_val = obs_date
+    if curr == "JPY":
+        res_j = get_estat_cpi_data()
+        stats_id_used = "0004052037"
+        if res_j is not None and res_j[0] is not None and not res_j[0].empty:
+            stats_id_used = res_j[0].iloc[-1].get("stats_id", "0004052037")
+            rel_dt = res_j[0].iloc[-1].get("release_date")
+            if rel_dt is not None:
+                cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
+        cpi_dataset_val = stats_id_used
+    elif curr == "NZD":
+        cpi_dataset_val = "CS_ECONOMY / CAT_PRICE_INDEXES"
+        res_n = get_statsnz_cpi_data()
+        if res_n is not None and res_n[0] is not None and not res_n[0].empty:
+            rel_dt = res_n[0].iloc[-1].get("release_date")
+            if rel_dt is not None:
+                cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
+    elif curr == "CAD":
+        cpi_dataset_val = "v41690973"
+    elif curr == "AUD":
+        cpi_dataset_val = "3.10001.10.50.M"
+    elif curr == "GBP":
+        cpi_dataset_val = "D7G7"
+    elif curr == "USD":
+        cpi_dataset_val = "CPIAUCNS"
+        
+    if curr == "USD":
+        cpi_method_val = "DIRECT_FRED_PC1"
+    elif curr in ["GBP", "AUD", "JPY", "NZD"]:
+        cpi_method_val = "DIRECT_OFFICIAL"
+    else:
+        cpi_method_val = "DERIVED_FROM_INDEX"
+        
+    if curr in ["USD", "EUR", "CHF", "CAD"]:
+        cpi_pit_status_val = "FRED_POINT_IN_TIME"
+    else:
+        cpi_pit_status_val = "PIT_STRICT"
+
     # Get raw values for saving
     raw_values = {
         "policy_rate": st.session_state.get(f"manual_rate_{curr}", defaults.get(f"manual_rate_{curr}")),
@@ -6177,21 +6198,21 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "unrate": get_unemployment_value(curr, today_str),
         "gdp_yoy": get_gdp_yoy_value(curr, today_str),
         
-        # V2.5 CPI Snapshot requirements
+        # CPI Snapshot metadata
         "cpi_value": cpi_val,
         "cpi_metric_type": metric_type,
         "cpi_source": source,
-        "cpi_dataset": "0003427113" if curr == "JPY" else "CS_ECONOMY / CAT_PRICE_INDEXES" if curr == "NZD" else "v41690973" if curr == "CAD" else "3.10001.10.50.M" if curr == "AUD" else "D7G7" if curr == "GBP" else series_id,
+        "cpi_dataset": cpi_dataset_val,
         "cpi_series": series_id,
         "cpi_geography": "00000" if curr == "JPY" else "National" if curr in ["NZD", "AUD", "CAD", "GBP"] else curr,
         "cpi_observation_date": obs_date,
-        "cpi_release_date": obs_date,
+        "cpi_release_date": cpi_release_date_val,
         "cpi_frequency": "quarterly" if curr == "NZD" else "monthly",
         "cpi_freshness": freshness,
         "cpi_change_pp": c_trend,
         "cpi_trend": c_trend_str,
-        "cpi_pit_status": "PIT_LIMITED" if ("PIT_LIMITED" in str(source) or "PIT_LIMITED" in str(freshness) or curr in ["JPY", "NZD", "AUD", "GBP", "CHF"]) else "PIT_STRONG",
-        "metric_calculation": "DERIVED_FROM_INDEX" if curr == "CAD" else "DIRECT_OFFICIAL"
+        "cpi_pit_status": cpi_pit_status_val,
+        "metric_calculation": cpi_method_val
     }
 
     snapshot = {
@@ -6225,7 +6246,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "cpi_source": source,
         "cpi_series": series_id,
         "cpi_observation_date": obs_date,
-        "cpi_release_date": obs_date,
+        "cpi_release_date": cpi_release_date_val,
         "cpi_freshness": freshness,
         "cpi_change_pp": c_trend,
         "cpi_trend": c_trend_str
@@ -6264,29 +6285,16 @@ def save_all_g10_live_snapshots():
         for pair in pairs:
             base, quote = pair.split("/")
             try:
-                b_score, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
-                q_score, q_reg, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+                b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+                q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
                 
-                diff = b_score - q_score
-                signal_value = diff / 2.0
-                
-                if signal_value >= 25.0:
-                    badge = "STRONG BUY"
-                elif 10.0 <= signal_value < 25.0:
-                    badge = "MID BUY"
-                elif -10.0 < signal_value < 10.0:
-                    badge = "NEUTRAL"
-                elif -25.0 < signal_value <= -10.0:
-                    badge = "MID SELL"
-                else:
-                    badge = "STRONG SELL"
-                    
-                latest_close = 0.0
-                df, _, _ = get_fcs_history_data(pair, FCS_KEY)
-                if df is not None and not df.empty:
-                    latest_close = float(df.iloc[-1]["close"])
-                        
-                save_live_signal_snapshot(pair, base, quote, b_score, q_score, signal_value, badge, latest_close)
+                badge, color, divergence, code = get_pair_signal_and_badge(base, quote, model_weights)
+                if divergence is not None:
+                    latest_close = 0.0
+                    df, _, _ = get_fcs_history_data(pair, FCS_KEY)
+                    if df is not None and not df.empty:
+                        latest_close = float(df.iloc[-1]["close"])
+                    save_live_signal_snapshot(pair, base, quote, b_core, q_core, divergence, badge, latest_close)
             except Exception:
                 pass
 
@@ -6333,11 +6341,11 @@ if not getattr(st, "_mock_mode", False):
                 "details": details
             }
             
-        sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["score"] if g8_data[k]["score"] is not None else -999.0, reverse=True)
+        sorted_curr_keys = sorted(CURRENCIES.keys(), key=lambda k: g8_data[k]["core"] if g8_data[k]["core"] is not None else -999.0, reverse=True)
         
-        valid_scores = [k for k in CURRENCIES.keys() if g8_data[k]["score"] is not None]
+        valid_scores = [k for k in CURRENCIES.keys() if g8_data[k]["core"] is not None]
         if valid_scores:
-            sorted_valid = sorted(valid_scores, key=lambda k: g8_data[k]["score"], reverse=True)
+            sorted_valid = sorted(valid_scores, key=lambda k: g8_data[k]["core"], reverse=True)
             strongest_c = sorted_valid[0]
             weakest_c = sorted_valid[-1]
         else:
@@ -6360,14 +6368,14 @@ if not getattr(st, "_mock_mode", False):
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         with m_col1:
             if strongest_c != "N/A":
-                st.metric("🟢 Stärkste Währung", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['score']:+.1f})")
+                st.metric("🟢 Stärkste Währung (BASE CORE)", f"{CURRENCIES[strongest_c]['flag']} {strongest_c} ({g8_data[strongest_c]['core']:+.1f})")
             else:
-                st.metric("🟢 Stärkste Währung", "N/A (Insufficient Data)")
+                st.metric("🟢 Stärkste Währung (BASE CORE)", "N/A (Insufficient Data)")
         with m_col2:
             if weakest_c != "N/A":
-                st.metric("🔴 Schwächste Währung", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['score']:+.1f})")
+                st.metric("🔴 Schwächste Währung (BASE CORE)", f"{CURRENCIES[weakest_c]['flag']} {weakest_c} ({g8_data[weakest_c]['core']:+.1f})")
             else:
-                st.metric("🔴 Schwächste Währung", "N/A (Insufficient Data)")
+                st.metric("🔴 Schwächste Währung (BASE CORE)", "N/A (Insufficient Data)")
         with m_col3:
             st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})")
         with m_col4:
@@ -6375,21 +6383,21 @@ if not getattr(st, "_mock_mode", False):
             
         st.write("")
         
-        # Visual horizontal bar chart
-        plot_keys = [k for k in sorted_curr_keys if g8_data[k]["score"] is not None]
+        # Visual horizontal bar chart based purely on BASE CORE
+        plot_keys = [k for k in sorted_curr_keys if g8_data[k]["core"] is not None]
         if plot_keys:
             fig_rank = go.Figure(go.Bar(
-                x=[g8_data[k]["score"] for k in reversed(plot_keys)],
+                x=[g8_data[k]["core"] for k in reversed(plot_keys)],
                 y=[f"{CURRENCIES[k]['flag']} {k}" for k in reversed(plot_keys)],
                 orientation='h',
                 marker=dict(
-                    color=['#10b981' if g8_data[k]["score"] >= 15.0 else '#f87171' if g8_data[k]["score"] <= -15.0 else '#e2b13c' for k in reversed(plot_keys)]
+                    color=['#10b981' if g8_data[k]["core"] >= 20.0 else '#f87171' if g8_data[k]["core"] <= -20.0 else '#e2b13c' for k in reversed(plot_keys)]
                 ),
-                text=[f"{g8_data[k]['score']:+.1f}" for k in reversed(plot_keys)],
+                text=[f"{g8_data[k]['core']:+.1f}" for k in reversed(plot_keys)],
                 textposition='outside'
             ))
             fig_rank.update_layout(
-                title="<b>Fundamental Score Ranking (Strongest ➔ Weakest)</b>",
+                title="<b>BASE CORE Ranking (Strongest ➔ Weakest)</b>",
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font=dict(color="#d1d5db", size=12),
@@ -6412,15 +6420,15 @@ if not getattr(st, "_mock_mode", False):
             comp = det.get("_completeness", 100.0)
             missing = det.get("_missing", [])
             
-            if d["score"] is None:
+            if d["core"] is None:
                 badge_str = "⚪ INSUFFICIENT DATA"
-            elif d["score"] >= 25.0:
+            elif d["core"] >= 50.0:
                 badge_str = "🟢 STRONG BULLISH"
-            elif d["score"] >= 10.0:
+            elif d["core"] >= 20.0:
                 badge_str = "🟢 BULLISH"
-            elif d["score"] > -10.0:
+            elif d["core"] > -20.0:
                 badge_str = "🟡 NEUTRAL"
-            elif d["score"] > -25.0:
+            elif d["core"] > -50.0:
                 badge_str = "🔴 BEARISH"
             else:
                 badge_str = "🔴 STRONG BEARISH"
@@ -6826,12 +6834,13 @@ if not getattr(st, "_mock_mode", False):
             badge_name, badge_color, sig_val, s_code = get_pair_signal_and_badge(base_sel, quote_sel)
             
             st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
-            render_bias_box(sig_val, base_sel, quote_sel, b_score, q_score, s_code)
+            render_bias_box(sig_val, base_sel, quote_sel, b_core, q_core, s_code)
             
             col_pb1, col_pb2 = st.columns(2)
             with col_pb1:
                 st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
-                st.metric("Gesamt-Score", b_score_str, delta=f"Regime: {b_reg}")
+                st.metric("BASE CORE Score", f"{b_core:+.1f}" if b_core is not None else "N/A", delta=f"Regime: {b_reg}")
+                st.write(f"- Gesamt/Kontext-Score: `{b_score_str}`")
                 st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
                 st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
                 st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
@@ -6839,7 +6848,8 @@ if not getattr(st, "_mock_mode", False):
                 st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
             with col_pb2:
                 st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
-                st.metric("Gesamt-Score", q_score_str, delta=f"Regime: {q_reg}")
+                st.metric("BASE CORE Score", f"{q_core:+.1f}" if q_core is not None else "N/A", delta=f"Regime: {q_reg}")
+                st.write(f"- Gesamt/Kontext-Score: `{q_score_str}`")
                 st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
                 st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
                 st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
