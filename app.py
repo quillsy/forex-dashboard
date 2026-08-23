@@ -5076,6 +5076,69 @@ def render_articles_grid(articles_list):
             """, unsafe_allow_html=True)
 
 
+def get_pair_signal_and_badge(base, quote, model_weights=None):
+    """
+    Canonical pair fundamental divergence function based strictly on BASE CORE.
+    divergence = base_core_score - quote_core_score
+    
+    Thresholds:
+    >= +50.0        => STRONG BUY (SB)
+    +20.0 to <+50.0 => MID BUY (MB)
+    >-20.0 to <+20.0 => NEUTRAL (NT)
+    >-50.0 to <=-20.0 => MID SELL (MS)
+    <= -50.0        => STRONG SELL (SS)
+    """
+    if model_weights is not None:
+        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
+        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+    else:
+        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime(base)
+        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime(quote)
+    
+    b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
+    q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
+    
+    if b_core is None or q_core is None or b_comp < 50.0 or q_comp < 50.0:
+        return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
+        
+    divergence = float(b_core - q_core)
+    
+    if divergence >= 50.0:
+        s = "SB"
+        b = "STRONG BUY"
+        c = "#10b981"
+    elif 20.0 <= divergence < 50.0:
+        s = "MB"
+        b = "MID BUY"
+        c = "#34d399"
+    elif -20.0 < divergence < 20.0:
+        s = "NT"
+        b = "NEUTRAL"
+        c = "#8b949e"
+    elif -50.0 < divergence <= -20.0:
+        s = "MS"
+        b = "MID SELL"
+        c = "#f87171"
+    else:
+        s = "SS"
+        b = "STRONG SELL"
+        c = "#ef4444"
+        
+    return b, c, divergence, s
+
+def get_historical_indicator_values(series_id, dt_str, fred_key):
+    try:
+        val_now, _, _ = get_fred_data_historical(series_id, dt_str, fred_key)
+        dt_1m = (pd.to_datetime(dt_str) - timedelta(days=30)).strftime("%Y-%m-%d")
+        val_1m, _, _ = get_fred_data_historical(series_id, dt_1m, fred_key)
+        dt_3m = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
+        val_3m, _, _ = get_fred_data_historical(series_id, dt_3m, fred_key)
+        dt_6m = (pd.to_datetime(dt_str) - timedelta(days=180)).strftime("%Y-%m-%d")
+        val_6m, _, _ = get_fred_data_historical(series_id, dt_6m, fred_key)
+        return val_now, val_1m, val_3m, val_6m
+    except Exception:
+        return None, None, None, None
+
 # ----------------- 3. SIDEBAR CONFIGURATION -----------------
 invalid_pair = False
 base_curr = "USD"
@@ -5311,101 +5374,6 @@ if not getattr(st, "_mock_mode", False):
         st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
     
 # ----------------- 6. TABS MODULES -----------------
-def get_pair_signal_and_badge(base, quote, model_weights=None):
-    """
-    Canonical pair fundamental divergence function based strictly on BASE CORE.
-    divergence = base_core_score - quote_core_score
-    
-    Thresholds:
-    >= +50.0        => STRONG BUY (SB)
-    +20.0 to <+50.0 => MID BUY (MB)
-    >-20.0 to <+20.0 => NEUTRAL (NT)
-    >-50.0 to <=-20.0 => MID SELL (MS)
-    <= -50.0        => STRONG SELL (SS)
-    """
-    if model_weights is not None:
-        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
-        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
-    else:
-        _, _, b_core, _, b_details = compute_currency_professional_score_and_regime(base)
-        _, _, q_core, _, q_details = compute_currency_professional_score_and_regime(quote)
-    
-    b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
-    q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
-    
-    if b_core is None or q_core is None or b_comp < 50.0 or q_comp < 50.0:
-        return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
-        
-    divergence = float(b_core - q_core)
-    
-    if divergence >= 50.0:
-        s = "SB"
-        b = "STRONG BUY"
-        c = "#10b981"
-    elif 20.0 <= divergence < 50.0:
-        s = "MB"
-        b = "MID BUY"
-        c = "#34d399"
-    elif -20.0 < divergence < 20.0:
-        s = "NT"
-        b = "NEUTRAL"
-        c = "#8b949e"
-    elif -50.0 < divergence <= -20.0:
-        s = "MS"
-        b = "MID SELL"
-        c = "#f87171"
-    else:
-        s = "SS"
-        b = "STRONG SELL"
-        c = "#ef4444"
-        
-    return b, c, divergence, s
-
-def get_historical_indicator_values(series_id, dt_str, fred_key):
-    try:
-        val_now, _, _ = get_fred_data_historical(series_id, dt_str, fred_key)
-        dt_1m = (pd.to_datetime(dt_str) - timedelta(days=30)).strftime("%Y-%m-%d")
-        val_1m, _, _ = get_fred_data_historical(series_id, dt_1m, fred_key)
-        dt_3m = (pd.to_datetime(dt_str) - timedelta(days=90)).strftime("%Y-%m-%d")
-        val_3m, _, _ = get_fred_data_historical(series_id, dt_3m, fred_key)
-        dt_6m = (pd.to_datetime(dt_str) - timedelta(days=180)).strftime("%Y-%m-%d")
-        val_6m, _, _ = get_fred_data_historical(series_id, dt_6m, fred_key)
-        return val_now, val_1m, val_3m, val_6m
-    except Exception:
-        return None, None, None, None
-
-YIELD_2Y_SERIES = {
-    "USD": "DGS2",
-    "EUR": "DE2Y.GBOND",
-    "GBP": "UK2Y.GBOND",
-    "JPY": "JP2Y.GBOND",
-    "CHF": "SW2Y.GBOND",
-    "CAD": "CA2Y.GBOND",
-    "AUD": "AU2Y.GBOND",
-    "NZD": "NZ2Y.GBOND"
-}
-
-YIELD_5Y_SERIES = {
-    "USD": "DGS5",
-    "EUR": "DE5Y.GBOND",
-    "GBP": "UK5Y.GBOND",
-    "JPY": "JP5Y.GBOND",
-    "CHF": None,
-    "CAD": "CA5Y.GBOND",
-    "AUD": "AU5Y.GBOND",
-    "NZD": "NZ5Y.GBOND"
-}
-
-YIELD_10Y_SERIES = {
-    "USD": "DGS10",
-    "EUR": "IRLTLT01EZM156N",
-    "GBP": "IRLTLT01GBM156N",
-    "JPY": "IRLTLT01JPM156N",
-    "CHF": "IRLTLT01CHM156N",
-    "CAD": "IRLTLT01CAM156N",
-    "AUD": "IRLTLT01AUM156N",
-    "NZD": "IRLTLT01NZM156N"
-}
 
 def get_historical_yield_trends(series_id, dt_str, fred_key):
     try:
