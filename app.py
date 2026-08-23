@@ -4225,7 +4225,9 @@ def compute_currency_professional_score_and_regime(curr: str, target_date=None):
         
     return compute_currency_professional_score_and_regime_custom(curr, weights, target_date)
 
-def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict, target_date=None):
+def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict = None, target_date=None):
+    if weights is None:
+        weights = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
     regime = detect_market_regime(curr, target_date)
     scores = compute_currency_details(curr, target_date)
     
