@@ -72346,6 +72346,2348 @@
                 "mfe": null,
                 "mae": null
             }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "CURR_USD_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "USD",
+        "date": "2026-08-25",
+        "time": "22:18:57",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 38.156064875081306,
+        "core_score": 42.156064875081306,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 42.156064875081306,
+        "correction_score": 0.0,
+        "trend_score": 3.0,
+        "surprise_score": -7.0,
+        "regime": "Inflation",
+        "factor_scores": {
+            "Geldpolitik": 29.0,
+            "Inflation": 70.0,
+            "Arbeitsmarkt": 30.00000000000001,
+            "PMI": 50.0,
+            "GDP": 40.12129750162601,
+            "BCI": 56.6
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0
+        },
+        "data_quality": 100.0,
+        "missing_factors": [],
+        "freshness": {
+            "Geldpolitik": "FRESH",
+            "Inflation": "🟢 FRESH",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "AGING"
+        },
+        "raw_values": {
+            "policy_rate": 3.5,
+            "yield_2y": 4.24,
+            "yield_5y": 4.41,
+            "cpi_yoy": 3.4,
+            "unrate": 4.1,
+            "gdp_yoy": 2.1018194625243902,
+            "cpi_value": 3.4,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "FRED / BLS",
+            "cpi_dataset": "CPIAUCNS",
+            "cpi_series": "CPIAUCNS",
+            "cpi_geography": "USD",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟢 FRESH",
+            "cpi_change_pp": -0.8,
+            "cpi_trend": "↓ FALLING",
+            "cpi_pit_status": "FRED_POINT_IN_TIME",
+            "metric_calculation": "DIRECT_FRED_PC1"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": -15.0,
+            "lab_trend": 15.0,
+            "pmi_trend": 15.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": -20.0,
+            "cpi_surprise": 0.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": 0.0
+        },
+        "cpi_value": 3.4,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "FRED / BLS",
+        "cpi_series": "CPIAUCNS",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟢 FRESH",
+        "cpi_change_pp": -0.8,
+        "cpi_trend": "↓ FALLING"
+    },
+    "CURR_EUR_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "EUR",
+        "date": "2026-08-25",
+        "time": "22:18:57",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 27.01513486072743,
+        "core_score": 28.01513486072743,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 28.01513486072743,
+        "correction_score": -1.0,
+        "trend_score": 0.0,
+        "surprise_score": 0.0,
+        "regime": "Normal",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 46.58954926206613,
+            "Arbeitsmarkt": 42.96666666666667,
+            "PMI": 22.5,
+            "GDP": -84.0281105254746,
+            "BCI": 43.2
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Inflation": 30.8,
+            "Arbeitsmarkt": 30.8,
+            "PMI": 30.8,
+            "GDP": 7.7
+        },
+        "data_quality": 65.0,
+        "missing_factors": [
+            "Geldpolitik"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🟢 FRESH",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "FRESH"
+        },
+        "raw_values": {
+            "policy_rate": 2.25,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": 2.9317909852413226,
+            "unrate": 3.711,
+            "gdp_yoy": 0.239578342117881,
+            "cpi_value": 2.9317909852413226,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "FRED",
+            "cpi_dataset": "CP0000EZ19M086NEST",
+            "cpi_series": "CP0000EZ19M086NEST",
+            "cpi_geography": "EUR",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟢 FRESH",
+            "cpi_change_pp": -0.21,
+            "cpi_trend": "↓ FALLING",
+            "cpi_pit_status": "FRED_POINT_IN_TIME",
+            "metric_calculation": "DERIVED_FROM_INDEX"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": -20.0,
+            "cpi_surprise": -20.0,
+            "lab_surprise": 20.0,
+            "pmi_surprise": 0.0
+        },
+        "cpi_value": 2.9317909852413226,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "FRED",
+        "cpi_series": "CP0000EZ19M086NEST",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟢 FRESH",
+        "cpi_change_pp": -0.21,
+        "cpi_trend": "↓ FALLING"
+    },
+    "CURR_GBP_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "GBP",
+        "date": "2026-08-25",
+        "time": "22:18:57",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 23.494574761985934,
+        "core_score": 22.494574761985934,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 22.494574761985934,
+        "correction_score": 1.0,
+        "trend_score": 0.0,
+        "surprise_score": 0.0,
+        "regime": "Monetary Policy",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 44.99999999999999,
+            "Arbeitsmarkt": 8.46666666666665,
+            "PMI": 21.499999999999986,
+            "GDP": -7.4371947608493345,
+            "BCI": 27.47896348
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Inflation": 30.8,
+            "Arbeitsmarkt": 30.8,
+            "PMI": 30.8,
+            "GDP": 7.7
+        },
+        "data_quality": 65.0,
+        "missing_factors": [
+            "Geldpolitik"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🟢 FRESH",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "FRESH"
+        },
+        "raw_values": {
+            "policy_rate": 3.75,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": 2.9,
+            "unrate": 4.746,
+            "gdp_yoy": 1.38844207858726,
+            "cpi_value": 2.9,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "ONS",
+            "cpi_dataset": "D7G7",
+            "cpi_series": "D7G7",
+            "cpi_geography": "National",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟢 FRESH",
+            "cpi_change_pp": 0.1,
+            "cpi_trend": "↑ RISING",
+            "cpi_pit_status": "PIT_STRICT",
+            "metric_calculation": "DIRECT_OFFICIAL"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 20.0,
+            "cpi_surprise": 0.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": 0.0
+        },
+        "cpi_value": 2.9,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "ONS",
+        "cpi_series": "D7G7",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟢 FRESH",
+        "cpi_change_pp": 0.1,
+        "cpi_trend": "↑ RISING"
+    },
+    "CURR_CHF_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "CHF",
+        "date": "2026-08-25",
+        "time": "22:18:57",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 11.841277413370172,
+        "core_score": 7.841277413370172,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 7.841277413370172,
+        "correction_score": -1.0,
+        "trend_score": 4.999999999999999,
+        "surprise_score": 0.0,
+        "regime": "Normal",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": -66.20950109322278,
+            "Arbeitsmarkt": 4.233333333333325,
+            "PMI": 85.49999999999997,
+            "GDP": 0.0,
+            "BCI": 39.3333333333333
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Inflation": 33.3,
+            "Arbeitsmarkt": 33.3,
+            "PMI": 33.3
+        },
+        "data_quality": 60.0,
+        "missing_factors": [
+            "Geldpolitik",
+            "GDP"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🟢 FRESH",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "STALE"
+        },
+        "raw_values": {
+            "policy_rate": 0.0,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": 0.6758099781355442,
+            "unrate": 4.873,
+            "gdp_yoy": null,
+            "cpi_value": 0.6758099781355442,
+            "cpi_metric_type": "HICP_YOY",
+            "cpi_source": "Eurostat HICP",
+            "cpi_dataset": "CP0000CHM086NEST",
+            "cpi_series": "CP0000CHM086NEST",
+            "cpi_geography": "CHF",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟢 FRESH",
+            "cpi_change_pp": -0.2,
+            "cpi_trend": "↓ FALLING",
+            "cpi_pit_status": "FRED_POINT_IN_TIME",
+            "metric_calculation": "DERIVED_FROM_INDEX"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 15.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 0.0,
+            "cpi_surprise": 20.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": -20.0
+        },
+        "cpi_value": 0.6758099781355442,
+        "cpi_metric_type": "HICP_YOY",
+        "cpi_source": "Eurostat HICP",
+        "cpi_series": "CP0000CHM086NEST",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟢 FRESH",
+        "cpi_change_pp": -0.2,
+        "cpi_trend": "↓ FALLING"
+    },
+    "CURR_CAD_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "CAD",
+        "date": "2026-08-25",
+        "time": "22:18:58",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 3.3662357135741745,
+        "core_score": 2.9046972520357124,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 2.9046972520357124,
+        "correction_score": 2.0,
+        "trend_score": 4.615384615384614,
+        "surprise_score": -6.153846153846152,
+        "regime": "Inflation",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 51.60703456640334,
+            "Arbeitsmarkt": -46.66666666666668,
+            "PMI": 12.999999999999973,
+            "GDP": -34.00040732248227,
+            "BCI": null
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Inflation": 30.8,
+            "Arbeitsmarkt": 30.8,
+            "PMI": 30.8,
+            "GDP": 7.7
+        },
+        "data_quality": 65.0,
+        "missing_factors": [
+            "Geldpolitik"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🟢 FRESH",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "AGING"
+        },
+        "raw_values": {
+            "policy_rate": 2.25,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": 3.032140691328067,
+            "unrate": 6.4,
+            "gdp_yoy": 0.989993890162766,
+            "cpi_value": 3.032140691328067,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "Statistics Canada",
+            "cpi_dataset": "v41690973",
+            "cpi_series": "v41690973",
+            "cpi_geography": "National",
+            "cpi_observation_date": "2026-07-01",
+            "cpi_release_date": "2026-07-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟢 FRESH",
+            "cpi_change_pp": 0.23,
+            "cpi_trend": "↑ RISING",
+            "cpi_pit_status": "FRED_POINT_IN_TIME",
+            "metric_calculation": "DERIVED_FROM_INDEX"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 15.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 0.0,
+            "cpi_surprise": 20.0,
+            "lab_surprise": -20.0,
+            "pmi_surprise": -20.0
+        },
+        "cpi_value": 3.032140691328067,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "Statistics Canada",
+        "cpi_series": "v41690973",
+        "cpi_observation_date": "2026-07-01",
+        "cpi_release_date": "2026-07-01",
+        "cpi_freshness": "🟢 FRESH",
+        "cpi_change_pp": 0.23,
+        "cpi_trend": "↑ RISING"
+    },
+    "CURR_AUD_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "AUD",
+        "date": "2026-08-25",
+        "time": "22:18:58",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": 55.85173333333333,
+        "core_score": 44.5184,
+        "core_status": "VALID",
+        "diagnostic_partial_score": 44.5184,
+        "correction_score": -2.0,
+        "trend_score": 0.0,
+        "surprise_score": 13.333333333333332,
+        "regime": "Inflation",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 89.99999999999999,
+            "Arbeitsmarkt": 19.055199999999996,
+            "PMI": 24.50000000000003,
+            "GDP": 0.0,
+            "BCI": 52.44100000000003
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Inflation": 33.3,
+            "Arbeitsmarkt": 33.3,
+            "PMI": 33.3
+        },
+        "data_quality": 60.0,
+        "missing_factors": [
+            "Geldpolitik",
+            "GDP"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🟡 AGING (PIT_LIMITED)",
+            "Arbeitsmarkt": "AGING",
+            "PMI": "FRESH",
+            "GDP": "STALE"
+        },
+        "raw_values": {
+            "policy_rate": 4.35,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": 3.8,
+            "unrate": 4.428344,
+            "gdp_yoy": null,
+            "cpi_value": 3.8,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "ABS (PIT_LIMITED)",
+            "cpi_dataset": "3.10001.10.50.M",
+            "cpi_series": "3.10001.10.50.M",
+            "cpi_geography": "National",
+            "cpi_observation_date": "2026-06-01",
+            "cpi_release_date": "2026-06-01",
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🟡 AGING (PIT_LIMITED)",
+            "cpi_change_pp": -0.2,
+            "cpi_trend": "↓ FALLING",
+            "cpi_pit_status": "PIT_STRICT",
+            "metric_calculation": "DIRECT_OFFICIAL"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 0.0,
+            "cpi_surprise": 20.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": 20.0
+        },
+        "cpi_value": 3.8,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "ABS (PIT_LIMITED)",
+        "cpi_series": "3.10001.10.50.M",
+        "cpi_observation_date": "2026-06-01",
+        "cpi_release_date": "2026-06-01",
+        "cpi_freshness": "🟡 AGING (PIT_LIMITED)",
+        "cpi_change_pp": -0.2,
+        "cpi_trend": "↓ FALLING"
+    },
+    "CURR_NZD_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "NZD",
+        "date": "2026-08-25",
+        "time": "22:18:58",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": null,
+        "core_score": null,
+        "core_status": "INSUFFICIENT DATA",
+        "diagnostic_partial_score": 10.983333333333354,
+        "correction_score": -2.5,
+        "trend_score": 0.0,
+        "surprise_score": 0.0,
+        "regime": "Normal",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 0.0,
+            "Arbeitsmarkt": -2.533333333333321,
+            "PMI": 24.50000000000003,
+            "GDP": 0.0,
+            "BCI": 50.15799999999999
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Arbeitsmarkt": 50.0,
+            "PMI": 50.0
+        },
+        "data_quality": 40.0,
+        "missing_factors": [
+            "Geldpolitik",
+            "Inflation",
+            "GDP"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🔴 UNAVAILABLE",
+            "Arbeitsmarkt": "FRESH",
+            "PMI": "FRESH",
+            "GDP": "STALE"
+        },
+        "raw_values": {
+            "policy_rate": 2.5,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": null,
+            "unrate": 5.076,
+            "gdp_yoy": null,
+            "cpi_value": null,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "Stats NZ",
+            "cpi_dataset": "CS_ECONOMY / CAT_PRICE_INDEXES",
+            "cpi_series": "CPIQ.SE9A",
+            "cpi_geography": "National",
+            "cpi_observation_date": null,
+            "cpi_release_date": null,
+            "cpi_frequency": "quarterly",
+            "cpi_freshness": "🔴 UNAVAILABLE",
+            "cpi_change_pp": null,
+            "cpi_trend": "N/A",
+            "cpi_pit_status": "PIT_STRICT",
+            "metric_calculation": "DIRECT_OFFICIAL"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 0.0,
+            "cpi_surprise": 0.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": 0.0
+        },
+        "cpi_value": null,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "Stats NZ",
+        "cpi_series": "CPIQ.SE9A",
+        "cpi_observation_date": null,
+        "cpi_release_date": null,
+        "cpi_freshness": "🔴 UNAVAILABLE",
+        "cpi_change_pp": null,
+        "cpi_trend": "N/A"
+    },
+    "CURR_JPY_2026-08-25_CORE_V2_6_2026_08": {
+        "type": "CURRENCY",
+        "currency": "JPY",
+        "date": "2026-08-25",
+        "time": "22:18:58",
+        "model_version": "CORE_V2_6_2026_08",
+        "schema_version": "2.0",
+        "total_score": null,
+        "core_score": null,
+        "core_status": "INSUFFICIENT DATA",
+        "diagnostic_partial_score": 60.166666666666686,
+        "correction_score": 1.0,
+        "trend_score": 0.0,
+        "surprise_score": 0.0,
+        "regime": "Normal",
+        "factor_scores": {
+            "Geldpolitik": 0.0,
+            "Inflation": 0.0,
+            "Arbeitsmarkt": 83.33333333333334,
+            "PMI": 37.00000000000003,
+            "GDP": 0.0,
+            "BCI": 58.08499999999995
+        },
+        "original_weights": {
+            "Geldpolitik": 35.0,
+            "Inflation": 20.0,
+            "Arbeitsmarkt": 20.0,
+            "PMI": 20.0,
+            "GDP": 5.0,
+            "ForwardRates": 0.0,
+            "InflationExpectations": 0.0,
+            "EconomicSurprises": 0.0,
+            "BCI": 0.0,
+            "Correction": 100.0
+        },
+        "effective_weights": {
+            "Arbeitsmarkt": 50.0,
+            "PMI": 50.0
+        },
+        "data_quality": 40.0,
+        "missing_factors": [
+            "Geldpolitik",
+            "Inflation",
+            "GDP"
+        ],
+        "freshness": {
+            "Geldpolitik": "STALE",
+            "Inflation": "🔴 UNAVAILABLE",
+            "Arbeitsmarkt": "AGING",
+            "PMI": "FRESH",
+            "GDP": "STALE"
+        },
+        "raw_values": {
+            "policy_rate": 1.0,
+            "yield_2y": null,
+            "yield_5y": null,
+            "cpi_yoy": null,
+            "unrate": 2.5,
+            "gdp_yoy": null,
+            "cpi_value": null,
+            "cpi_metric_type": "CPI_YOY",
+            "cpi_source": "e-Stat",
+            "cpi_dataset": "0004052037",
+            "cpi_series": "0001",
+            "cpi_geography": "00000",
+            "cpi_observation_date": null,
+            "cpi_release_date": null,
+            "cpi_frequency": "monthly",
+            "cpi_freshness": "🔴 UNAVAILABLE",
+            "cpi_change_pp": null,
+            "cpi_trend": "N/A",
+            "cpi_pit_status": "PIT_STRICT",
+            "metric_calculation": "DIRECT_OFFICIAL"
+        },
+        "trend_details": {
+            "gp_trend": 0.0,
+            "cpi_trend": 0.0,
+            "lab_trend": 0.0,
+            "pmi_trend": 0.0,
+            "gdp_trend": 0.0
+        },
+        "surprise_details": {
+            "gp_surprise": 0.0,
+            "cpi_surprise": 0.0,
+            "lab_surprise": 0.0,
+            "pmi_surprise": 0.0
+        },
+        "cpi_value": null,
+        "cpi_metric_type": "CPI_YOY",
+        "cpi_source": "e-Stat",
+        "cpi_series": "0001",
+        "cpi_observation_date": null,
+        "cpi_release_date": null,
+        "cpi_freshness": "🔴 UNAVAILABLE",
+        "cpi_change_pp": null,
+        "cpi_trend": "N/A"
+    },
+    "PAIR_EURUSD_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_EURUSD_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:02",
+            "timezone": "UTC",
+            "pair": "EUR/USD",
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 28.01513486072743,
+            "quote_core": 42.156064875081306,
+            "divergence": -14.140930014353877,
+            "final_score": -14.140930014353877,
+            "signal": "NEUTRAL",
+            "signal_strength": "SCHWACH",
+            "confidence": 28,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 82.5
+        },
+        "base_currency_details": {
+            "total_core_score": 28.01513486072743,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 46.58954926206613,
+                "Arbeitsmarkt": 42.96666666666667,
+                "PMI": 22.5,
+                "GDP": -84.0281105254746,
+                "BCI": 43.2
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 30.76923076923077,
+                "Arbeitsmarkt": 30.76923076923077,
+                "PMI": 30.76923076923077,
+                "GDP": 7.6923076923076925
+            },
+            "data_quality": 65.0,
+            "missing_factors": [
+                "Geldpolitik"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "quote_currency_details": {
+            "total_core_score": 42.156064875081306,
+            "factor_scores": {
+                "Geldpolitik": 29.0,
+                "Inflation": 70.0,
+                "Arbeitsmarkt": 30.00000000000001,
+                "PMI": 50.0,
+                "GDP": 40.12129750162601,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "PAIR_GBPUSD_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_GBPUSD_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:06",
+            "timezone": "UTC",
+            "pair": "GBP/USD",
+            "base_currency": "GBP",
+            "quote_currency": "USD",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 22.494574761985934,
+            "quote_core": 42.156064875081306,
+            "divergence": -19.661490113095372,
+            "final_score": -19.661490113095372,
+            "signal": "NEUTRAL",
+            "signal_strength": "SCHWACH",
+            "confidence": 39,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 82.5
+        },
+        "base_currency_details": {
+            "total_core_score": 22.494574761985934,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 44.99999999999999,
+                "Arbeitsmarkt": 8.46666666666665,
+                "PMI": 21.499999999999986,
+                "GDP": -7.4371947608493345,
+                "BCI": 27.47896348
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 30.76923076923077,
+                "Arbeitsmarkt": 30.76923076923077,
+                "PMI": 30.76923076923077,
+                "GDP": 7.6923076923076925
+            },
+            "data_quality": 65.0,
+            "missing_factors": [
+                "Geldpolitik"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "quote_currency_details": {
+            "total_core_score": 42.156064875081306,
+            "factor_scores": {
+                "Geldpolitik": 29.0,
+                "Inflation": 70.0,
+                "Arbeitsmarkt": 30.00000000000001,
+                "PMI": 50.0,
+                "GDP": 40.12129750162601,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "PAIR_USDCHF_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_USDCHF_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:10",
+            "timezone": "UTC",
+            "pair": "USD/CHF",
+            "base_currency": "USD",
+            "quote_currency": "CHF",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 42.156064875081306,
+            "quote_core": 7.841277413370172,
+            "divergence": 34.314787461711134,
+            "final_score": 34.314787461711134,
+            "signal": "MID BUY",
+            "signal_strength": "MITTEL",
+            "confidence": 68,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 80.0
+        },
+        "base_currency_details": {
+            "total_core_score": 42.156064875081306,
+            "factor_scores": {
+                "Geldpolitik": 29.0,
+                "Inflation": 70.0,
+                "Arbeitsmarkt": 30.00000000000001,
+                "PMI": 50.0,
+                "GDP": 40.12129750162601,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "quote_currency_details": {
+            "total_core_score": 7.841277413370172,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": -66.20950109322278,
+                "Arbeitsmarkt": 4.233333333333325,
+                "PMI": 85.49999999999997,
+                "GDP": null,
+                "BCI": 39.3333333333333
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 33.33333333333333,
+                "Arbeitsmarkt": 33.33333333333333,
+                "PMI": 33.33333333333333
+            },
+            "data_quality": 60.0,
+            "missing_factors": [
+                "Geldpolitik",
+                "GDP"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "PAIR_AUDUSD_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_AUDUSD_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:14",
+            "timezone": "UTC",
+            "pair": "AUD/USD",
+            "base_currency": "AUD",
+            "quote_currency": "USD",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 44.5184,
+            "quote_core": 42.156064875081306,
+            "divergence": 2.362335124918694,
+            "final_score": 2.362335124918694,
+            "signal": "NEUTRAL",
+            "signal_strength": "SCHWACH",
+            "confidence": 4,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 80.0
+        },
+        "base_currency_details": {
+            "total_core_score": 44.5184,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 89.99999999999999,
+                "Arbeitsmarkt": 19.055199999999996,
+                "PMI": 24.50000000000003,
+                "GDP": null,
+                "BCI": 52.44100000000003
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 33.33333333333333,
+                "Arbeitsmarkt": 33.33333333333333,
+                "PMI": 33.33333333333333
+            },
+            "data_quality": 60.0,
+            "missing_factors": [
+                "Geldpolitik",
+                "GDP"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "quote_currency_details": {
+            "total_core_score": 42.156064875081306,
+            "factor_scores": {
+                "Geldpolitik": 29.0,
+                "Inflation": 70.0,
+                "Arbeitsmarkt": 30.00000000000001,
+                "PMI": 50.0,
+                "GDP": 40.12129750162601,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "PAIR_USDCAD_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_USDCAD_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:18",
+            "timezone": "UTC",
+            "pair": "USD/CAD",
+            "base_currency": "USD",
+            "quote_currency": "CAD",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 42.156064875081306,
+            "quote_core": 2.9046972520357124,
+            "divergence": 39.251367623045596,
+            "final_score": 39.251367623045596,
+            "signal": "MID BUY",
+            "signal_strength": "MITTEL",
+            "confidence": 78,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 82.5
+        },
+        "base_currency_details": {
+            "total_core_score": 42.156064875081306,
+            "factor_scores": {
+                "Geldpolitik": 29.0,
+                "Inflation": 70.0,
+                "Arbeitsmarkt": 30.00000000000001,
+                "PMI": 50.0,
+                "GDP": 40.12129750162601,
+                "BCI": 56.6
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0
+            },
+            "data_quality": 100.0,
+            "missing_factors": [],
+            "data_quality_status": "🟢 VALID"
+        },
+        "quote_currency_details": {
+            "total_core_score": 2.9046972520357124,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 51.60703456640334,
+                "Arbeitsmarkt": -46.66666666666668,
+                "PMI": 12.999999999999973,
+                "GDP": -34.00040732248227,
+                "BCI": null
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 30.76923076923077,
+                "Arbeitsmarkt": 30.76923076923077,
+                "PMI": 30.76923076923077,
+                "GDP": 7.6923076923076925
+            },
+            "data_quality": 65.0,
+            "missing_factors": [
+                "Geldpolitik"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
+        },
+        "model_version": "LEGACY_PRE_CORE_FIX"
+    },
+    "PAIR_EURGBP_2026-08-25_CORE_V2_6_2026_08": {
+        "metadata": {
+            "snapshot_id": "PAIR_EURGBP_2026-08-25_CORE_V2_6_2026_08",
+            "date": "2026-08-25",
+            "time": "22:19:22",
+            "timezone": "UTC",
+            "pair": "EUR/GBP",
+            "base_currency": "EUR",
+            "quote_currency": "GBP",
+            "core_model_name": "CORE v1 - Baseline",
+            "core_model_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "model_version": "CORE_V2_6_2026_08",
+            "app_version": "v1.0"
+        },
+        "pair_signal": {
+            "base_core": 28.01513486072743,
+            "quote_core": 22.494574761985934,
+            "divergence": 5.520560098741495,
+            "final_score": 5.520560098741495,
+            "signal": "NEUTRAL",
+            "signal_strength": "SCHWACH",
+            "confidence": 11,
+            "regime": "Normal",
+            "risk_on_off": "Risk-On",
+            "data_quality": 65.0
+        },
+        "base_currency_details": {
+            "total_core_score": 28.01513486072743,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 46.58954926206613,
+                "Arbeitsmarkt": 42.96666666666667,
+                "PMI": 22.5,
+                "GDP": -84.0281105254746,
+                "BCI": 43.2
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 30.76923076923077,
+                "Arbeitsmarkt": 30.76923076923077,
+                "PMI": 30.76923076923077,
+                "GDP": 7.6923076923076925
+            },
+            "data_quality": 65.0,
+            "missing_factors": [
+                "Geldpolitik"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "quote_currency_details": {
+            "total_core_score": 22.494574761985934,
+            "factor_scores": {
+                "Geldpolitik": null,
+                "Inflation": 44.99999999999999,
+                "Arbeitsmarkt": 8.46666666666665,
+                "PMI": 21.499999999999986,
+                "GDP": -7.4371947608493345,
+                "BCI": 27.47896348
+            },
+            "original_weights": {
+                "Geldpolitik": 35.0,
+                "Inflation": 20.0,
+                "Arbeitsmarkt": 20.0,
+                "PMI": 20.0,
+                "GDP": 5.0,
+                "ForwardRates": 0.0,
+                "InflationExpectations": 0.0,
+                "EconomicSurprises": 0.0,
+                "BCI": 0.0,
+                "Correction": 100.0
+            },
+            "effective_weights": {
+                "Inflation": 30.76923076923077,
+                "Arbeitsmarkt": 30.76923076923077,
+                "PMI": 30.76923076923077,
+                "GDP": 7.6923076923076925
+            },
+            "data_quality": 65.0,
+            "missing_factors": [
+                "Geldpolitik"
+            ],
+            "data_quality_status": "🟡 PARTIAL"
+        },
+        "market_context": {
+            "vix": 15.85,
+            "oil": -3.178126691932859,
+            "milk": 0.0
+        },
+        "checklist_snapshot": [
+            {
+                "pair": "EUR/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -14.1,
+                "confidence": 28,
+                "data_quality": 82.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": -19.7,
+                "confidence": 39,
+                "data_quality": 82.5,
+                "regime": "Monetary Policy"
+            },
+            {
+                "pair": "USD/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CHF",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 34.3,
+                "confidence": 68,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "AUD/USD",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 2.4,
+                "confidence": 4,
+                "data_quality": 80.0,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "USD/CAD",
+                "signal": "MID BUY",
+                "signal_strength": "MITTEL",
+                "divergence": 39.3,
+                "confidence": 78,
+                "data_quality": 82.5,
+                "regime": "Inflation"
+            },
+            {
+                "pair": "NZD/USD",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 70.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/GBP",
+                "signal": "NEUTRAL",
+                "signal_strength": "SCHWACH",
+                "divergence": 5.5,
+                "confidence": 11,
+                "data_quality": 65.0,
+                "regime": "Normal"
+            },
+            {
+                "pair": "EUR/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Normal"
+            },
+            {
+                "pair": "GBP/JPY",
+                "signal": "INSUFFICIENT DATA",
+                "signal_strength": "N/A",
+                "divergence": null,
+                "confidence": 0,
+                "data_quality": 52.5,
+                "regime": "Monetary Policy"
+            }
+        ],
+        "outcome_status": "OPEN",
+        "entry_price": 0.0,
+        "outcomes": {
+            "1": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "3": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "5": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "10": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "15": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            },
+            "20": {
+                "exit_price": null,
+                "exit_date": null,
+                "return_pct": null,
+                "directional_return_pct": null,
+                "status": null,
+                "mfe": null,
+                "mae": null
+            }
         }
     }
 }
