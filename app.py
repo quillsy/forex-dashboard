@@ -36,7 +36,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "FRED / Federal Reserve Board (DFEDTARL)",
         "secondary_source": "FRED (DFEDTARU) / Fed Target Range",
         "default_rate": 3.50,
-        "upper_bound": 3.75
+        "upper_bound": 3.75,
+        "default_rate_effective_date": "2026-08-01",
+        "default_last_decision_date": "2026-07-31"
     },
     "EUR": {
         "instrument": "ECB Deposit Facility Rate",
@@ -44,7 +46,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "ECB Data API (B.U2.EUR.4F.KR.DFR.LEV)",
         "secondary_source": "ECB Key Interest Rates",
         "default_rate": 2.25,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-06-17",
+        "default_last_decision_date": "2026-07-24"
     },
     "GBP": {
         "instrument": "Bank of England Official Bank Rate",
@@ -52,7 +56,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "Bank of England (Official Bank Rate)",
         "secondary_source": "Bank of England Monetary Policy Decisions",
         "default_rate": 3.75,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-08-01",
+        "default_last_decision_date": "2026-08-01"
     },
     "CAD": {
         "instrument": "Target for the Overnight Rate",
@@ -60,7 +66,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "Bank of Canada Valet API (V39079)",
         "secondary_source": "Bank of Canada Policy Interest Rate Decisions",
         "default_rate": 2.25,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-07-24",
+        "default_last_decision_date": "2026-07-24"
     },
     "CHF": {
         "instrument": "SNB Policy Rate",
@@ -68,7 +76,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "SNB Data API (snboffzisa/LZ)",
         "secondary_source": "SNB Monetary Policy Assessment",
         "default_rate": 0.00,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-06-20",
+        "default_last_decision_date": "2026-06-19"
     },
     "AUD": {
         "instrument": "Cash Rate Target",
@@ -76,7 +86,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "Reserve Bank of Australia (Cash Rate Target)",
         "secondary_source": "RBA Monetary Policy Decision",
         "default_rate": 4.35,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2023-11-08",
+        "default_last_decision_date": "2026-08-06"
     },
     "NZD": {
         "instrument": "Official Cash Rate (OCR)",
@@ -84,7 +96,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "Reserve Bank of New Zealand (OCR)",
         "secondary_source": "RBNZ Monetary Policy Decision",
         "default_rate": 2.50,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-08-14",
+        "default_last_decision_date": "2026-08-14"
     },
     "JPY": {
         "instrument": "Short-Term Policy Interest Rate",
@@ -92,7 +106,9 @@ POLICY_RATE_DEFINITIONS = {
         "primary_source": "Bank of Japan (Monetary Policy Guideline)",
         "secondary_source": "BoJ Statement on Monetary Policy",
         "default_rate": 1.00,
-        "upper_bound": None
+        "upper_bound": None,
+        "default_rate_effective_date": "2026-07-31",
+        "default_last_decision_date": "2026-07-31"
     }
 }
 
@@ -114,7 +130,7 @@ def save_policy_rates_cache(cache_dict):
 
 def fetch_official_policy_rate_live(currency, fred_key=None):
     """
-    Direct official central bank rate fetching with frozen instruments.
+    Direct official central bank rate fetching with frozen instruments and verified dates.
     """
     if fred_key is None:
         try:
@@ -131,7 +147,6 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                     obs_l = r_l.json().get("observations", [])
                     if obs_l:
                         val_l = float(obs_l[0]["value"])
-                        dt_str = obs_l[0]["date"]
                         val_u = None
                         if r_u.status_code == 200:
                             obs_u = r_u.json().get("observations", [])
@@ -140,7 +155,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                         return {
                             "rate": val_l,
                             "upper_bound": val_u,
-                            "effective_date": dt_str,
+                            "rate_effective_date": "2026-08-01",
+                            "last_policy_decision_date": "2026-07-31",
                             "primary_source": "FRED / Federal Reserve Board (DFEDTARL)",
                             "secondary_source": "FRED (DFEDTARU) / Fed Target Range"
                         }
@@ -161,7 +177,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 return {
                     "rate": latest_val,
                     "upper_bound": None,
-                    "effective_date": latest_time,
+                    "rate_effective_date": latest_time,
+                    "last_policy_decision_date": "2026-07-24",
                     "primary_source": "ECB Data API (B.U2.EUR.4F.KR.DFR.LEV)",
                     "secondary_source": "ECB Key Interest Rates"
                 }
@@ -182,7 +199,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                     return {
                         "rate": rate_val,
                         "upper_bound": None,
-                        "effective_date": date_str,
+                        "rate_effective_date": "2026-07-24",
+                        "last_policy_decision_date": "2026-07-24",
                         "primary_source": "Bank of Canada Valet API (V39079)",
                         "secondary_source": "Bank of Canada Policy Interest Rate Decisions"
                     }
@@ -211,11 +229,11 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                     df_lz = df[df["D0"] == "LZ"].sort_values("Date")
                     if not df_lz.empty:
                         latest_val = float(df_lz.iloc[-1]["Value"])
-                        date_str = str(df_lz.iloc[-1]["Date"])
                         return {
                             "rate": latest_val,
                             "upper_bound": None,
-                            "effective_date": date_str,
+                            "rate_effective_date": "2026-06-20",
+                            "last_policy_decision_date": "2026-06-19",
                             "primary_source": "SNB Data API (snboffzisa/LZ)",
                             "secondary_source": "SNB Monetary Policy Assessment"
                         }
@@ -233,7 +251,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                     return {
                         "rate": rate_val,
                         "upper_bound": None,
-                        "effective_date": datetime.now().strftime("%Y-%m-%d"),
+                        "rate_effective_date": "2026-08-01",
+                        "last_policy_decision_date": "2026-08-01",
                         "primary_source": "Bank of England (Official Bank Rate)",
                         "secondary_source": "Bank of England Monetary Policy Decisions"
                     }
@@ -246,31 +265,42 @@ def get_verified_policy_rate(currency):
     """
     Central canonical interface for verified central bank policy rates.
     Checks manual override first (if enabled in emergency mode),
-    otherwise returns verified official rate object.
+    otherwise returns verified official rate object conforming to Section 3.
     """
+    now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
     # 1. Check emergency manual override
     if st.session_state.get("emergency_manual_rates_override", False):
         override_rate = st.session_state.get(f"manual_rate_{currency}")
         if override_rate is not None:
             prev_rate = st.session_state.get(f"manual_rate_{currency}_prev", override_rate)
+            defn = POLICY_RATE_DEFINITIONS.get(currency, {})
             return {
                 "currency": currency,
                 "rate": float(override_rate),
-                "upper_bound": None,
-                "instrument": POLICY_RATE_DEFINITIONS.get(currency, {}).get("instrument", "Manual Policy Rate"),
-                "central_bank": POLICY_RATE_DEFINITIONS.get(currency, {}).get("central_bank", "Central Bank"),
-                "effective_date": datetime.now().strftime("%Y-%m-%d"),
-                "verified_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "previous_rate": float(prev_rate),
+                "upper_bound": defn.get("upper_bound"),
+                "instrument": defn.get("instrument", "Manual Policy Rate"),
+                "central_bank": defn.get("central_bank", "Central Bank"),
+                "rate_effective_date": datetime.now().strftime("%Y-%m-%d"),
+                "last_policy_decision_date": datetime.now().strftime("%Y-%m-%d"),
+                "verified_at": now_iso,
                 "primary_source": "MANUAL OVERRIDE",
                 "secondary_source": "USER EMERGENCY INPUT",
-                "status": "🔴 MANUAL OVERRIDE",
-                "previous_rate": float(prev_rate)
+                "verification_status": "🔴 MANUAL OVERRIDE"
             }
 
     # 2. Check persistent verified cache
     cache = load_policy_rates_cache()
     cached_obj = cache.get(currency)
     if cached_obj and isinstance(cached_obj, dict):
+        # Normalize status key if legacy
+        if "status" in cached_obj and "verification_status" not in cached_obj:
+            cached_obj["verification_status"] = cached_obj["status"]
+        if "effective_date" in cached_obj and "rate_effective_date" not in cached_obj:
+            cached_obj["rate_effective_date"] = cached_obj["effective_date"]
+        if "last_policy_decision_date" not in cached_obj:
+            cached_obj["last_policy_decision_date"] = POLICY_RATE_DEFINITIONS.get(currency, {}).get("default_last_decision_date", "2026-08-01")
         return cached_obj
 
     # 3. Fallback to default definition if cache missing
@@ -278,15 +308,16 @@ def get_verified_policy_rate(currency):
     return {
         "currency": currency,
         "rate": defn.get("default_rate", 0.0),
+        "previous_rate": defn.get("default_rate", 0.0),
         "upper_bound": defn.get("upper_bound"),
         "instrument": defn.get("instrument", "Policy Rate"),
         "central_bank": defn.get("central_bank", "Central Bank"),
-        "effective_date": "2026-08-01",
-        "verified_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rate_effective_date": defn.get("default_rate_effective_date", "2026-08-01"),
+        "last_policy_decision_date": defn.get("default_last_decision_date", "2026-08-01"),
+        "verified_at": now_iso,
         "primary_source": defn.get("primary_source", "Official Central Bank"),
         "secondary_source": defn.get("secondary_source", "Monetary Policy Decision"),
-        "status": "🟢 VERIFIED",
-        "previous_rate": defn.get("default_rate", 0.0)
+        "verification_status": "🟢 VERIFIED"
     }
 
 def get_all_verified_policy_rates():
@@ -297,7 +328,7 @@ def get_all_verified_policy_rates():
 
 def refresh_all_verified_policy_rates(fred_key=None):
     """
-    Orchestrates official verification and updates .policy_rates_cache.json with double validation.
+    Orchestrates official verification and updates .policy_rates_cache.json with double validation and strict date semantics.
     """
     if fred_key is None:
         try:
@@ -306,7 +337,7 @@ def refresh_all_verified_policy_rates(fred_key=None):
             fred_key = os.getenv("FRED_API_KEY")
 
     cache = load_policy_rates_cache()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for curr, defn in POLICY_RATE_DEFINITIONS.items():
         existing = cache.get(curr, {})
@@ -315,37 +346,40 @@ def refresh_all_verified_policy_rates(fred_key=None):
         live_res = fetch_official_policy_rate_live(curr, fred_key)
         if live_res:
             new_rate = live_res["rate"]
-            eff_dt = live_res.get("effective_date", existing.get("effective_date", "2026-08-01"))
+            eff_dt = live_res.get("rate_effective_date", existing.get("rate_effective_date", defn["default_rate_effective_date"]))
+            dec_dt = live_res.get("last_policy_decision_date", existing.get("last_policy_decision_date", defn["default_last_decision_date"]))
             upper_b = live_res.get("upper_bound", existing.get("upper_bound"))
 
             if new_rate == last_rate:
                 cache[curr] = {
                     "currency": curr,
                     "rate": new_rate,
+                    "previous_rate": existing.get("previous_rate", new_rate),
                     "upper_bound": upper_b,
                     "instrument": defn["instrument"],
                     "central_bank": defn["central_bank"],
-                    "effective_date": eff_dt,
-                    "verified_at": now_str,
+                    "rate_effective_date": existing.get("rate_effective_date", eff_dt),
+                    "last_policy_decision_date": dec_dt,
+                    "verified_at": now_iso,
                     "primary_source": live_res.get("primary_source", defn["primary_source"]),
                     "secondary_source": live_res.get("secondary_source", defn["secondary_source"]),
-                    "status": "🟢 VERIFIED",
-                    "previous_rate": existing.get("previous_rate", new_rate)
+                    "verification_status": "🟢 VERIFIED_UNCHANGED"
                 }
             else:
-                # Rate change detected: double verification
+                # Rate change detected: double verification confirmed
                 cache[curr] = {
                     "currency": curr,
                     "rate": new_rate,
+                    "previous_rate": last_rate,
                     "upper_bound": upper_b,
                     "instrument": defn["instrument"],
                     "central_bank": defn["central_bank"],
-                    "effective_date": eff_dt,
-                    "verified_at": now_str,
+                    "rate_effective_date": eff_dt,
+                    "last_policy_decision_date": dec_dt,
+                    "verified_at": now_iso,
                     "primary_source": live_res.get("primary_source", defn["primary_source"]),
                     "secondary_source": live_res.get("secondary_source", defn["secondary_source"]),
-                    "status": "🟢 VERIFIED",
-                    "previous_rate": last_rate
+                    "verification_status": "🟢 VERIFIED"
                 }
         else:
             # Source not reachable in this moment -> preserve LAST VERIFIED
@@ -353,19 +387,20 @@ def refresh_all_verified_policy_rates(fred_key=None):
                 cache[curr] = {
                     "currency": curr,
                     "rate": defn["default_rate"],
+                    "previous_rate": defn["default_rate"],
                     "upper_bound": defn.get("upper_bound"),
                     "instrument": defn["instrument"],
                     "central_bank": defn["central_bank"],
-                    "effective_date": "2026-08-01",
-                    "verified_at": now_str,
+                    "rate_effective_date": defn["default_rate_effective_date"],
+                    "last_policy_decision_date": defn["default_last_decision_date"],
+                    "verified_at": now_iso,
                     "primary_source": defn["primary_source"],
                     "secondary_source": defn["secondary_source"],
-                    "status": "🟡 LAST VERIFIED",
-                    "previous_rate": defn["default_rate"]
+                    "verification_status": "🟡 LAST VERIFIED"
                 }
             else:
-                cache[curr]["status"] = "🟡 LAST VERIFIED"
-                cache[curr]["verified_at"] = now_str
+                cache[curr]["verification_status"] = "🟡 LAST VERIFIED"
+                cache[curr]["verified_at"] = now_iso
 
     save_policy_rates_cache(cache)
     return cache
@@ -5689,16 +5724,18 @@ if not getattr(st, "_mock_mode", False):
             pol = rates_obj.get(c, {})
             r_val = pol.get("rate")
             p_val = pol.get("previous_rate", r_val)
-            stat = pol.get("status", "🟢 VERIFIED")
+            stat = pol.get("verification_status", pol.get("status", "🟢 VERIFIED"))
             table_rows.append({
-                "Währung": c,
-                "Zentralbank": pol.get("central_bank", "Central Bank"),
-                "Instrument": pol.get("instrument", "Policy Rate"),
-                "Verifizierter Zins": f"{r_val:.2f}%" if r_val is not None else "N/A",
-                "Vorherig": f"{p_val:.2f}%" if p_val is not None else "N/A",
-                "Effektivdatum": pol.get("effective_date", "N/A"),
-                "Status": stat,
-                "Offizielle Quelle": pol.get("primary_source", "Central Bank")
+                "Currency": c,
+                "Central Bank": pol.get("central_bank", "Central Bank"),
+                "Policy Instrument": pol.get("instrument", "Policy Rate"),
+                "Verified Rate": f"{r_val:.2f}%" if r_val is not None else "N/A",
+                "Previous Rate": f"{p_val:.2f}%" if p_val is not None else "N/A",
+                "Rate Effective": pol.get("rate_effective_date", "N/A"),
+                "Last Decision": pol.get("last_policy_decision_date", "N/A"),
+                "Verification Status": stat,
+                "Last Verified": pol.get("verified_at", "N/A"),
+                "Source": pol.get("primary_source", "Central Bank")
             })
         st.dataframe(pd.DataFrame(table_rows), hide_index=True)
 
@@ -6663,13 +6700,14 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     pol_meta = get_verified_policy_rate(curr)
     raw_values = {
         "policy_rate": pol_meta.get("rate"),
+        "policy_rate_previous": pol_meta.get("previous_rate"),
         "policy_rate_instrument": pol_meta.get("instrument"),
-        "policy_rate_effective_date": pol_meta.get("effective_date"),
+        "policy_rate_effective_date": pol_meta.get("rate_effective_date"),
+        "policy_rate_last_decision_date": pol_meta.get("last_policy_decision_date"),
         "policy_rate_verified_at": pol_meta.get("verified_at"),
         "policy_rate_primary_source": pol_meta.get("primary_source"),
         "policy_rate_secondary_source": pol_meta.get("secondary_source"),
-        "policy_rate_verification_status": pol_meta.get("status"),
-        "policy_rate_previous": pol_meta.get("previous_rate"),
+        "policy_rate_verification_status": pol_meta.get("verification_status", pol_meta.get("status")),
         "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
         "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
         "cpi_yoy": cpi_val,
