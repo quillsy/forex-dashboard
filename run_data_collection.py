@@ -55,7 +55,11 @@ try:
     
     import app
     
-    print("\n[Step 0] Running prefetch_eodhd_production_data()...")
+    print("\n[Step 0A] Running refresh_all_verified_policy_rates()...")
+    pol_summary = app.refresh_all_verified_policy_rates(fred_key=app.FRED_KEY)
+    print("Verified policy rates summary:", {c: v.get("rate") for c, v in pol_summary.items()})
+
+    print("\n[Step 0B] Running prefetch_eodhd_production_data()...")
     eodhd_summary = app.prefetch_eodhd_production_data()
     print("EODHD prefetch summary:", eodhd_summary)
 
