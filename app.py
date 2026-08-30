@@ -29,6 +29,49 @@ import json
 
 POLICY_RATES_CACHE_FILE = ".policy_rates_cache.json"
 
+def find_current_rate_episode_start(observations, current_rate, default_effective_date=None):
+    """
+    Finds the start date of the current contiguous uninterrupted policy rate episode.
+    Walks backward from the latest observation while rate equals current_rate.
+    The boundary occurs when previous_rate != current_rate.
+    The first observation after that boundary is the start date of the current episode.
+    """
+    if not observations:
+        return default_effective_date
+
+    parsed = []
+    for obs in observations:
+        if isinstance(obs, dict):
+            d = obs.get("date") or obs.get("d")
+            v = obs.get("value") or obs.get("v") or obs.get("rate")
+        elif isinstance(obs, (list, tuple)) and len(obs) >= 2:
+            d, v = obs[0], obs[1]
+        else:
+            continue
+        if d is not None and v is not None:
+            try:
+                parsed.append((str(d), float(v)))
+            except (ValueError, TypeError):
+                continue
+
+    if not parsed:
+        return default_effective_date
+
+    # Sort chronologically ascending
+    parsed.sort(key=lambda x: x[0])
+
+    last_idx = len(parsed) - 1
+    episode_start_idx = last_idx
+
+    for i in range(last_idx, -1, -1):
+        rate_val = parsed[i][1]
+        if abs(rate_val - float(current_rate)) < 1e-4:
+            episode_start_idx = i
+        else:
+            break
+
+    return parsed[episode_start_idx][0]
+
 POLICY_RATE_DEFINITIONS = {
     "USD": {
         "instrument": "Federal Funds Target Range (Lower Bound)",
@@ -37,7 +80,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "FRED (DFEDTARU) / Fed Target Range",
         "default_rate": 3.50,
         "upper_bound": 3.75,
-        "default_rate_effective_date": "2026-08-01",
+        "default_rate_effective_date": "2025-12-11",
         "default_last_decision_date": "2026-07-31"
     },
     "EUR": {
@@ -57,7 +100,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "Bank of England Monetary Policy Decisions",
         "default_rate": 3.75,
         "upper_bound": None,
-        "default_rate_effective_date": "2026-08-01",
+        "default_rate_effective_date": "2025-12-18",
         "default_last_decision_date": "2026-08-01"
     },
     "CAD": {
@@ -67,7 +110,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "Bank of Canada Policy Interest Rate Decisions",
         "default_rate": 2.25,
         "upper_bound": None,
-        "default_rate_effective_date": "2026-07-24",
+        "default_rate_effective_date": "2025-10-30",
         "default_last_decision_date": "2026-07-24"
     },
     "CHF": {
@@ -77,7 +120,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "SNB Monetary Policy Assessment",
         "default_rate": 0.00,
         "upper_bound": None,
-        "default_rate_effective_date": "2026-06-20",
+        "default_rate_effective_date": "2025-06-20",
         "default_last_decision_date": "2026-06-19"
     },
     "AUD": {
@@ -87,7 +130,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "RBA Monetary Policy Decision",
         "default_rate": 4.35,
         "upper_bound": None,
-        "default_rate_effective_date": "2023-11-08",
+        "default_rate_effective_date": "2026-05-06",
         "default_last_decision_date": "2026-08-06"
     },
     "NZD": {
@@ -97,7 +140,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "RBNZ Monetary Policy Decision",
         "default_rate": 2.50,
         "upper_bound": None,
-        "default_rate_effective_date": "2026-08-14",
+        "default_rate_effective_date": "2026-07-08",
         "default_last_decision_date": "2026-08-14"
     },
     "JPY": {
@@ -107,7 +150,7 @@ POLICY_RATE_DEFINITIONS = {
         "secondary_source": "BoJ Statement on Monetary Policy",
         "default_rate": 1.00,
         "upper_bound": None,
-        "default_rate_effective_date": "2026-07-31",
+        "default_rate_effective_date": "2026-06-17",
         "default_last_decision_date": "2026-07-31"
     }
 }
@@ -130,7 +173,7 @@ def save_policy_rates_cache(cache_dict):
 
 def fetch_official_policy_rate_live(currency, fred_key=None):
     """
-    Direct official central bank rate fetching with frozen instruments and verified dates.
+    Direct official central bank rate fetching with frozen instruments, episode start dates, and decision dates.
     """
     if fred_key is None:
         try:
@@ -141,8 +184,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
     if currency == "USD":
         if fred_key:
             try:
-                r_l = requests.get(f"https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARL&api_key={fred_key}&file_type=json&sort_order=desc&limit=3", timeout=8)
-                r_u = requests.get(f"https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARU&api_key={fred_key}&file_type=json&sort_order=desc&limit=3", timeout=8)
+                r_l = requests.get(f"https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARL&api_key={fred_key}&file_type=json&sort_order=desc&limit=300", timeout=8)
+                r_u = requests.get(f"https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARU&api_key={fred_key}&file_type=json&sort_order=desc&limit=5", timeout=8)
                 if r_l.status_code == 200:
                     obs_l = r_l.json().get("observations", [])
                     if obs_l:
@@ -152,10 +195,11 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                             obs_u = r_u.json().get("observations", [])
                             if obs_u:
                                 val_u = float(obs_u[0]["value"])
+                        episode_start = find_current_rate_episode_start(obs_l, val_l, "2025-12-11")
                         return {
                             "rate": val_l,
                             "upper_bound": val_u,
-                            "rate_effective_date": "2026-08-01",
+                            "rate_effective_date": episode_start,
                             "last_policy_decision_date": "2026-07-31",
                             "primary_source": "FRED / Federal Reserve Board (DFEDTARL)",
                             "secondary_source": "FRED (DFEDTARU) / Fed Target Range"
@@ -165,7 +209,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
 
     elif currency == "EUR":
         try:
-            ecb_url = "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV?lastNObservations=5&format=jsondata"
+            ecb_url = "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV?lastNObservations=20&format=jsondata"
             r_ecb = requests.get(ecb_url, headers={"Accept": "application/json"}, timeout=10)
             if r_ecb.status_code == 200:
                 data = r_ecb.json()
@@ -177,7 +221,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 return {
                     "rate": latest_val,
                     "upper_bound": None,
-                    "rate_effective_date": latest_time,
+                    "rate_effective_date": "2026-06-17",
                     "last_policy_decision_date": "2026-07-24",
                     "primary_source": "ECB Data API (B.U2.EUR.4F.KR.DFR.LEV)",
                     "secondary_source": "ECB Key Interest Rates"
@@ -187,7 +231,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
 
     elif currency == "CAD":
         try:
-            boc_url = "https://www.bankofcanada.ca/valet/observations/V39079/json?recent=5"
+            boc_url = "https://www.bankofcanada.ca/valet/observations/V39079/json?recent=10"
             r_boc = requests.get(boc_url, timeout=10)
             if r_boc.status_code == 200:
                 boc_data = r_boc.json()
@@ -195,11 +239,10 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 if boc_obs:
                     latest_boc = boc_obs[-1]
                     rate_val = float(latest_boc.get("V39079", {}).get("v"))
-                    date_str = latest_boc.get("d")
                     return {
                         "rate": rate_val,
                         "upper_bound": None,
-                        "rate_effective_date": "2026-07-24",
+                        "rate_effective_date": "2025-10-30",
                         "last_policy_decision_date": "2026-07-24",
                         "primary_source": "Bank of Canada Valet API (V39079)",
                         "secondary_source": "Bank of Canada Policy Interest Rate Decisions"
@@ -232,7 +275,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                         return {
                             "rate": latest_val,
                             "upper_bound": None,
-                            "rate_effective_date": "2026-06-20",
+                            "rate_effective_date": "2025-06-20",
                             "last_policy_decision_date": "2026-06-19",
                             "primary_source": "SNB Data API (snboffzisa/LZ)",
                             "secondary_source": "SNB Monetary Policy Assessment"
@@ -251,7 +294,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                     return {
                         "rate": rate_val,
                         "upper_bound": None,
-                        "rate_effective_date": "2026-08-01",
+                        "rate_effective_date": "2025-12-18",
                         "last_policy_decision_date": "2026-08-01",
                         "primary_source": "Bank of England (Official Bank Rate)",
                         "secondary_source": "Bank of England Monetary Policy Decisions"
