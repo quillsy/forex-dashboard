@@ -2199,10 +2199,47 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
     return None, None, False
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+_EODHD_STATUS_INFO = {
+    "status": "🟢 EODHD AVAILABLE" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)",
+    "code": 200 if EODHD_KEY else None
+}
+EODHD_BONDS_CACHE_FILE = ".eodhd_bonds_cache.json"
+
+def get_eodhd_status_label():
+    global _EODHD_STATUS_INFO
+    if not EODHD_KEY:
+        return "Inaktiv 🔴 (API-Key fehlt)"
+    return _EODHD_STATUS_INFO.get("status", "🟢 EODHD AVAILABLE")
+
+def load_eodhd_bonds_cache():
+    if os.path.exists(EODHD_BONDS_CACHE_FILE):
+        try:
+            with open(EODHD_BONDS_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_eodhd_bonds_cache(ticker, parsed_data):
+    try:
+        cache = load_eodhd_bonds_cache()
+        cache[ticker] = parsed_data
+        with open(EODHD_BONDS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_eodhd_bond_data(ticker, api_key):
+    global _EODHD_STATUS_INFO
     if not api_key:
+        _EODHD_STATUS_INFO["status"] = "Inaktiv 🔴 (API-Key fehlt)"
         return None
+
+    # Check local persistent cache
+    cache = load_eodhd_bonds_cache()
+    cached_list = cache.get(ticker)
+
     try:
         url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_key}&fmt=json&from=2015-01-01"
         r = requests.get(url, timeout=10)
@@ -2214,12 +2251,32 @@ def get_eodhd_bond_data(ticker, api_key):
                     close_val = row.get("close")
                     date_str = row.get("date")
                     if close_val is not None and date_str:
-                        parsed.append({"date": date_str, "value": float(close_val)})
-                df = pd.DataFrame(parsed)
-                df["date"] = pd.to_datetime(df["date"])
-                return df.sort_values("date").reset_index(drop=True)
+                        parsed.append({"date": str(date_str), "value": float(close_val)})
+                if parsed:
+                    save_eodhd_bonds_cache(ticker, parsed)
+                    _EODHD_STATUS_INFO["status"] = "🟢 EODHD AVAILABLE"
+                    _EODHD_STATUS_INFO["code"] = 200
+                    df = pd.DataFrame(parsed)
+                    df["date"] = pd.to_datetime(df["date"])
+                    return df.sort_values("date").reset_index(drop=True)
+        elif r.status_code == 402:
+            _EODHD_STATUS_INFO["status"] = "🟡 DAILY LIMIT EXHAUSTED"
+            _EODHD_STATUS_INFO["code"] = 402
+        elif r.status_code in [401, 403]:
+            _EODHD_STATUS_INFO["status"] = "🔴 EODHD AUTH FAILED"
+            _EODHD_STATUS_INFO["code"] = r.status_code
+        elif r.status_code in [500, 502, 503, 504]:
+            _EODHD_STATUS_INFO["status"] = "🟡 EODHD SERVICE ERROR"
+            _EODHD_STATUS_INFO["code"] = r.status_code
     except Exception:
-        pass
+        _EODHD_STATUS_INFO["status"] = "🟡 EODHD SERVICE ERROR"
+
+    # Fallback to local persistent cache if available
+    if cached_list and isinstance(cached_list, list) and len(cached_list) > 0:
+        df = pd.DataFrame(cached_list)
+        df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values("date").reset_index(drop=True)
+
     return None
 
 def get_eodhd_bond_historical(ticker, target_date, api_key=EODHD_KEY):
@@ -5314,7 +5371,7 @@ if not getattr(st, "_mock_mode", False):
             st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
             st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
             st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
-            st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
+            st.write(f"EODHD_API_KEY: {get_eodhd_status_label()}")
             st.write(f"ESTAT_APP_ID: {'🟢 Aktiv' if ESTAT_APP_ID else '🔴 Fehlt'}")
     
         with st.expander("📝 Streamlit Secrets Anleitung", expanded=False):
@@ -7092,7 +7149,7 @@ if not getattr(st, "_mock_mode", False):
             
             api_health = [
                 {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": "Aktiv 🟢" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
                 {"API / Datenquelle": "FCS Price Data API", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
                 {"API / Datenquelle": "Tiingo Commodity API", "Status": "Aktiv 🟢" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
                 {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
