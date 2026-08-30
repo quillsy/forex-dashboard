@@ -55,6 +55,10 @@ try:
     
     import app
     
+    print("\n[Step 0] Running prefetch_eodhd_production_data()...")
+    eodhd_summary = app.prefetch_eodhd_production_data()
+    print("EODHD prefetch summary:", eodhd_summary)
+
     print("\n[Step 1] Running save_all_g10_live_snapshots()...")
     app.save_all_g10_live_snapshots()
     

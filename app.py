@@ -923,103 +923,153 @@ def parse_tradingeconomics_pmi(url):
         pass
     return None
 
-@st.cache_data(ttl=3600)
-def get_eodhd_pmi_fallback(country_code, indicator_keyword, api_key):
-    if not api_key:
-        return None
-    country_map = {
-        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
-        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
-    }
-    eodhd_country = country_map.get(country_code, country_code)
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    url = f"https://eodhd.com/api/economic-events"
-    params = {
-        "api_token": api_key,
-        "from": start_date,
-        "to": end_date,
-        "country": eodhd_country,
-        "limit": 300
-    }
+EODHD_EVENTS_CACHE_FILE = ".eodhd_events_cache.json"
+
+def load_eodhd_events_cache():
+    if os.path.exists(EODHD_EVENTS_CACHE_FILE):
+        try:
+            with open(EODHD_EVENTS_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_eodhd_events_cache(events_list):
     try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            events = r.json()
-            matched = []
-            for ev in events:
-                name = ev.get("name", "").upper()
-                if indicator_keyword.upper() in name:
-                    matched.append(ev)
-            if matched:
-                matched.sort(key=lambda x: x.get("date", ""), reverse=True)
-                latest = matched[0]
-                try:
-                    last_val = float(latest.get("actual"))
-                except (ValueError, TypeError):
-                    last_val = None
-                try:
-                    prev_val = float(latest.get("previous"))
-                except (ValueError, TypeError):
-                    prev_val = None
-                ref_date = latest.get("date", "")
-                return {
-                    "last": last_val,
-                    "previous": prev_val,
-                    "reference": ref_date
-                }
+        sanitized = []
+        for ev in events_list:
+            if isinstance(ev, dict):
+                sanitized.append({
+                    "date": str(ev.get("date", "")),
+                    "country": str(ev.get("country", "")),
+                    "name": str(ev.get("name", "")),
+                    "actual": ev.get("actual"),
+                    "previous": ev.get("previous"),
+                    "estimate": ev.get("estimate"),
+                    "change_percentage": ev.get("change_percentage")
+                })
+        with open(EODHD_EVENTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(sanitized, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_eodhd_batched_economic_events(api_key, start_date=None, end_date=None):
+    global _EODHD_STATUS_INFO
+    cached_events = load_eodhd_events_cache()
+    if not api_key:
+        return cached_events
+
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+
+    # If cached events are present and span the required period, reuse them to save quota
+    if cached_events and len(cached_events) > 0:
+        return cached_events
+
+    try:
+        url = "https://eodhd.com/api/economic-events"
+        params = {
+            "api_token": api_key,
+            "from": start_date,
+            "to": end_date,
+            "limit": 1000
+        }
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code == 200:
+            events = r.json()
+            if isinstance(events, list) and len(events) > 0:
+                save_eodhd_events_cache(events)
+                _EODHD_STATUS_INFO["status"] = "🟢 EODHD AVAILABLE"
+                _EODHD_STATUS_INFO["code"] = 200
+                return events
+        elif r.status_code == 402:
+            _EODHD_STATUS_INFO["status"] = "🟡 DAILY LIMIT EXHAUSTED"
+            _EODHD_STATUS_INFO["code"] = 402
+        elif r.status_code in [401, 403]:
+            _EODHD_STATUS_INFO["status"] = "🔴 EODHD AUTH FAILED"
+            _EODHD_STATUS_INFO["code"] = r.status_code
+        elif r.status_code in [500, 502, 503, 504]:
+            _EODHD_STATUS_INFO["status"] = "🟡 EODHD SERVICE ERROR"
+            _EODHD_STATUS_INFO["code"] = r.status_code
+    except Exception:
+        _EODHD_STATUS_INFO["status"] = "🟡 EODHD SERVICE ERROR"
+
+    return cached_events if cached_events else []
+
+def get_eodhd_pmi_fallback(country_code, indicator_keyword, api_key):
+    events = get_eodhd_batched_economic_events(api_key)
+    if not events:
+        return None
+    country_map = {
+        "EUR": ["EMU", "EUR", "DEU", "FRA"], "GBP": ["GBR", "UK"], "CHF": ["CHE", "CH"],
+        "CAD": ["CAN", "CA"], "AUD": ["AUS", "AU"], "NZD": ["NZL", "NZ"], "JPY": ["JPN", "JP"]
+    }
+    allowed_countries = country_map.get(country_code, [country_code])
+    matched = []
+    for ev in events:
+        c = ev.get("country", "")
+        name = ev.get("name", "").upper()
+        if (c in allowed_countries or c == country_code) and indicator_keyword.upper() in name:
+            matched.append(ev)
+    if matched:
+        matched.sort(key=lambda x: x.get("date", ""), reverse=True)
+        latest = matched[0]
+        try:
+            last_val = float(latest.get("actual"))
+        except (ValueError, TypeError):
+            last_val = None
+        try:
+            prev_val = float(latest.get("previous"))
+        except (ValueError, TypeError):
+            prev_val = None
+        ref_date = latest.get("date", "")
+        return {
+            "last": last_val,
+            "previous": prev_val,
+            "reference": ref_date
+        }
     return None
 
-@st.cache_data(ttl=86400)
 def get_eodhd_pmi_historical(country_code, indicator_keyword, target_date, api_key):
-    if not api_key:
+    target_dt = pd.to_datetime(target_date)
+    start_dt = target_dt - timedelta(days=120)
+    events = get_eodhd_batched_economic_events(api_key, start_date=start_dt.strftime("%Y-%m-%d"), end_date=target_dt.strftime("%Y-%m-%d"))
+    if not events:
         return None
     country_map = {
-        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
-        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
+        "EUR": ["EMU", "EUR", "DEU", "FRA"], "GBP": ["GBR", "UK"], "CHF": ["CHE", "CH"],
+        "CAD": ["CAN", "CA"], "AUD": ["AUS", "AU"], "NZD": ["NZL", "NZ"], "JPY": ["JPN", "JP"]
     }
-    eodhd_country = country_map.get(country_code, country_code)
-    target_dt = pd.to_datetime(target_date)
-    start_date = (target_dt - timedelta(days=90)).strftime("%Y-%m-%d")
-    end_date = target_dt.strftime("%Y-%m-%d")
-    url = "https://eodhd.com/api/economic-events"
-    params = {
-        "api_token": api_key,
-        "from": start_date,
-        "to": end_date,
-        "country": eodhd_country,
-        "limit": 300
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            events = r.json()
-            matched = []
-            for ev in events:
-                name = ev.get("name", "").upper()
-                if indicator_keyword.upper() in name:
-                    matched.append(ev)
-            if matched:
-                matched.sort(key=lambda x: x.get("date", ""))
-                latest = matched[-1]
-                try:
-                    last_val = float(latest.get("actual"))
-                except (ValueError, TypeError):
-                    last_val = None
-                try:
-                    prev_val = float(latest.get("previous"))
-                except (ValueError, TypeError):
-                    prev_val = None
-                ref_date = latest.get("date", "")
-                return {
-                    "last": last_val,
-                    "previous": prev_val,
-                    "reference": ref_date
-                }
-    except Exception:
-        pass
+    allowed_countries = country_map.get(country_code, [country_code])
+    matched = []
+    target_str = target_dt.strftime("%Y-%m-%d")
+    for ev in events:
+        c = ev.get("country", "")
+        ev_date = str(ev.get("date", ""))
+        name = ev.get("name", "").upper()
+        if (c in allowed_countries or c == country_code) and indicator_keyword.upper() in name:
+            if ev_date <= target_str:
+                matched.append(ev)
+    if matched:
+        matched.sort(key=lambda x: x.get("date", ""))
+        latest = matched[-1]
+        try:
+            last_val = float(latest.get("actual"))
+        except (ValueError, TypeError):
+            last_val = None
+        try:
+            prev_val = float(latest.get("previous"))
+        except (ValueError, TypeError):
+            prev_val = None
+        ref_date = latest.get("date", "")
+        return {
+            "last": last_val,
+            "previous": prev_val,
+            "reference": ref_date
+        }
     return None
 
 FRED_PMI_SERIES = {
@@ -2199,14 +2249,34 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
     return None, None, False
 
 
+EODHD_BONDS_CACHE_FILE = ".eodhd_bonds_cache.json"
+EODHD_STATUS_FILE = ".eodhd_status.json"
+
 _EODHD_STATUS_INFO = {
     "status": "🟢 EODHD AVAILABLE" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)",
     "code": 200 if EODHD_KEY else None
 }
-EODHD_BONDS_CACHE_FILE = ".eodhd_bonds_cache.json"
+
+def load_eodhd_status():
+    if os.path.exists(EODHD_STATUS_FILE):
+        try:
+            with open(EODHD_STATUS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_eodhd_status(status_dict):
+    try:
+        with open(EODHD_STATUS_FILE, "w", encoding="utf-8") as f:
+            json.dump(status_dict, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
 def get_eodhd_status_label():
-    global _EODHD_STATUS_INFO
+    persisted = load_eodhd_status()
+    if persisted and "status" in persisted:
+        return persisted["status"]
     if not EODHD_KEY:
         return "Inaktiv 🔴 (API-Key fehlt)"
     return _EODHD_STATUS_INFO.get("status", "🟢 EODHD AVAILABLE")
@@ -2223,11 +2293,28 @@ def load_eodhd_bonds_cache():
 def save_eodhd_bonds_cache(ticker, parsed_data):
     try:
         cache = load_eodhd_bonds_cache()
-        cache[ticker] = parsed_data
+        # Schema conforming to Section 5
+        cache[ticker] = {
+            "ticker": ticker,
+            "observation_date": parsed_data[-1]["date"] if parsed_data else None,
+            "value": parsed_data[-1]["value"] if parsed_data else None,
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "EODHD GBOND",
+            "history": parsed_data
+        }
         with open(EODHD_BONDS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
+
+def _parse_eodhd_bond_entry(cached_entry):
+    if not cached_entry:
+        return None
+    if isinstance(cached_entry, dict) and "history" in cached_entry:
+        return cached_entry["history"]
+    if isinstance(cached_entry, list):
+        return cached_entry
+    return None
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_eodhd_bond_data(ticker, api_key):
@@ -2236,10 +2323,15 @@ def get_eodhd_bond_data(ticker, api_key):
         _EODHD_STATUS_INFO["status"] = "Inaktiv 🔴 (API-Key fehlt)"
         return None
 
-    # Check local persistent cache
+    # 1. Read-mostly: Check local persistent cache first
     cache = load_eodhd_bonds_cache()
-    cached_list = cache.get(ticker)
+    cached_list = _parse_eodhd_bond_entry(cache.get(ticker))
+    if cached_list and len(cached_list) > 0:
+        df = pd.DataFrame(cached_list)
+        df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values("date").reset_index(drop=True)
 
+    # 2. Only fetch over network if absent from persistent cache
     try:
         url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_key}&fmt=json&from=2015-01-01"
         r = requests.get(url, timeout=10)
@@ -2271,13 +2363,102 @@ def get_eodhd_bond_data(ticker, api_key):
     except Exception:
         _EODHD_STATUS_INFO["status"] = "🟡 EODHD SERVICE ERROR"
 
-    # Fallback to local persistent cache if available
-    if cached_list and isinstance(cached_list, list) and len(cached_list) > 0:
-        df = pd.DataFrame(cached_list)
-        df["date"] = pd.to_datetime(df["date"])
-        return df.sort_values("date").reset_index(drop=True)
-
     return None
+
+def prefetch_eodhd_production_data(api_key=EODHD_KEY):
+    """
+    Executes the single daily EODHD collection under strict free-tier quota budget (20 calls max):
+    Priority 1 (P1): 7 x 2Y Government Bond Tickers (DE2Y, UK2Y, SW2Y, CA2Y, AU2Y, NZ2Y, JP2Y) -> 7 calls
+    Priority 2 (P2): 1 x Batched Economic Events for PMI -> 1 call
+    Priority 3 (P3): 6 x 5Y Government Bond Tickers (DE5Y, UK5Y, CA5Y, AU5Y, NZ5Y, JP5Y) -> 6 calls
+    Total max calls = 14 / 20 calls (leaving 6 calls safety buffer).
+    """
+    if not api_key:
+        return {"success": False, "calls": 0, "status": "No API Key"}
+        
+    call_count = 0
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status_summary = {
+        "status": "🟢 EODHD AVAILABLE",
+        "calls": 0,
+        "p1_2y_calls": 0,
+        "p2_pmi_calls": 0,
+        "p3_5y_calls": 0,
+        "daily_limit": 20,
+        "last_checked": now_str
+    }
+    
+    # 1. P1: 2Y Yields (7 tickers)
+    tickers_2y = ["DE2Y.GBOND", "UK2Y.GBOND", "SW2Y.GBOND", "CA2Y.GBOND", "AU2Y.GBOND", "NZ2Y.GBOND", "JP2Y.GBOND"]
+    for t in tickers_2y:
+        try:
+            url = f"https://eodhd.com/api/eod/{t}?api_token={api_key}&fmt=json&from=2015-01-01"
+            r = requests.get(url, timeout=10)
+            call_count += 1
+            status_summary["p1_2y_calls"] += 1
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    parsed = [{"date": str(row["date"]), "value": float(row["close"])} for row in data if row.get("close") is not None and row.get("date")]
+                    if parsed:
+                        save_eodhd_bonds_cache(t, parsed)
+            elif r.status_code == 402:
+                status_summary["status"] = "🟡 DAILY LIMIT EXHAUSTED"
+                break
+            elif r.status_code in [401, 403]:
+                status_summary["status"] = "🔴 EODHD AUTH FAILED"
+                break
+        except Exception:
+            pass
+            
+    # 2. P2: Batched Economic Events for PMI (1 shared call)
+    if status_summary["status"] not in ["🟡 DAILY LIMIT EXHAUSTED", "🔴 EODHD AUTH FAILED"]:
+        try:
+            start_date = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            url = "https://eodhd.com/api/economic-events"
+            params = {"api_token": api_key, "from": start_date, "to": end_date, "limit": 1000}
+            r = requests.get(url, params=params, timeout=12)
+            call_count += 1
+            status_summary["p2_pmi_calls"] = 1
+            if r.status_code == 200:
+                events = r.json()
+                if isinstance(events, list) and len(events) > 0:
+                    save_eodhd_events_cache(events)
+            elif r.status_code == 402:
+                status_summary["status"] = "🟡 DAILY LIMIT EXHAUSTED"
+            elif r.status_code in [401, 403]:
+                status_summary["status"] = "🔴 EODHD AUTH FAILED"
+        except Exception:
+            pass
+            
+    # 3. P3: 5Y Yields Context (6 tickers)
+    if status_summary["status"] not in ["🟡 DAILY LIMIT EXHAUSTED", "🔴 EODHD AUTH FAILED"]:
+        tickers_5y = ["DE5Y.GBOND", "UK5Y.GBOND", "CA5Y.GBOND", "AU5Y.GBOND", "NZ5Y.GBOND", "JP5Y.GBOND"]
+        for t in tickers_5y:
+            try:
+                url = f"https://eodhd.com/api/eod/{t}?api_token={api_key}&fmt=json&from=2015-01-01"
+                r = requests.get(url, timeout=10)
+                call_count += 1
+                status_summary["p3_5y_calls"] += 1
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        parsed = [{"date": str(row["date"]), "value": float(row["close"])} for row in data if row.get("close") is not None and row.get("date")]
+                        if parsed:
+                            save_eodhd_bonds_cache(t, parsed)
+                elif r.status_code == 402:
+                    status_summary["status"] = "🟡 DAILY LIMIT EXHAUSTED"
+                    break
+                elif r.status_code in [401, 403]:
+                    status_summary["status"] = "🔴 EODHD AUTH FAILED"
+                    break
+            except Exception:
+                pass
+
+    status_summary["calls"] = call_count
+    save_eodhd_status(status_summary)
+    return status_summary
 
 def get_eodhd_bond_historical(ticker, target_date, api_key=EODHD_KEY):
     df = get_eodhd_bond_data(ticker, api_key)
