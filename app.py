@@ -24,42 +24,577 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize session state for manual interest rates (persisted to .rates_config.json)
+# ----------------- AUTOMATED VERIFIED G8 POLICY RATE ENGINE -----------------
 import json
 
-RATES_CONFIG_FILE = ".rates_config.json"
-persisted_rates = {}
-if os.path.exists(RATES_CONFIG_FILE):
-    try:
-        with open(RATES_CONFIG_FILE, "r", encoding="utf-8") as f:
-            persisted_rates = json.load(f)
-    except Exception:
-        pass
+POLICY_RATES_CACHE_FILE = ".policy_rates_cache.json"
 
-defaults = {
-    "manual_rate_EUR": 2.25,
-    "manual_rate_USD": 3.50,
-    "manual_rate_GBP": 3.75,
-    "manual_rate_JPY": 1.00,
-    "manual_rate_AUD": 4.35,
-    "manual_rate_CAD": 2.25,
-    "manual_rate_NZD": 2.50,
-    "manual_rate_CHF": 0.00,
-    "last_saved_rates": None
+def find_current_rate_episode_start(observations, current_rate, default_effective_date=None):
+    """Walk only the current uninterrupted episode; require an observed boundary."""
+    records = {}
+    for obs in observations or []:
+        if isinstance(obs, dict):
+            date = obs.get("date", obs.get("d"))
+            value = next((obs[k] for k in ("value", "v", "rate") if k in obs and obs[k] is not None), None)
+        elif isinstance(obs, (list, tuple)) and len(obs) >= 2:
+            date, value = obs[:2]
+        else:
+            continue
+        date = _policy_date(date)
+        try:
+            value = _policy_rate(value)
+        except (TypeError, ValueError):
+            continue
+        if date:
+            if date in records and abs(records[date] - value) > 1e-8:
+                return None
+            records[date] = value
+    ordered = sorted(records.items())
+    if not ordered or abs(ordered[-1][1] - float(current_rate)) > 1e-8:
+        return None
+    start = ordered[-1][0]
+    for date, value in reversed(ordered):
+        if abs(value - float(current_rate)) > 1e-8:
+            return start
+        start = date
+    # A truncated constant history cannot establish when this episode began.
+    return default_effective_date
+
+POLICY_RATE_DEFINITIONS = {
+    "USD": {
+        "instrument": "Federal Funds Target Range (Lower Bound)",
+        "central_bank": "Federal Reserve"
+    },
+    "EUR": {
+        "instrument": "ECB Deposit Facility Rate",
+        "central_bank": "European Central Bank"
+    },
+    "GBP": {
+        "instrument": "Bank of England Official Bank Rate",
+        "central_bank": "Bank of England"
+    },
+    "CAD": {
+        "instrument": "Target for the Overnight Rate",
+        "central_bank": "Bank of Canada"
+    },
+    "CHF": {
+        "instrument": "SNB Policy Rate",
+        "central_bank": "Swiss National Bank"
+    },
+    "AUD": {
+        "instrument": "Cash Rate Target",
+        "central_bank": "Reserve Bank of Australia"
+    },
+    "NZD": {
+        "instrument": "Official Cash Rate (OCR)",
+        "central_bank": "Reserve Bank of New Zealand"
+    },
+    "JPY": {
+        "instrument": "Short-Term Policy Interest Rate",
+        "central_bank": "Bank of Japan"
+    }
 }
 
-for key, val in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = persisted_rates.get(key, val)
+POLICY_VERIFICATION_MAX_AGE_DAYS = 7
+POLICY_OFFICIAL_HOSTS = {
+    "USD": {"api.stlouisfed.org", "fred.stlouisfed.org", "www.federalreserve.gov"},
+    "EUR": {"data-api.ecb.europa.eu", "www.ecb.europa.eu"},
+    "GBP": {"www.bankofengland.co.uk"},
+    "JPY": {"www.boj.or.jp"},
+    "CHF": {"data.snb.ch", "www.snb.ch"},
+    "CAD": {"www.bankofcanada.ca"},
+    "AUD": {"www.rba.gov.au"},
+    "NZD": {"www.rbnz.govt.nz"},
+}
 
-# Also load change histories if they exist in persisted file
-for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
-    prev_key = f"manual_rate_{c}_prev"
-    change_key = f"manual_rate_{c}_last_change"
-    if prev_key not in st.session_state:
-        st.session_state[prev_key] = persisted_rates.get(prev_key, persisted_rates.get(f"manual_rate_{c}", defaults[f"manual_rate_{c}"]))
-    if change_key not in st.session_state:
-        st.session_state[change_key] = persisted_rates.get(change_key, "N/A")
+
+def _policy_now():
+    from datetime import timezone
+    return datetime.now(timezone.utc)
+
+
+def _policy_date(value):
+    import re
+    if value is None or not str(value).strip():
+        return None
+    value = str(value).strip()
+    if re.fullmatch(r"\d{4}(?:-\d{2})?", value):
+        return None  # A month/year cannot establish an exact effective date.
+    try:
+        if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", value):
+            return datetime.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
+        parsed = pd.to_datetime(value.replace("Sept.", "Sep").replace("Jun.", "Jun"), utc=True)
+        return parsed.strftime("%Y-%m-%d") if not pd.isna(parsed) else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _policy_rate(value):
+    import math
+    if isinstance(value, bool):
+        raise ValueError("INVALID_RATE")
+    text = str(value).strip().replace("%", "").replace("−", "-")
+    for fraction, decimal in {"¼": ".25", "½": ".5", "¾": ".75"}.items():
+        text = text.replace(fraction, decimal)
+    # Fed statements use mixed fractions, e.g. 3-1/2 to 3-3/4.
+    import re
+    mixed = re.fullmatch(r"(\d+)[\s‐‑–-]+(\d+)/(\d+)", text)
+    number = (float(mixed[1]) + float(mixed[2]) / float(mixed[3])) if mixed else float(text)
+    if not math.isfinite(number) or not -10 <= number <= 30:
+        raise ValueError("INVALID_RATE")
+    return number
+
+
+def _policy_url_allowed(currency, url):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.hostname in POLICY_OFFICIAL_HOSTS.get(currency, set()) and not parsed.username
+
+
+def _policy_request(currency, url, params=None):
+    if not _policy_url_allowed(currency, url):
+        raise ValueError("UNAPPROVED_POLICY_SOURCE")
+    headers = {"User-Agent": "ForexDashboard/2.6 official policy verification"} if currency == "GBP" else {}
+    response = requests.get(url, params=params, timeout=(5, 15), headers=headers)
+    response.raise_for_status()
+    if not _policy_url_allowed(currency, response.url):
+        raise ValueError("UNAPPROVED_POLICY_REDIRECT")
+    return response
+
+
+def _policy_html(currency, url):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(_policy_request(currency, url).text, "html.parser")
+    for node in soup(["script", "style", "nav", "header", "footer"]):
+        node.decompose()
+    return soup
+
+
+def _policy_text(soup):
+    return " ".join(soup.get_text(" ", strip=True).split())
+
+
+def _policy_match_rate(text, patterns):
+    import re
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return _policy_rate(match[1])
+    raise ValueError("POLICY_INSTRUMENT_NOT_FOUND")
+
+
+def _policy_published_date(soup):
+    import re
+    for node in soup.select('time[datetime], meta[property="article:published_time"], meta[name="date"]'):
+        value = _policy_date(node.get("datetime") or node.get("content"))
+        if value:
+            return value
+    for node in soup.select(".date, .published-date, .release-date"):
+        value = _policy_date(node.get_text(" ", strip=True))
+        if value:
+            return value
+    match = re.search(r"Published (?:on )?(\d{1,2}\s+[A-Za-z]+\s+20\d{2})", _policy_text(soup), re.I)
+    return _policy_date(match[1]) if match else None
+
+
+def _policy_evidence(currency, url, rate, **metadata):
+    if not _policy_url_allowed(currency, url):
+        raise ValueError("UNAPPROVED_POLICY_SOURCE")
+    return dict(currency=currency, instrument=POLICY_RATE_DEFINITIONS[currency]["instrument"],
+                source_url=url, rate=_policy_rate(rate), retrieved_at=_policy_now().isoformat(), **metadata)
+
+
+def _policy_history_evidence(currency, url, observations):
+    records = []
+    today = _policy_now().date().isoformat()
+    for date, value in observations:
+        date = _policy_date(date)
+        try:
+            value = _policy_rate(value)
+        except (TypeError, ValueError):
+            continue
+        if date and date <= today:
+            records.append((date, value))
+    records.sort()
+    if not records:
+        raise ValueError("EMPTY_POLICY_HISTORY")
+    rate = records[-1][1]
+    effective = find_current_rate_episode_start(records, rate)
+    previous = next((v for d, v in reversed(records) if abs(v - rate) > 1e-8), None)
+    return _policy_evidence(currency, url, rate, rate_effective_date=effective,
+                            previous_rate=previous, observation_date=records[-1][0])
+
+
+def _policy_table_history(currency, url, soup, rate_column=1, ecb=False):
+    records, linked_rows = [], []
+    year = None
+    for row in soup.find_all("tr"):
+        cells = [x.get_text(" ", strip=True) for x in row.find_all(["td", "th"])]
+        if not cells:
+            continue
+        date_text = cells[0]
+        rate_index = rate_column
+        if ecb:
+            if len(cells) >= 6 and cells[0].isdigit() and len(cells[0]) == 4:
+                year, date_text, rate_index = cells[0], cells[1], 2
+            elif year and len(cells) >= 5:
+                rate_index = 1
+            else:
+                continue
+            date_text = date_text.replace(".", "") + " " + year
+        elif not any(c.isalpha() for c in date_text) and not (len(date_text) >= 10 and "-" in date_text):
+            continue
+        date = _policy_date(date_text)
+        if not date or date > _policy_now().date().isoformat() or len(cells) <= rate_index:
+            continue
+        try:
+            value = _policy_rate(cells[rate_index])
+        except (TypeError, ValueError):
+            continue
+        records.append((date, value))
+        linked_rows.append((date, row))
+    evidence = _policy_history_evidence(currency, url, records)
+    return evidence, sorted(linked_rows, key=lambda item: item[0], reverse=True)
+
+
+def _policy_latest_link(currency, base_url, soup, pattern):
+    import re
+    from urllib.parse import urljoin
+    candidates = []
+    for a in soup.find_all("a", href=True):
+        url = urljoin(base_url, a["href"])
+        match = re.search(pattern, url)
+        if match and _policy_url_allowed(currency, url):
+            raw_date = match[1]
+            if len(raw_date) == 6:
+                raw_date = "20" + raw_date
+            date = _policy_date(raw_date)
+            if date and date <= _policy_now().date().isoformat():
+                candidates.append((date, url))
+    if not candidates:
+        raise ValueError("OFFICIAL_DECISION_NOT_FOUND")
+    return max(candidates)
+
+
+def _policy_pdf_text(currency, url):
+    from pypdf import PdfReader
+    return " ".join(" ".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(_policy_request(currency, url).content)).pages).split())
+
+
+def fetch_official_policy_rate_live(currency, fred_key=None):
+    """Fetch two independent official documents. No inferred or default rates."""
+    import re
+    from urllib.parse import urljoin
+    number = r"([+-]?\d+(?:\.\d+|[¼½¾]|[\s‐‑–-]+\d+/\d+)?)"
+    evidence = []
+    try:
+        if currency == "USD":
+            url = "https://api.stlouisfed.org/fred/series/observations"
+            if fred_key:
+                data = _policy_request(currency, url, {"series_id": "DFEDTARL", "api_key": fred_key, "file_type": "json", "observation_start": "2000-01-01"}).json()
+                rows = [(x["date"], x["value"]) for x in data.get("observations", [])]
+            else:
+                csv_url = "https://fred.stlouisfed.org/graph/graph.csv?id=DFEDTARL"
+                frame = pd.read_csv(io.StringIO(_policy_request(currency, csv_url).text))
+                rows = list(zip(frame.iloc[:, 0], frame["DFEDTARL"]))
+            evidence.append(_policy_history_evidence(currency, "https://fred.stlouisfed.org/series/DFEDTARL", rows))
+            index = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+            decision, statement = _policy_latest_link(currency, index, _policy_html(currency, index), r"monetary(\d{8})a\.htm$")
+            text = _policy_text(_policy_html(currency, statement))
+            match = re.search(r"target range for the federal funds rate.{0,90}?" + number + r"\s+to\s+" + number + r"\s+(?:percent|per cent)", text, re.I)
+            if not match:
+                raise ValueError("FED_TARGET_RANGE_NOT_FOUND")
+            lower, upper = _policy_rate(match[1]), _policy_rate(match[2])
+            if not lower < upper <= lower + 1:
+                raise ValueError("FED_TARGET_RANGE_INVALID")
+            evidence.append(_policy_evidence(currency, statement, lower, upper_bound=upper, last_policy_decision_date=decision))
+
+        elif currency == "EUR":
+            url = "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV"
+            payload = _policy_request(currency, url, {"startPeriod": "1999-01-01", "format": "jsondata"}).json()
+            series = next(iter(payload["dataSets"][0]["series"].values()))["observations"]
+            dates = payload["structure"]["dimensions"]["observation"][0]["values"]
+            evidence.append(_policy_history_evidence(currency, url, [(dates[int(k)]["id"], v[0]) for k, v in series.items()]))
+            url2 = "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html"
+            secondary, _ = _policy_table_history(currency, url2, _policy_html(currency, url2), ecb=True)
+            # The decision index explicitly advertises its public year snippets.
+            index = "https://www.ecb.europa.eu/press/govcdec/mopo/html/index.en.html"
+            index_soup = _policy_html(currency, index)
+            snippets = index_soup.select_one("[data-snippets]")
+            if snippets:
+                year_soup = _policy_html(currency, urljoin(index, snippets["data-snippets"].split(",")[0]))
+            else:
+                year_soup = index_soup
+            decision, statement = _policy_latest_link(currency, index, year_soup, r"ecb\.mp(\d{6})~[^/]+\.en\.html$")
+            text = _policy_text(_policy_html(currency, statement))
+            value = _policy_match_rate(text, [r"deposit facility.{0,180}?(?:at|to|be)\s+" + number + r"\s*%"])
+            if abs(value - secondary["rate"]) > 1e-8:
+                raise ValueError("ECB_DECISION_TABLE_CONFLICT")
+            secondary["last_policy_decision_date"] = decision
+            secondary["decision_source"] = statement
+            evidence.append(secondary)
+
+        elif currency == "GBP":
+            primary_url = "https://www.bankofengland.co.uk/boeapps/database/Bank-Rate.asp"
+            primary, _ = _policy_table_history(currency, primary_url, _policy_html(currency, primary_url))
+            evidence.append(primary)
+            url = "https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate"
+            soup = _policy_html(currency, url)
+            rate = _policy_match_rate(_policy_text(soup), [r"Current Bank Rate\s*" + number + r"\s*%"])
+            evidence.append(_policy_evidence(currency, url, rate, last_policy_decision_date=_policy_published_date(soup)))
+
+        elif currency == "CAD":
+            url = "https://www.bankofcanada.ca/valet/observations/V39079/json"
+            data = _policy_request(currency, url, {"start_date": "2000-01-01"}).json()
+            evidence.append(_policy_history_evidence(currency, url, [(x["d"], x.get("V39079", {}).get("v")) for x in data.get("observations", [])]))
+            index = "https://www.bankofcanada.ca/core-functions/monetary-policy/key-interest-rate/"
+            decision, url2 = _policy_latest_link(currency, index, _policy_html(currency, index), r"fad-press-release-(\d{4}-\d{2}-\d{2})/")
+            text = _policy_text(_policy_html(currency, url2))
+            rate = _policy_match_rate(text, [r"target for the overnight rate.{0,90}?(?:at|to)\s+" + number + r"\s*%"])
+            evidence.append(_policy_evidence(currency, url2, rate, last_policy_decision_date=decision))
+
+        elif currency == "CHF":
+            # The monthly cube does not identify the exact effective day.
+            url = "https://www.snb.ch/en/the-snb/mandates-goals/statistics/statistics-pub/current_interest_exchange_rates"
+            text = _policy_text(_policy_html(currency, url))
+            match = re.search(r"SNB policy rate\s+" + number + r"\s*%\s+valid from\s+(\d{2}\.\d{2}\.\d{4})", text, re.I)
+            if not match:
+                raise ValueError("SNB_DATED_POLICY_RATE_NOT_FOUND")
+            evidence.append(_policy_evidence(currency, url, match[1], rate_effective_date=_policy_date(match[2])))
+            index = "https://www.snb.ch/en/the-snb/mandates-goals/monetary-policy/decisions"
+            decision, url2 = _policy_latest_link(currency, index, _policy_html(currency, index), r"/pre_(\d{8})(?:_\d+)?$")
+            text = _policy_text(_policy_html(currency, url2))
+            rate = _policy_match_rate(text, [r"SNB policy rate.{0,100}?(?:at|to)\s+" + number + r"\s*%"])
+            evidence.append(_policy_evidence(currency, url2, rate, last_policy_decision_date=decision))
+
+        elif currency in {"AUD", "NZD"}:
+            url = "https://www.rba.gov.au/statistics/cash-rate/" if currency == "AUD" else "https://www.rbnz.govt.nz/monetary-policy/monetary-policy-decisions"
+            soup = _policy_html(currency, url)
+            primary, rows = _policy_table_history(currency, url, soup, rate_column=2 if currency == "AUD" else 1)
+            evidence.append(primary)
+            latest_date, row = rows[0]
+            link = next((a for a in row.find_all("a", href=True) if a.get_text(" ", strip=True).lower() in {"statement", "media release"}), None)
+            if link is None:
+                raise ValueError("OFFICIAL_DECISION_NOT_FOUND")
+            url2 = urljoin(url, link["href"])
+            decision_soup = _policy_html(currency, url2)
+            text = _policy_text(decision_soup)
+            pattern = r"cash rate target.{0,100}?(?:at|to)\s+" if currency == "AUD" else r"(?:official cash rate(?:\s*\(OCR\))?|OCR).{0,100}?(?:at|to)\s+"
+            rate = _policy_match_rate(text, [pattern + number + r"\s*(?:%|per cent|percent)"])
+            decision = _policy_published_date(decision_soup)
+            if not decision and currency == "NZD":
+                # RBNZ's primary table explicitly lists the OCR announcement date.
+                decision = latest_date
+            if not decision and currency == "AUD" and "following day" in _policy_text(soup):
+                # RBA explicitly defines table dates as effective on the day after the decision.
+                decision = (pd.Timestamp(latest_date) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            evidence.append(_policy_evidence(currency, url2, rate, last_policy_decision_date=decision))
+
+        elif currency == "JPY":
+            url = "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm"
+            text = _policy_text(_policy_html(currency, url))
+            rate = _policy_match_rate(text, [r"4\. Interest Rate\s+The interest rate shall be\s+" + number + r"\s+percent"])
+            primary = _policy_evidence(currency, url, rate)
+            evidence.append(primary)
+            index = f"https://www.boj.or.jp/en/mopo/mpmdeci/mpr_{_policy_now().year}/index.htm"
+            soup = _policy_html(currency, index)
+            decision, statement = _policy_latest_link(currency, index, soup, r"/k(\d{6})a\.pdf$")
+            text = _policy_pdf_text(currency, statement)
+            call_rate_pattern = r"uncollateralized\s+o\s*vernight\s+call\s+rate.{0,70}?around\s+" + number + r"\s+percent"
+            latest_rate = _policy_match_rate(text, [call_rate_pattern])
+            secondary = _policy_evidence(currency, statement, latest_rate, last_policy_decision_date=decision)
+            # Find the latest explicit rate-changing statement, not the latest hold.
+            change_links = []
+            for a in soup.find_all("a", href=True):
+                if "Change in the Guideline for Money Market Operations" in a.get_text(" ", strip=True) and "Reference" not in a.get_text():
+                    candidate = urljoin(index, a["href"])
+                    match = re.search(r"/k(\d{6})a\.pdf$", candidate)
+                    if match and _policy_date("20" + match[1]) <= decision:
+                        change_links.append(candidate)
+            if change_links:
+                change_url = max(change_links)
+                change_text = text if change_url == statement else _policy_pdf_text(currency, change_url)
+                changed_rate = _policy_match_rate(change_text, [call_rate_pattern])
+                effective_match = re.search(r"new guideline.{0,50}?effective from\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})", change_text, re.I)
+                if abs(changed_rate - rate) < 1e-8 and effective_match:
+                    primary["rate_effective_date"] = _policy_date(effective_match[1])
+                    primary["effective_date_source"] = change_url
+            evidence.append(secondary)
+        else:
+            raise ValueError("UNSUPPORTED_CURRENCY")
+        return {"evidence": evidence}
+    except Exception as exc:
+        # Never propagate URLs/request objects or secrets into logs/cache/UI.
+        return {"evidence": evidence, "error": type(exc).__name__}
+
+
+def _policy_proofs_valid(obj, check_age=True):
+    try:
+        currency, rate = obj["currency"], _policy_rate(obj["rate"])
+        verified = pd.to_datetime(obj.get("verified_at"), utc=True)
+        if verified is None or pd.isna(verified):
+            return False
+        verified_age = (_policy_now() - verified).total_seconds()
+        if verified_age < -300 or (check_age and verified_age > POLICY_VERIFICATION_MAX_AGE_DAYS * 86400):
+            return False
+        proofs = obj.get("verification_evidence", [])
+        if len(proofs) != 2 or len({p.get("source_url") for p in proofs}) != 2:
+            return False
+        for proof in proofs:
+            if (proof.get("currency") != currency or proof.get("instrument") != POLICY_RATE_DEFINITIONS[currency]["instrument"]
+                    or not _policy_url_allowed(currency, proof.get("source_url", "")) or abs(_policy_rate(proof["rate"]) - rate) > 1e-8):
+                return False
+            checked = pd.to_datetime(proof["retrieved_at"], utc=True)
+            if pd.isna(checked):
+                return False
+            age = (_policy_now() - checked).total_seconds()
+            if age < -300 or (check_age and age > POLICY_VERIFICATION_MAX_AGE_DAYS * 86400):
+                return False
+        effective = _policy_date(obj.get("rate_effective_date"))
+        decision = _policy_date(obj.get("last_policy_decision_date"))
+        return bool(effective and decision and effective <= _policy_now().date().isoformat() and decision <= _policy_now().date().isoformat())
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def policy_rate_is_usable(obj):
+    if not isinstance(obj, dict):
+        return False
+    status = obj.get("verification_status", "")
+    if status == "🔴 MANUAL OVERRIDE":
+        # Only the explicitly activated session override may bypass source verification.
+        try:
+            _policy_rate(obj.get("rate"))
+        except (TypeError, ValueError):
+            return False
+        return bool(st.session_state.get("emergency_manual_rates_override", False))
+    return status in {"🟢 VERIFIED", "🟢 VERIFIED_UNCHANGED", "🟡 LAST VERIFIED"} and _policy_proofs_valid(obj)
+
+
+def load_policy_rates_cache():
+    try:
+        with open(POLICY_RATES_CACHE_FILE, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+            return cache if isinstance(cache, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_policy_rates_cache(cache_dict):
+    import tempfile
+    directory = os.path.dirname(os.path.abspath(POLICY_RATES_CACHE_FILE))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=directory, delete=False, encoding="utf-8") as f:
+            temporary = f.name
+            json.dump(cache_dict, f, indent=2, ensure_ascii=False, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, POLICY_RATES_CACHE_FILE)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _policy_empty(currency):
+    definition = POLICY_RATE_DEFINITIONS[currency]
+    return dict(currency=currency, rate=None, previous_rate=None, upper_bound=None,
+                instrument=definition["instrument"], central_bank=definition["central_bank"],
+                rate_effective_date=None, last_policy_decision_date=None, verified_at=None,
+                primary_source=None, secondary_source=None, verification_evidence=[],
+                verification_status="🔴 OFFICIAL SOURCE UNAVAILABLE")
+
+
+def get_verified_policy_rate(currency):
+    """Read-only canonical interface; legacy defaults cannot create verification."""
+    if currency not in POLICY_RATE_DEFINITIONS:
+        raise ValueError("UNSUPPORTED_CURRENCY")
+    if st.session_state.get("emergency_manual_rates_override", False):
+        value = st.session_state.get(f"manual_rate_{currency}")
+        if value is not None:
+            obj = _policy_empty(currency)
+            obj.update(rate=_policy_rate(value), previous_rate=st.session_state.get(f"manual_rate_{currency}_prev"),
+                       primary_source="MANUAL OVERRIDE", secondary_source="USER EMERGENCY INPUT",
+                       verification_status="🔴 MANUAL OVERRIDE")
+            return obj
+    cached = load_policy_rates_cache().get(currency)
+    obj = _policy_empty(currency)
+    if isinstance(cached, dict):
+        obj.update(cached)
+    obj["currency"] = currency
+    if not _policy_proofs_valid(obj, check_age=False):
+        # Legacy labels/defaults are not evidence of a previous verification.
+        obj = _policy_empty(currency)
+    for field in ("rate", "previous_rate", "upper_bound"):
+        try:
+            obj[field] = _policy_rate(obj.get(field))
+        except (TypeError, ValueError):
+            obj[field] = None
+    if not policy_rate_is_usable(obj) and obj.get("verification_status") != "🔴 UNVERIFIED CHANGE":
+        obj["verification_status"] = "🔴 OFFICIAL SOURCE UNAVAILABLE"
+    return obj
+
+
+def get_all_verified_policy_rates():
+    return {currency: get_verified_policy_rate(currency) for currency in POLICY_RATE_DEFINITIONS}
+
+
+def refresh_all_verified_policy_rates(fred_key=None):
+    """Only two agreeing, dated official proofs may activate a candidate rate."""
+    import fcntl
+    lock_path = POLICY_RATES_CACHE_FILE + ".lock"
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cache = load_policy_rates_cache()
+        for currency in POLICY_RATE_DEFINITIONS:
+            existing = cache.get(currency)
+            old = dict(existing) if isinstance(existing, dict) else _policy_empty(currency)
+            if not _policy_proofs_valid(old, check_age=False):
+                old = _policy_empty(currency)
+            now = _policy_now().isoformat()
+            # Repeat UI/collector runs within one hour reuse actual verified evidence.
+            try:
+                recent = (_policy_now() - pd.to_datetime(old.get("verified_at"), utc=True)).total_seconds() < 3600
+            except (TypeError, ValueError):
+                recent = False
+            if recent and policy_rate_is_usable(old):
+                continue
+            result = fetch_official_policy_rate_live(currency, fred_key)
+            proofs = result.get("evidence", []) if isinstance(result, dict) else []
+            candidate = _policy_empty(currency)
+            if len(proofs) == 2 and not result.get("error"):
+                first, second = proofs
+                candidate.update(rate=first.get("rate"), previous_rate=first.get("previous_rate"),
+                    upper_bound=second.get("upper_bound"), rate_effective_date=first.get("rate_effective_date"),
+                    last_policy_decision_date=second.get("last_policy_decision_date"), verified_at=now,
+                    primary_source=first.get("source_url"), secondary_source=second.get("source_url"),
+                    verification_evidence=proofs, verification_status="🟢 VERIFIED")
+                if _policy_proofs_valid(old, check_age=False) and old.get("rate") == candidate.get("rate"):
+                    # A hold preserves the validated episode and preceding different rate.
+                    candidate["rate_effective_date"] = old["rate_effective_date"]
+                    candidate["previous_rate"] = old.get("previous_rate")
+                if _policy_proofs_valid(candidate):
+                    unchanged = old.get("rate") == candidate["rate"] and _policy_proofs_valid(old, check_age=False)
+                    candidate["verification_status"] = "🟢 VERIFIED_UNCHANGED" if unchanged else "🟢 VERIFIED"
+                    if not unchanged and _policy_proofs_valid(old, check_age=False):
+                        candidate["previous_rate"] = old["rate"]
+                    candidate["last_attempt_at"] = now
+                    cache[currency] = candidate
+                    continue
+            changed = any(p.get("rate") != old.get("rate") for p in proofs)
+            conflicting = len(proofs) == 2 and proofs[0].get("rate") != proofs[1].get("rate")
+            old["last_attempt_at"] = now
+            old["last_attempt_error"] = (result or {}).get("error", "INCOMPLETE_OFFICIAL_VERIFICATION")
+            if changed or conflicting:
+                old["verification_status"] = "🔴 UNVERIFIED CHANGE"
+                old["candidate_rate"] = proofs[0].get("rate") if proofs else None
+            else:
+                old["verification_status"] = "🟡 LAST VERIFIED" if _policy_proofs_valid(old) else "🔴 OFFICIAL SOURCE UNAVAILABLE"
+            # Preserve verified_at, original evidence and last accepted rate on failure.
+            cache[currency] = old
+        save_policy_rates_cache(cache)
+        return cache
+
 
 # ----------------- Obsidian Dark Theme CSS -----------------
 st.markdown("""
@@ -923,103 +1458,109 @@ def parse_tradingeconomics_pmi(url):
         pass
     return None
 
-@st.cache_data(ttl=3600)
+EODHD_EVENTS_CACHE_FILE = ".eodhd_events_cache.json"
+
+def load_eodhd_events_cache():
+    if os.path.exists(EODHD_EVENTS_CACHE_FILE):
+        try:
+            with open(EODHD_EVENTS_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_eodhd_events_cache(events_list):
+    sanitized = []
+    for ev in events_list:
+        if isinstance(ev, dict):
+            sanitized.append({
+                "date": str(ev.get("date", "")),
+                "country": str(ev.get("country", "")),
+                "name": str(ev.get("name", "")),
+                "actual": ev.get("actual"),
+                "previous": ev.get("previous"),
+                "estimate": ev.get("estimate"),
+                "change_percentage": ev.get("change_percentage")
+            })
+    _atomic_eodhd_json(EODHD_EVENTS_CACHE_FILE, sanitized)
+
+
+def get_eodhd_batched_economic_events(api_key, start_date=None, end_date=None):
+    """Dashboard reads never spend EODHD quota; only the collector refreshes."""
+    return load_eodhd_events_cache()
+
+
 def get_eodhd_pmi_fallback(country_code, indicator_keyword, api_key):
-    if not api_key:
+    events = get_eodhd_batched_economic_events(api_key)
+    if not events:
         return None
     country_map = {
-        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
-        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
+        "EUR": ["EMU", "EUR"], "GBP": ["GBR", "UK"], "CHF": ["CHE", "CH"],
+        "CAD": ["CAN", "CA"], "AUD": ["AUS", "AU"], "NZD": ["NZL", "NZ"], "JPY": ["JPN", "JP"]
     }
-    eodhd_country = country_map.get(country_code, country_code)
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    url = f"https://eodhd.com/api/economic-events"
-    params = {
-        "api_token": api_key,
-        "from": start_date,
-        "to": end_date,
-        "country": eodhd_country,
-        "limit": 300
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            events = r.json()
-            matched = []
-            for ev in events:
-                name = ev.get("name", "").upper()
-                if indicator_keyword.upper() in name:
-                    matched.append(ev)
-            if matched:
-                matched.sort(key=lambda x: x.get("date", ""), reverse=True)
-                latest = matched[0]
-                try:
-                    last_val = float(latest.get("actual"))
-                except (ValueError, TypeError):
-                    last_val = None
-                try:
-                    prev_val = float(latest.get("previous"))
-                except (ValueError, TypeError):
-                    prev_val = None
-                ref_date = latest.get("date", "")
-                return {
-                    "last": last_val,
-                    "previous": prev_val,
-                    "reference": ref_date
-                }
-    except Exception:
-        pass
+    allowed_countries = country_map.get(country_code, [country_code])
+    matched = []
+    for ev in events:
+        c = ev.get("country", "")
+        name = ev.get("name", "").upper()
+        if (c in allowed_countries or c == country_code) and indicator_keyword.upper() in name:
+            matched.append(ev)
+    if matched:
+        matched.sort(key=lambda x: x.get("date", ""), reverse=True)
+        latest = matched[0]
+        try:
+            last_val = float(latest.get("actual"))
+        except (ValueError, TypeError):
+            last_val = None
+        try:
+            prev_val = float(latest.get("previous"))
+        except (ValueError, TypeError):
+            prev_val = None
+        ref_date = latest.get("date", "")
+        return {
+            "last": last_val,
+            "previous": prev_val,
+            "reference": ref_date
+        }
     return None
 
-@st.cache_data(ttl=86400)
 def get_eodhd_pmi_historical(country_code, indicator_keyword, target_date, api_key):
-    if not api_key:
+    target_dt = pd.to_datetime(target_date)
+    start_dt = target_dt - timedelta(days=120)
+    events = get_eodhd_batched_economic_events(api_key, start_date=start_dt.strftime("%Y-%m-%d"), end_date=target_dt.strftime("%Y-%m-%d"))
+    if not events:
         return None
     country_map = {
-        "EUR": "EMU", "GBP": "GBR", "CHF": "CHE",
-        "CAD": "CAN", "AUD": "AUS", "NZD": "NZL", "JPY": "JPN"
+        "EUR": ["EMU", "EUR"], "GBP": ["GBR", "UK"], "CHF": ["CHE", "CH"],
+        "CAD": ["CAN", "CA"], "AUD": ["AUS", "AU"], "NZD": ["NZL", "NZ"], "JPY": ["JPN", "JP"]
     }
-    eodhd_country = country_map.get(country_code, country_code)
-    target_dt = pd.to_datetime(target_date)
-    start_date = (target_dt - timedelta(days=90)).strftime("%Y-%m-%d")
-    end_date = target_dt.strftime("%Y-%m-%d")
-    url = "https://eodhd.com/api/economic-events"
-    params = {
-        "api_token": api_key,
-        "from": start_date,
-        "to": end_date,
-        "country": eodhd_country,
-        "limit": 300
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            events = r.json()
-            matched = []
-            for ev in events:
-                name = ev.get("name", "").upper()
-                if indicator_keyword.upper() in name:
-                    matched.append(ev)
-            if matched:
-                matched.sort(key=lambda x: x.get("date", ""))
-                latest = matched[-1]
-                try:
-                    last_val = float(latest.get("actual"))
-                except (ValueError, TypeError):
-                    last_val = None
-                try:
-                    prev_val = float(latest.get("previous"))
-                except (ValueError, TypeError):
-                    prev_val = None
-                ref_date = latest.get("date", "")
-                return {
-                    "last": last_val,
-                    "previous": prev_val,
-                    "reference": ref_date
-                }
-    except Exception:
-        pass
+    allowed_countries = country_map.get(country_code, [country_code])
+    matched = []
+    target_str = target_dt.strftime("%Y-%m-%d")
+    for ev in events:
+        c = ev.get("country", "")
+        ev_date = str(ev.get("date", ""))
+        name = ev.get("name", "").upper()
+        if (c in allowed_countries or c == country_code) and indicator_keyword.upper() in name:
+            if ev_date[:10] <= target_str:
+                matched.append(ev)
+    if matched:
+        matched.sort(key=lambda x: x.get("date", ""))
+        latest = matched[-1]
+        try:
+            last_val = float(latest.get("actual"))
+        except (ValueError, TypeError):
+            last_val = None
+        try:
+            prev_val = float(latest.get("previous"))
+        except (ValueError, TypeError):
+            prev_val = None
+        ref_date = latest.get("date", "")
+        return {
+            "last": last_val,
+            "previous": prev_val,
+            "reference": ref_date
+        }
     return None
 
 FRED_PMI_SERIES = {
@@ -1072,7 +1613,7 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
         m_last, m_prev, m_ref, m_src = None, None, None, "EODHD"
         s_last, s_prev, s_ref, s_src = None, None, None, "EODHD"
         
-        if eodhd_key:
+        if eodhd_key or load_eodhd_events_cache():
             res_m = get_eodhd_pmi_historical(code, "Manufacturing PMI", target_date, eodhd_key)
             if res_m:
                 m_last = res_m["last"]
@@ -1179,7 +1720,7 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
             m_prev = te_m[code]["previous"]
             m_ref = te_m[code]["reference"]
         
-        if m_last is None and eodhd_key:
+        if m_last is None:
             res_eod = get_eodhd_pmi_fallback(code, "Manufacturing PMI", eodhd_key)
             if res_eod:
                 m_last = res_eod["last"]
@@ -1204,7 +1745,7 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
             s_prev = te_s[code]["previous"]
             s_ref = te_s[code]["reference"]
             
-        if s_last is None and eodhd_key:
+        if s_last is None:
             res_eod = get_eodhd_pmi_fallback(code, "Services PMI", eodhd_key)
             if res_eod:
                 s_last = res_eod["last"]
@@ -2199,28 +2740,231 @@ def get_fred_data_historical(series_id, target_date, fred_key=FRED_KEY):
     return None, None, False
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+EODHD_BONDS_CACHE_FILE = ".eodhd_bonds_cache.json"
+EODHD_STATUS_FILE = ".eodhd_status.json"
+EODHD_DAILY_LIMIT = 20
+EODHD_2Y_TICKERS = ["DE2Y.GBOND", "UK2Y.GBOND", "SW2Y.GBOND", "CA2Y.GBOND", "AU2Y.GBOND", "NZ2Y.GBOND", "JP2Y.GBOND"]
+EODHD_5Y_TICKERS = ["DE5Y.GBOND", "UK5Y.GBOND", "CA5Y.GBOND", "AU5Y.GBOND", "NZ5Y.GBOND", "JP5Y.GBOND"]
+_EODHD_STATUS_INFO = {"status": "⚪ EODHD NOT CHECKED", "code": None}
+
+
+def _atomic_eodhd_json(path, data):
+    import tempfile
+    folder = os.path.dirname(os.path.abspath(path))
+    descriptor, temporary = tempfile.mkstemp(prefix=".eodhd-", dir=folder)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _eodhd_utc_now():
+    from datetime import timezone
+    return datetime.now(timezone.utc)
+
+
+def load_eodhd_status():
+    try:
+        with open(EODHD_STATUS_FILE, "r", encoding="utf-8") as handle:
+            status = json.load(handle)
+        return status if isinstance(status, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_eodhd_status(status_dict):
+    _atomic_eodhd_json(EODHD_STATUS_FILE, status_dict)
+
+
+def get_eodhd_status_label():
+    persisted = load_eodhd_status()
+    checked_day = persisted.get("day_utc", str(persisted.get("last_checked", ""))[:10])
+    if checked_day and checked_day != _eodhd_utc_now().strftime("%Y-%m-%d"):
+        return "🟡 EODHD CACHE – LAST CHECK " + checked_day
+    return persisted.get("status", "⚪ EODHD NOT CHECKED")
+
+
+def load_eodhd_bonds_cache():
+    try:
+        with open(EODHD_BONDS_CACHE_FILE, "r", encoding="utf-8") as handle:
+            cache = json.load(handle)
+        return cache if isinstance(cache, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_eodhd_bonds_cache(ticker, parsed_data):
+    cache = load_eodhd_bonds_cache()
+    history = sorted(parsed_data, key=lambda row: row["date"])
+    cache[ticker] = {
+        "ticker": ticker,
+        "observation_date": history[-1]["date"] if history else None,
+        "value": history[-1]["value"] if history else None,
+        "fetched_at": _eodhd_utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": "EODHD GBOND",
+        "history": history
+    }
+    _atomic_eodhd_json(EODHD_BONDS_CACHE_FILE, cache)
+
+
+def _parse_eodhd_bond_entry(cached_entry):
+    if isinstance(cached_entry, dict):
+        return cached_entry.get("history")
+    return cached_entry if isinstance(cached_entry, list) else None
+
+
 def get_eodhd_bond_data(ticker, api_key):
-    if not api_key:
+    """Read stored genuine yields, including with no local API key. Never fetch."""
+    cached = load_eodhd_bonds_cache().get(ticker)
+    history = _parse_eodhd_bond_entry(cached)
+    if not history:
         return None
     try:
-        url = f"https://eodhd.com/api/eod/{ticker}?api_token={api_key}&fmt=json&from=2015-01-01"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                parsed = []
-                for row in data:
-                    close_val = row.get("close")
-                    date_str = row.get("date")
-                    if close_val is not None and date_str:
-                        parsed.append({"date": date_str, "value": float(close_val)})
-                df = pd.DataFrame(parsed)
-                df["date"] = pd.to_datetime(df["date"])
-                return df.sort_values("date").reset_index(drop=True)
-    except Exception:
-        pass
-    return None
+        df = pd.DataFrame(history)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df[df["date"].notna() & np.isfinite(df["value"])].sort_values("date").reset_index(drop=True)
+        if df.empty:
+            return None
+        df.attrs["source"] = "EODHD GBOND"
+        df.attrs["fetched_at"] = cached.get("fetched_at") if isinstance(cached, dict) else None
+        df.attrs["observation_date"] = df.iloc[-1]["date"].strftime("%Y-%m-%d")
+        return df
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _eodhd_daily_status(status, today):
+    # Retain known legacy usage on the current day, never silently reset it.
+    old_day = status.get("day_utc", str(status.get("last_checked", ""))[:10])
+    if old_day != today:
+        status = {}
+    status.setdefault("calls", 0)
+    status.setdefault("attempts", {})
+    status["day_utc"] = today
+    status["daily_limit"] = EODHD_DAILY_LIMIT
+    return status
+
+
+def _summarize_eodhd_status(status):
+    attempts = status.get("attempts", {})
+    results = [entry.get("result") for entry in attempts.values()]
+    successes = sum(result == "SUCCESS" for result in results)
+    failures = [result for result in results if result != "SUCCESS"]
+    if "AUTH_FAILED" in results:
+        label = "🔴 EODHD AUTH FAILED"
+    elif "LIMIT_EXHAUSTED" in results or status.get("budget_exhausted"):
+        label = "🟡 DAILY LIMIT EXHAUSTED"
+    elif "NO_API_KEY" in results:
+        label = "🔴 EODHD API KEY MISSING"
+    elif failures:
+        label = "🟡 EODHD DATA PARTIAL" if successes or "TRUNCATED" in results else "🔴 EODHD DATA UNAVAILABLE"
+    elif len(results) == 14:
+        label = "🟢 EODHD AVAILABLE"
+    else:
+        label = "⚪ EODHD COLLECTION INCOMPLETE"
+    status["status"] = label
+    status["success"] = len(results) == 14 and not failures and not status.get("budget_exhausted")
+    status["collection_status"] = "SUCCESS" if status["success"] else ("PARTIAL" if successes or "TRUNCATED" in results else "FAILED")
+    for stage, field in [("2y", "p1_2y_calls"), ("pmi", "p2_pmi_calls"), ("5y", "p3_5y_calls")]:
+        status[field] = sum(entry.get("stage") == stage and entry.get("requested", False) for entry in attempts.values())
+    return status
+
+
+def prefetch_eodhd_production_data(api_key=EODHD_KEY):
+    """Only EODHD writer: 7 true 2Y, one shared events call, then 6 true 5Y.
+
+    The UTC daily ledger is reserved before each request (including timeouts).
+    A same-day rerun reuses every recorded attempt and never retries it. The
+    process lock covers both caches and ledger; Streamlit readers spend zero.
+    """
+    import fcntl
+    import math
+    resources = [(ticker, "2y") for ticker in EODHD_2Y_TICKERS]
+    resources += [("economic-events", "pmi")]
+    resources += [(ticker, "5y") for ticker in EODHD_5Y_TICKERS]
+    with open(EODHD_STATUS_FILE + ".lock", "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status = _eodhd_daily_status(load_eodhd_status(), _eodhd_utc_now().strftime("%Y-%m-%d"))
+        for resource, stage in resources:
+            status = _eodhd_daily_status(status, _eodhd_utc_now().strftime("%Y-%m-%d"))
+            if resource in status["attempts"]:
+                if status["attempts"][resource].get("requested"):
+                    continue
+                # Installing a missing key does not retry a spent provider call.
+                del status["attempts"][resource]
+            if any(entry.get("result") in ("AUTH_FAILED", "LIMIT_EXHAUSTED", "NO_API_KEY") for entry in status["attempts"].values()):
+                break
+            if status["calls"] >= EODHD_DAILY_LIMIT:
+                status["budget_exhausted"] = True
+                break
+            now = _eodhd_utc_now()
+            entry = {"stage": stage, "requested": False, "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+            status["attempts"][resource] = entry
+            if not api_key:
+                entry["result"] = "NO_API_KEY"
+                break
+            # Persist the reservation first. A crash cannot spend this slot twice.
+            entry.update({"requested": True, "result": "REQUEST_RESERVED"})
+            status["calls"] += 1
+            status["last_checked"] = entry["checked_at"]
+            save_eodhd_status(_summarize_eodhd_status(status))
+            try:
+                if stage == "pmi":
+                    start = (now - timedelta(days=120)).strftime("%Y-%m-%d")
+                    end = now.strftime("%Y-%m-%d")
+                    params = {"api_token": api_key, "from": start, "to": end, "limit": 1000}
+                    response = requests.get("https://eodhd.com/api/economic-events", params=params, timeout=12)
+                else:
+                    params = {"api_token": api_key, "fmt": "json", "from": "2015-01-01"}
+                    response = requests.get("https://eodhd.com/api/eod/" + resource, params=params, timeout=10)
+                entry["http_status"] = response.status_code
+                if response.status_code == 402:
+                    entry["result"] = "LIMIT_EXHAUSTED"
+                elif response.status_code in (401, 403):
+                    entry["result"] = "AUTH_FAILED"
+                elif response.status_code != 200:
+                    entry["result"] = "SERVICE_ERROR"
+                else:
+                    data = response.json()
+                    if not isinstance(data, list) or not data:
+                        entry["result"] = "EMPTY_OR_INVALID_RESPONSE"
+                    elif stage == "pmi":
+                        events = [event for event in data if isinstance(event, dict) and event.get("date") and event.get("country") and event.get("name")]
+                        if not events:
+                            entry["result"] = "EMPTY_OR_INVALID_RESPONSE"
+                        else:
+                            save_eodhd_events_cache(events)
+                            entry.update({"result": "TRUNCATED" if len(data) >= 1000 else "SUCCESS", "rows": len(events), "from": start, "to": end, "coverage_complete": len(data) < 1000})
+                    else:
+                        parsed = []
+                        for row in data:
+                            if not isinstance(row, dict) or not row.get("date") or row.get("close") is None:
+                                continue
+                            value = float(row["close"])
+                            date = datetime.strptime(str(row["date"]), "%Y-%m-%d").strftime("%Y-%m-%d")
+                            if math.isfinite(value) and date <= now.strftime("%Y-%m-%d"):
+                                parsed.append({"date": date, "value": value})
+                        if parsed:
+                            save_eodhd_bonds_cache(resource, parsed)
+                            latest_date = max(row["date"] for row in parsed)
+                            age_days = (now.date() - datetime.strptime(latest_date, "%Y-%m-%d").date()).days
+                            entry.update({"result": "SUCCESS" if age_days <= 15 else "STALE_DATA", "rows": len(parsed), "observation_date": latest_date})
+                        else:
+                            entry["result"] = "EMPTY_OR_INVALID_RESPONSE"
+            except Exception as error:
+                # Class names are diagnostic; URLs, tokens and payloads are not.
+                entry.update({"result": "SERVICE_ERROR", "error_type": type(error).__name__})
+            save_eodhd_status(_summarize_eodhd_status(status))
+        status["last_checked"] = _eodhd_utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        save_eodhd_status(_summarize_eodhd_status(status))
+        return status
+
 
 def get_eodhd_bond_historical(ticker, target_date, api_key=EODHD_KEY):
     df = get_eodhd_bond_data(ticker, api_key)
@@ -2239,14 +2983,14 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             val, dt, is_live = get_fred_data_historical("DGS2", target_date, fred_key)
             if val is not None:
                 return val, dt, "FRED"
-        if eodhd_key:
+        if eodhd_key or load_eodhd_bonds_cache():
             val, dt, is_live = get_eodhd_bond_historical("US2Y.GBOND", target_date, eodhd_key)
             if val is not None:
                 return val, dt, "EODHD (US2Y.GBOND)"
                 
     # EUR: EODHD DE2Y.GBOND (transparently Germany 2Y)
     elif curr == "EUR":
-        if eodhd_key:
+        if eodhd_key or load_eodhd_bonds_cache():
             val, dt, is_live = get_eodhd_bond_historical("DE2Y.GBOND", target_date, eodhd_key)
             if val is not None:
                 return val, dt, "EODHD"
@@ -2262,7 +3006,7 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             "NZD": "NZ2Y.GBOND"
         }
         ticker = ticker_map.get(curr)
-        if ticker and eodhd_key:
+        if ticker:
             val, dt, is_live = get_eodhd_bond_historical(ticker, target_date, eodhd_key)
             if val is not None:
                 return val, dt, "EODHD"
@@ -2287,13 +3031,13 @@ def get_genuine_5y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             val, dt, is_live = get_fred_data_historical("DGS5", target_date, fred_key)
             if val is not None:
                 return val, dt, "FRED (DGS5)"
-        if eodhd_key:
+        if eodhd_key or load_eodhd_bonds_cache():
             val, dt, is_live = get_eodhd_bond_historical("US5Y.GBOND", target_date, eodhd_key)
             if val is not None:
                 return val, dt, "EODHD (US5Y.GBOND)"
                 
     elif curr == "EUR":
-        if eodhd_key:
+        if eodhd_key or load_eodhd_bonds_cache():
             val, dt, is_live = get_eodhd_bond_historical("DE5Y.GBOND", target_date, eodhd_key)
             if val is not None:
                 return val, dt, "EODHD (Germany 5Y Benchmark)"
@@ -2307,7 +3051,7 @@ def get_genuine_5y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             "JPY": ("JP5Y.GBOND", "EODHD (Japan 5Y JGB)")
         }
         entry = ticker_map.get(curr)
-        if entry and eodhd_key:
+        if entry:
             ticker, src_label = entry
             val, dt, is_live = get_eodhd_bond_historical(ticker, target_date, eodhd_key)
             if val is not None:
@@ -3294,34 +4038,34 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
         pmi = details.get("PMI", 0)
         gdp = details.get("GDP", 0)
         
-        if gp > 15:
+        if gp is not None and gp > 15:
             bullets.append("+ Hohe Renditen & steigende Zinserwartungen")
-        elif gp < -15:
+        elif gp is not None and gp < -15:
             bullets.append("- Niedrige Renditen & sinkende Zinserwartungen")
             
-        if inf > 15:
+        if inf is not None and inf > 15:
             bullets.append("+ Erhöhter Inflationsdruck über dem Target")
-        elif inf < -15:
+        elif inf is not None and inf < -15:
             bullets.append("- Niedriger Inflationsdruck")
             
-        if lab > 15:
+        if lab is not None and lab > 15:
             bullets.append("+ Starker & robuster Arbeitsmarkt")
-        elif lab < -15:
+        elif lab is not None and lab < -15:
             bullets.append("- Schwacher Arbeitsmarkt")
             
-        if pmi > 15:
+        if pmi is not None and pmi > 15:
             bullets.append("+ PMI-Frühindikatoren signalisieren Expansion")
-        elif pmi < -15:
+        elif pmi is not None and pmi < -15:
             bullets.append("- PMI-Frühindikatoren signalisieren Kontraktion")
             
-        if gdp > 15:
+        if gdp is not None and gdp > 15:
             bullets.append("+ Robustes Wirtschaftswachstum (GDP)")
-        elif gdp < -15:
+        elif gdp is not None and gdp < -15:
             bullets.append("- Schwaches Wirtschaftswachstum (GDP)")
     except Exception:
         pass
     if not bullets:
-        bullets.append("⚪ Neutrale fundamentale Gesamtlage")
+        bullets.append("⚪ Keine belastbare fundamentale Tendenz aus den verfügbaren Faktoren")
     return bullets
 
 def get_cpi_yoy_details(curr: str, target_date=None):
@@ -3669,113 +4413,121 @@ def get_cpi_yoy_value(curr: str, target_date=None):
     val, _, _, _, _, _ = get_cpi_yoy_details(curr, target_date)
     return val
 
+def finite_number(value):
+    """Return a finite numeric value, preserving unavailable data as None."""
+    try:
+        if isinstance(value, (bool, np.bool_)):
+            return None
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def normalized_freshness(status):
+    """Read freshness independently of decorative badges and PIT annotations."""
+    text = str(status or "").upper()
+    for flag in ("UNAVAILABLE", "FAILED", "STALE", "AGING", "FRESH"):
+        if flag in text:
+            return flag
+    return "UNAVAILABLE"
+
+
+def observation_freshness(reference, target_date, fresh_days, max_days, monthly=False):
+    """Missing/future references cannot certify current data.
+
+    Monthly period labels use period end for age, without allowing a future
+    reference month. PMI uses the existing monthly labour limits: 45/90 days.
+    These are data-eligibility limits, not changes to CORE scoring weights.
+    """
+    try:
+        if reference is None or isinstance(reference, (int, float)):
+            return "UNAVAILABLE"
+        if isinstance(reference, str) and not reference.strip():
+            return "UNAVAILABLE"
+        if isinstance(reference, str):
+            parsed = None
+            for fmt in ("%b/%y", "%b/%Y", "%b %Y", "%Y-%m", "%m/%Y"):
+                try:
+                    parsed = datetime.strptime(reference.strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            reference = parsed if parsed is not None else reference
+        observed = pd.to_datetime(reference)
+        target = pd.to_datetime(target_date)
+        if pd.isna(observed) or observed > target:
+            return "UNAVAILABLE"
+        age_reference = observed + pd.offsets.MonthEnd(0) if monthly else observed
+        age = max(0, (target - age_reference).days)
+        return "FRESH" if age <= fresh_days else "AGING" if age <= max_days else "STALE"
+    except (TypeError, ValueError, OverflowError):
+        return "UNAVAILABLE"
+
+
+def get_macro_observation_details(curr, category, target_date=None):
+    """Keep a labour/GDP value attached to the source and date used to judge it.
+
+    Annual World Bank observations remain historical research only. They cannot
+    stand in for the current monthly labour or quarterly GDP observation.
+    """
+    target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
+    series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
+    result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
+              "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
+    try:
+        df, _, is_live = get_fred_data(series_id, FRED_KEY)
+        if df is not None and not df.empty and (is_live or check_demo_active()):
+            frame = df.copy()
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+            frame = frame[frame["date"] <= target_dt].sort_values("date").drop_duplicates("date", keep="last")
+            if not frame.empty:
+                observed = frame.iloc[-1]["date"]
+                value = frame.iloc[-1]["value"]
+                if category == "GDP" and series_id == "GDPC1":
+                    # Match the same quarter a year earlier; missing quarters
+                    # must not silently turn a four-row change into YoY.
+                    previous = frame[frame["date"] == observed - pd.DateOffset(years=1)]
+                    prior = finite_number(previous.iloc[-1]["value"]) if not previous.empty else None
+                    value = (float(value) / prior - 1.0) * 100.0 if prior not in (None, 0.0) else None
+                value = finite_number(value)
+                freshness = observation_freshness(observed, target_dt, 45 if category == "Arbeitsmarkt" else 120,
+                                                  90 if category == "Arbeitsmarkt" else 180,
+                                                  monthly=category == "Arbeitsmarkt")
+                valid_range = value is not None and (0 <= value <= 25 if category == "Arbeitsmarkt" else abs(value) <= 25)
+                result.update(date=observed.strftime("%Y-%m-%d"), source="FRED" if is_live else "Demo",
+                              freshness=freshness if valid_range else "FAILED")
+                if valid_range and freshness in ("FRESH", "AGING"):
+                    result["value"] = value
+                return result
+    except Exception:
+        result["freshness"] = "UNAVAILABLE"
+
+    # Preserve the research fallback, explicitly identified as annual and never
+    # eligible for the live CORE. Do not relabel it FRESH from an empty FRED fetch.
+    if (pd.Timestamp(datetime.now().date()) - target_dt).days > 365:
+        try:
+            indicator = "SL.UEM.TOTL.ZS" if category == "Arbeitsmarkt" else "NY.GDP.MKTP.KD.ZG"
+            value, observed, is_live = get_worldbank_data_historical(CURRENCIES[curr]["wb_code"], indicator, target_dt)
+            value = finite_number(value)
+            freshness = observation_freshness(observed, target_dt, 730, 730)
+            if value is not None and abs(value) <= 25 and freshness == "FRESH" and (is_live or check_demo_active()):
+                result.update(value=value, date=pd.to_datetime(observed).strftime("%Y-%m-%d"),
+                              source="World Bank (Historical Annual)", series_id=indicator,
+                              freshness="HISTORICAL_ANNUAL", frequency="annual")
+        except Exception:
+            pass
+    return result
+
+
 def get_unemployment_value(curr: str, target_date=None):
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = UNEMP_SERIES.get(curr, "UNRATE")
-        df, _, is_live = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(dt_str)
-                df_filtered = df[df["date"] <= target_dt].sort_values("date")
-                if not df_filtered.empty:
-                    obs_date = df_filtered.iloc[-1]["date"]
-                    days_diff = (target_dt - obs_date).days
-                    if days_diff > 90:
-                        return None  # Stale!
-                    val = df_filtered.iloc[-1]["value"]
-                    if pd.notna(val):
-                        if abs(val) > 25.0:
-                            return None
-                        return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, act_dt, is_live = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZS", target_date)
-        if val is not None:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(target_date)
-                if act_dt is not None:
-                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
-                    if days_diff > 365 * 2:
-                        return None
-                if abs(val) > 25.0:
-                    return None
-                return float(val)
-    except Exception:
-        pass
-    if check_demo_active():
-        return 5.0
-    return None
+    return get_macro_observation_details(curr, "Arbeitsmarkt", target_date)["value"]
+
 
 def get_gdp_yoy_value(curr: str, target_date=None):
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = GDP_SERIES.get(curr, "GDPC1")
-        df, _, is_live = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                df_c = df.copy()
-                target_dt = pd.to_datetime(dt_str)
-                df_filtered = df_c[df_c["date"] <= target_dt].sort_values("date")
-                
-                if not df_filtered.empty:
-                    # Check freshness first (quarterly, max 270 days)
-                    obs_date = df_filtered.iloc[-1]["date"]
-                    days_diff = (target_dt - obs_date).days
-                    if days_diff > 180:
-                        return None  # Stale!
-                        
-                    if series_id == "GDPC1":
-                        df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
-                        df_f_yoy = df_c[df_c["date"] <= target_dt].sort_values("date")
-                        val = df_f_yoy.iloc[-1]["yoy"] if not df_f_yoy.empty else None
-                    else:
-                        val = df_filtered.iloc[-1]["value"]
-                        
-                    if val is not None and pd.notna(val):
-                        if abs(val) > 25.0:
-                            return None
-                        return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, act_dt, is_live = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-        if val is not None:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(target_date)
-                if act_dt is not None:
-                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
-                    if days_diff > 365 * 2:
-                        return None
-                if abs(val) > 25.0:
-                    return None
-                return float(val)
-    except Exception:
-        pass
-    if check_demo_active():
-        return 1.5
-    return None
+    return get_macro_observation_details(curr, "GDP", target_date)["value"]
+
 
 def get_composite_pmi_score(curr: str, target_date=None):
     """Calculates the composite PMI score (Mfg + Svc average) for a given currency."""
@@ -3909,10 +4661,7 @@ def get_surprise_points(curr: str, category: str, target_date=None) -> float:
     except Exception:
         pass
         
-    import random
-    random.seed(hash(curr + category + str(target_date or "")) % 5000)
-    if random.random() < 0.35:
-        return random.choice([-20.0, 20.0])
+    # No observed release means no surprise contribution; never fabricate data.
     return 0.0
 
 def detect_market_regime(curr: str, target_date=None) -> str:
@@ -4100,329 +4849,159 @@ def get_bci_value(curr: str, target_date=None) -> dict:
         "source": source
     }
 
+CORE_FACTOR_WEIGHTS = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
+
+
 def compute_currency_details(curr: str, target_date=None) -> dict:
-    fred_key = FRED_KEY
-    if target_date is None:
-        dt_str = datetime.now().strftime("%Y-%m-%d")
-    else:
-        dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-        
-    scores = {
-        "Geldpolitik": None,
-        "Inflation": None,
-        "Arbeitsmarkt": None,
-        "PMI": None,
-        "GDP": None
-    }
-    
-    missing = []
-    
-    # Freshness mapping
-    gp_freshness = "STALE"
-    cpi_freshness = "STALE"
-    lab_freshness = "STALE"
-    pmi_freshness = "STALE"
-    gdp_freshness = "STALE"
-    
+    """Evaluate each CORE factor independently and fail closed on its errors."""
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
+    scores = {factor: None for factor in CORE_FACTOR_WEIGHTS}
+    freshness = {factor: "UNAVAILABLE" for factor in CORE_FACTOR_WEIGHTS}
+    observations = {}
+
     try:
-        # 1. Geldpolitik (Interest Rate / Yield)
-        policy_rate = defaults.get(f"manual_rate_{curr}")
-        manual_key = f"manual_rate_{curr}"
-        if manual_key in st.session_state and st.session_state[manual_key] is not None:
-            policy_rate = st.session_state[manual_key]
-            
-        yield_2y, act_dt, is_live = get_genuine_2y_yield_historical(curr, dt_str, fred_key, EODHD_KEY)
-        
-        if policy_rate is not None and yield_2y is not None:
-            days_2y = (pd.to_datetime(dt_str) - pd.to_datetime(act_dt)).days if act_dt else 999
-            if days_2y <= 5:
-                gp_freshness = "FRESH"
-            elif days_2y <= 15:
-                gp_freshness = "AGING"
-                
-        if gp_freshness == "STALE":
-            missing.append("Geldpolitik")
-        else:
+        policy = get_verified_policy_rate(curr)
+        policy_rate = finite_number(policy.get("rate")) if policy_rate_is_usable(policy) else None
+        yield_2y, observed, source = get_genuine_2y_yield_historical(curr, dt_str, FRED_KEY, EODHD_KEY)
+        yield_2y = finite_number(yield_2y)
+        freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
+        observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
+        if freshness["Geldpolitik"] in ("FRESH", "AGING"):
             gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
             gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
-            scores["Geldpolitik"] = np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0)
-            
-        # 2. Inflation
-        cpi_val, obs_date, metric_type, source, series_id, cpi_freshness = get_cpi_yoy_details(curr, dt_str)
-        if cpi_val is None or "STALE" in cpi_freshness or "UNAVAILABLE" in cpi_freshness or "FAILED" in cpi_freshness:
-            missing.append("Inflation")
-        else:
-            scores["Inflation"] = np.clip((cpi_val - 2.0) * 50.0, -100.0, 100.0)
-            
-        # 3. Arbeitsmarkt
-        unrate = get_unemployment_value(curr, dt_str)
-        if unrate is not None:
-            series_id = UNEMP_SERIES.get(curr, "UNRATE")
-            df_un, _, _ = get_fred_data(series_id, fred_key)
-            if df_un is not None and not df_un.empty:
-                df_filtered = df_un[df_un["date"] <= pd.to_datetime(dt_str)].sort_values("date")
-                if not df_filtered.empty:
-                    obs_dt = df_filtered.iloc[-1]["date"]
-                    days = max(0, (pd.to_datetime(dt_str) - (obs_dt + pd.offsets.MonthEnd(0))).days)
-                    lab_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
-            else:
-                lab_freshness = "FRESH"
-                
-        if lab_freshness == "STALE":
-            missing.append("Arbeitsmarkt")
-        else:
-            scores["Arbeitsmarkt"] = np.clip((5.0 - unrate) / 3.0 * 100.0, -100.0, 100.0)
-            
-        # 4. PMI
-        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
-        pmi_data = pmi_all.get(curr, {}) if pmi_all else {}
-        m_val = pmi_data.get("m_last")
-        s_val = pmi_data.get("s_last")
-        pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
-        if pmi_vals:
-            pmi_freshness = "FRESH"
-            
-        if pmi_freshness == "STALE":
-            missing.append("PMI")
-        else:
-            pmi_avg = np.mean(pmi_vals)
-            scores["PMI"] = np.clip((pmi_avg - 50.0) / 10.0 * 100.0, -100.0, 100.0)
-            
-        # 5. GDP
-        gdp = get_gdp_yoy_value(curr, dt_str)
-        if gdp is not None:
-            series_id = GDP_SERIES.get(curr, "GDPC1")
-            df_gdp, _, _ = get_fred_data(series_id, fred_key)
-            if df_gdp is not None and not df_gdp.empty:
-                df_filtered = df_gdp[df_gdp["date"] <= pd.to_datetime(dt_str)].sort_values("date")
-                if not df_filtered.empty:
-                    obs_dt = df_filtered.iloc[-1]["date"]
-                    days = (pd.to_datetime(dt_str) - obs_dt).days
-                    gdp_freshness = "FRESH" if days <= 120 else "AGING" if days <= 180 else "STALE"
-            else:
-                gdp_freshness = "FRESH"
-                
-        if gdp_freshness == "STALE":
-            missing.append("GDP")
-        else:
-            scores["GDP"] = np.clip((gdp - 1.5) / 1.5 * 100.0, -100.0, 100.0)
-            
+            scores["Geldpolitik"] = float(np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0))
     except Exception:
-        pass
-        
-    bci_data = get_bci_value(curr, dt_str)
-    if bci_data is not None:
-        scores["BCI"] = bci_data["value"]
-    else:
+        freshness["Geldpolitik"] = "UNAVAILABLE"
+
+    try:
+        cpi, observed, metric_type, source, series_id, status = get_cpi_yoy_details(curr, dt_str)
+        cpi = finite_number(cpi)
+        freshness["Inflation"] = status
+        observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+        if cpi is not None and normalized_freshness(status) in ("FRESH", "AGING"):
+            scores["Inflation"] = float(np.clip((cpi - 2.0) * 50.0, -100.0, 100.0))
+    except Exception:
+        freshness["Inflation"] = "UNAVAILABLE"
+
+    try:
+        labour = get_macro_observation_details(curr, "Arbeitsmarkt", dt_str)
+        observations["Arbeitsmarkt"] = labour
+        freshness["Arbeitsmarkt"] = labour["freshness"]
+        value = finite_number(labour.get("value"))
+        if value is not None and normalized_freshness(labour["freshness"]) in ("FRESH", "AGING") and labour.get("frequency") != "annual":
+            scores["Arbeitsmarkt"] = float(np.clip((5.0 - value) / 3.0 * 100.0, -100.0, 100.0))
+    except Exception:
+        freshness["Arbeitsmarkt"] = "UNAVAILABLE"
+
+    try:
+        pmi = (get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=dt_str) or {}).get(curr, {})
+        eligible = []
+        component_status = []
+        observations["PMI"] = dict(pmi)
+        for component in ("m", "s"):
+            value = finite_number(pmi.get(f"{component}_last"))
+            status = observation_freshness(pmi.get(f"{component}_ref"), dt_str, 45, 90, monthly=True)
+            observations["PMI"][f"{component}_freshness"] = status
+            if value is not None and 0 < value <= 100 and status in ("FRESH", "AGING"):
+                eligible.append(value)
+                component_status.append(status)
+        observations["PMI"]["value"] = float(np.mean(eligible)) if eligible else None
+        if eligible:
+            freshness["PMI"] = "AGING" if "AGING" in component_status else "FRESH"
+            scores["PMI"] = float(np.clip((observations["PMI"]["value"] - 50.0) / 10.0 * 100.0, -100.0, 100.0))
+        else:
+            freshness["PMI"] = "STALE" if any(observations["PMI"].get(f"{c}_freshness") == "STALE" for c in ("m", "s")) else "UNAVAILABLE"
+    except Exception:
+        freshness["PMI"] = "UNAVAILABLE"
+
+    try:
+        gdp = get_macro_observation_details(curr, "GDP", dt_str)
+        observations["GDP"] = gdp
+        freshness["GDP"] = gdp["freshness"]
+        value = finite_number(gdp.get("value"))
+        if value is not None and normalized_freshness(gdp["freshness"]) in ("FRESH", "AGING") and gdp.get("frequency") != "annual":
+            scores["GDP"] = float(np.clip((value - 1.5) / 1.5 * 100.0, -100.0, 100.0))
+    except Exception:
+        freshness["GDP"] = "UNAVAILABLE"
+
+    try:
+        bci = get_bci_value(curr, dt_str)
+        scores["BCI"] = finite_number(bci.get("value")) if bci else None
+    except Exception:
         scores["BCI"] = None
-        
-    scores["_missing"] = missing
-    
-    # Weighted completeness: GP=35, CPI=20, LAB=20, PMI=20, GDP=5
-    weights_map = {
-        "Geldpolitik": 35.0,
-        "Inflation": 20.0,
-        "Arbeitsmarkt": 20.0,
-        "PMI": 20.0,
-        "GDP": 5.0
-    }
-    scores["_completeness"] = sum(weights_map[k] for k in weights_map if k not in missing)
-    
-    scores["_freshness"] = {
-        "Geldpolitik": gp_freshness,
-        "Inflation": cpi_freshness,
-        "Arbeitsmarkt": lab_freshness,
-        "PMI": pmi_freshness,
-        "GDP": gdp_freshness
-    }
+    scores["_missing"] = [factor for factor in CORE_FACTOR_WEIGHTS if finite_number(scores[factor]) is None]
+    scores["_completeness"] = sum(weight for factor, weight in CORE_FACTOR_WEIGHTS.items() if factor not in scores["_missing"])
+    scores["_freshness"] = freshness
+    scores["_observations"] = observations
     return scores
 
 
 def compute_currency_professional_score_and_regime(curr: str, target_date=None):
-    
-    # Load dynamically from session state if promoted, otherwise default to CORE v1 Baseline
-    weights = st.session_state.get("active_live_model_weights")
-    if weights is None:
-        weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
-        
-    return compute_currency_professional_score_and_regime_custom(curr, weights, target_date)
+    return compute_currency_professional_score_and_regime_custom(curr, None, target_date)
+
 
 def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict = None, target_date=None):
-    if weights is None:
-        weights = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
-    regime = detect_market_regime(curr, target_date)
+    # Signature retained for callers; frozen live weights cannot be promoted or
+    # changed through session state, custom dictionaries or context parameters.
+    weights = CORE_FACTOR_WEIGHTS
     scores = compute_currency_details(curr, target_date)
-    
-    w_gp = weights.get("Geldpolitik", 35.0) / 100.0
-    w_inf = weights.get("Inflation", 20.0) / 100.0
-    w_lab = weights.get("Arbeitsmarkt", 20.0) / 100.0
-    w_pmi = weights.get("PMI", 20.0) / 100.0
-    w_gdp = weights.get("GDP", 5.0) / 100.0
-    w_fw = weights.get("ForwardRates", 0.0) / 100.0
-    w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
-    w_surp = weights.get("EconomicSurprises", 0.0) / 100.0
-    w_bci = weights.get("BCI", 0.0) / 100.0
-    w_corr = weights.get("Correction", 100.0) / 100.0
-    
-    fw_score = 0.0
-    fw_available = False
-    if w_fw > 0.0:
-        try:
-            fd = get_forward_rates_data(curr, target_date)
-            exp_chg = fd.get("expected_change")
-            if exp_chg is not None:
-                fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
-                fw_available = True
-        except Exception:
-            pass
-            
-    inf_exp_score = 0.0
-    inf_exp_available = False
-    if w_inf_exp > 0.0:
-        try:
-            ed = get_inflation_expectations_data(curr, target_date)
-            oecd_val = ed.get("oecd_expectation")
-            if oecd_val is not None:
-                expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
-                if expect_id:
-                    df, _, is_live = get_fred_data(expect_id, FRED_KEY)
-                    if df is not None and not df.empty:
-                        target_dt = pd.to_datetime(target_date) if target_date else datetime.now()
-                        df_past = df[df["date"] <= target_dt]
-                        if len(df_past) >= 24:
-                            mean_past = float(df_past["value"].mean())
-                            std_past = float(df_past["value"].std())
-                            if std_past > 0:
-                                z = (float(oecd_val) - mean_past) / std_past
-                                z_clipped = float(np.clip(z, -2.0, 2.0))
-                                inf_exp_score = z_clipped * 5.0
-                                inf_exp_available = True
-        except Exception:
-            pass
-            
-    surp_score = 0.0
-    surp_available = False
-    if w_surp > 0.0:
-        try:
-            s_val, _ = compute_currency_surprise_score(curr, target_date=target_date)
-            if s_val is not None:
-                surp_score = float(s_val)
-                surp_available = True
-        except Exception:
-            pass
+    missing = set(scores.get("_missing", []))
+    for factor in CORE_FACTOR_WEIGHTS:
+        if finite_number(scores.get(factor)) is None:
+            scores[factor] = None
+            missing.add(factor)
+    scores["_missing"] = [factor for factor in CORE_FACTOR_WEIGHTS if factor in missing]
+    scores["_completeness"] = sum(weight for factor, weight in CORE_FACTOR_WEIGHTS.items() if factor not in missing)
+    # Context-only additions can never enter BASE CORE, even in custom research.
+    active = {factor: (scores[factor], weights.get(factor, default) / 100.0)
+              for factor, default in CORE_FACTOR_WEIGHTS.items() if factor not in missing}
+    total_weight = sum(weight for value, weight in active.values())
+    core_score = sum(value * weight for value, weight in active.values()) / total_weight if total_weight > 0 else None
 
-    # Extract target date string for trend and surprise lookups
-    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date else datetime.now().strftime("%Y-%m-%d")
-    
-    # Calculate trend points
-    gp_trend = get_series_trend_points(YIELD_2Y_SERIES.get(curr, "DGS2"), dt_str)
-    cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
-    lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
-    pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
-    gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
-    
-    gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
-    cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
-    lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
-    pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
+    series = {"Geldpolitik": YIELD_2Y_SERIES.get(curr), "Inflation": CPI_SERIES.get(curr),
+              "Arbeitsmarkt": UNEMP_SERIES.get(curr), "PMI": PMI_SERIES.get(curr), "GDP": GDP_SERIES.get(curr)}
+    trends, surprises = {}, {}
+    for factor in CORE_FACTOR_WEIGHTS:
+        trends[factor] = 0.0
+        surprises[factor] = 0.0
+        if factor not in missing:
+            try:
+                trends[factor] = finite_number(get_series_trend_points(series[factor], dt_str, reverse=factor == "Arbeitsmarkt")) or 0.0
+            except Exception:
+                pass
+            if factor != "GDP":
+                try:
+                    surprises[factor] = finite_number(get_surprise_points(curr, "Wachstum" if factor == "PMI" else factor, dt_str)) or 0.0
+                except Exception:
+                    pass
+    trend_score = sum(trends[factor] * weight for factor, (_, weight) in active.items()) / total_weight if total_weight > 0 else 0.0
+    surprise_score = sum(surprises[factor] * weight for factor, (_, weight) in active.items()) / total_weight if total_weight > 0 else 0.0
+    try:
+        corr_score = (finite_number(compute_correction_score(curr, target_date)) or 0.0) * weights.get("Correction", 100.0) / 100.0
+    except Exception:
+        corr_score = 0.0
+    try:
+        regime = detect_market_regime(curr, target_date)
+    except Exception:
+        regime = "Normal"
 
-    # Dynamic Weight Normalization for BASE CORE
-    available_factors = {}
-    missing_factors = scores.get("_missing", [])
-    
-    if "Geldpolitik" not in missing_factors and scores.get("Geldpolitik") is not None:
-        available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
-    if "Inflation" not in missing_factors and scores.get("Inflation") is not None:
-        available_factors["Inflation"] = (scores["Inflation"], w_inf)
-    if "Arbeitsmarkt" not in missing_factors and scores.get("Arbeitsmarkt") is not None:
-        available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
-    if "PMI" not in missing_factors and scores.get("PMI") is not None:
-        available_factors["PMI"] = (scores["PMI"], w_pmi)
-    if "GDP" not in missing_factors and scores.get("GDP") is not None:
-        available_factors["GDP"] = (scores["GDP"], w_gdp)
-        
-    if w_fw > 0.0 and fw_available:
-        available_factors["ForwardRates"] = (fw_score, w_fw)
-    if w_inf_exp > 0.0 and inf_exp_available:
-        available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
-    if w_surp > 0.0 and surp_available:
-        available_factors["EconomicSurprises"] = (surp_score, w_surp)
-    if w_bci > 0.0 and scores.get("BCI") is not None:
-        available_factors["BCI"] = (scores["BCI"], w_bci)
-
-    total_weight = sum(weight for val, weight in available_factors.values())
-    if total_weight > 0.0:
-        core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
-    else:
-        core_score = 0.0
-
-    # Calculate isolated trends and surprises scores
-    core_total_weight = sum(weights[k] / 100.0 for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"] if k not in missing_factors)
-    active_trend = 0.0
-    active_surprise = 0.0
-    if "Geldpolitik" not in missing_factors:
-        active_trend += gp_trend * w_gp
-        active_surprise += gp_surprise * w_gp
-    if "Inflation" not in missing_factors:
-        active_trend += cpi_trend * w_inf
-        active_surprise += cpi_surprise * w_inf
-    if "Arbeitsmarkt" not in missing_factors:
-        active_trend += lab_trend * w_lab
-        active_surprise += lab_surprise * w_lab
-    if "PMI" not in missing_factors:
-        active_trend += pmi_trend * w_pmi
-        active_surprise += pmi_surprise * w_pmi
-    if "GDP" not in missing_factors:
-        active_trend += gdp_trend * w_gdp
-        
-    trend_score = active_trend / core_total_weight if core_total_weight > 0.0 else 0.0
-    surprise_score = active_surprise / core_total_weight if core_total_weight > 0.0 else 0.0
-
-    corr_score = compute_correction_score(curr, target_date) * w_corr
-    final_score = np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0)
-    
-    # Enforce minimum data coverage of 50.0%
-    if scores.get("_completeness", 100.0) < 50.0:
-        diagnostic_partial_core = core_score
+    scores["_diagnostic_partial_score"] = core_score
+    if scores["_completeness"] < 50.0 or core_score is None:
         core_score = None
         final_score = None
-        trend_score = 0.0
-        surprise_score = 0.0
+        trend_score = surprise_score = 0.0
         scores["_core_status"] = "INSUFFICIENT DATA"
-        scores["_diagnostic_partial_score"] = diagnostic_partial_core
     else:
+        final_score = float(np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0))
         scores["_core_status"] = "VALID"
-        scores["_diagnostic_partial_score"] = core_score
-    
-    # Store context scores inside the returned details dict
     scores["_trend_score"] = trend_score
     scores["_surprise_score"] = surprise_score
-    scores["_trend_details"] = {
-        "gp_trend": gp_trend, "cpi_trend": cpi_trend, "lab_trend": lab_trend,
-        "pmi_trend": pmi_trend, "gdp_trend": gdp_trend
-    }
-    scores["_surprise_details"] = {
-        "gp_surprise": gp_surprise, "cpi_surprise": cpi_surprise, "lab_surprise": lab_surprise,
-        "pmi_surprise": pmi_surprise
-    }
-    
-    # Preserve key integrity for callers
-    for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
-        if scores[k] is None:
-            scores[k] = 0.0
-            
+    scores["_trend_details"] = dict(zip(("gp_trend", "cpi_trend", "lab_trend", "pmi_trend", "gdp_trend"), trends.values()))
+    scores["_surprise_details"] = dict(zip(("gp_surprise", "cpi_surprise", "lab_surprise", "pmi_surprise"), (surprises[k] for k in list(CORE_FACTOR_WEIGHTS)[:4])))
+    # Missing factor scores stay None in UI, charts and persisted snapshots.
     return final_score, regime, core_score, corr_score, scores
+
 
 def compute_currency_score_historical(curr: str, target_date) -> float:
     try:
@@ -4736,41 +5315,13 @@ def get_country_rate(country_code, fred_key):
         "NZL": "NZD"
     }
     curr = map_code.get(country_code, country_code)
-    
-    # Try getting from session state first, then load from json file, then default
-    val = st.session_state.get(f"manual_rate_{curr}")
-    if val is None:
-        file_path = ".rates_config.json"
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    rates = json.load(f)
-                    val = rates.get(f"manual_rate_{curr}")
-            except Exception:
-                pass
-        if val is None:
-            defaults = {
-                "EUR": 4.00, "USD": 5.25, "GBP": 5.25, "JPY": 0.10,
-                "AUD": 4.35, "CAD": 5.00, "NZD": 5.50, "CHF": 0.00
-            }
-            val = defaults.get(curr, 2.0)
-            
-    # Do the same for previous rate
-    prev_val = st.session_state.get(f"manual_rate_{curr}_prev")
-    if prev_val is None:
-        file_path = ".rates_config.json"
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    rates = json.load(f)
-                    prev_val = rates.get(f"manual_rate_{curr}_prev")
-            except Exception:
-                pass
-        if prev_val is None:
-            prev_val = val
-            
-    bps_change = int((val - prev_val) * 100)
-    return val, bps_change, "Zins-Kontrollzentrum"
+    pol_obj = get_verified_policy_rate(curr)
+    if not policy_rate_is_usable(pol_obj):
+        return None, None, pol_obj.get("verification_status", "UNAVAILABLE")
+    val = pol_obj.get("rate")
+    prev_val = pol_obj.get("previous_rate", val)
+    bps_change = round((val - prev_val) * 100) if (val is not None and prev_val is not None) else None
+    return val, bps_change, pol_obj.get("primary_source", "Verified Central Bank")
 
 # Compute economic score for one currency
 def compute_currency_score(curr, fred_key):
@@ -5017,6 +5568,11 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
     """
     st.markdown(html_content, unsafe_allow_html=True)
 
+def format_score(value, digits=1):
+    number = finite_number(value)
+    return f"{number:+.{digits}f}" if number is not None else "N/A"
+
+
 def render_metric_card(title, val_str, source_text, is_live):
     live_class = "source-tag-live" if is_live else ""
     card_html = f"""
@@ -5163,98 +5719,55 @@ if not getattr(st, "_mock_mode", False):
         st.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
         
         st.markdown("---")
-        st.markdown("### 🏦 Zins-Kontrollzentrum")
-        st.caption("Manuelle Leitzins-Vorgaben für G8-Notenbanken:")
+        st.markdown("### 🏦 VERIFIED POLICY RATE CENTER")
+        st.caption("Automatisch verifizierte Leitzinssätze (Official Central-Bank Sources):")
         
-        st.number_input("European Central Bank (EUR) %", min_value=0.0, max_value=15.0, key="manual_rate_EUR", step=0.05)
-        st.number_input("Federal Reserve (USD) %", min_value=0.0, max_value=15.0, key="manual_rate_USD", step=0.05)
-        st.number_input("Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", step=0.05)
-        st.number_input("Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", step=0.05)
-        st.number_input("Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", step=0.05)
-        st.number_input("Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", step=0.05)
-        st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", step=0.05)
-        st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", step=0.05)
-        
-        if st.button("💾 Zinssätze speichern"):
-            saved_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-            st.session_state["last_saved_rates"] = saved_time
-            
-            # Load currently saved rates to detect changes
-            old_rates = {}
-            if os.path.exists(RATES_CONFIG_FILE):
-                try:
-                    with open(RATES_CONFIG_FILE, "r", encoding="utf-8") as f:
-                        old_rates = json.load(f)
-                except Exception:
-                    pass
-                    
-            rates_to_save = {
-                "last_saved_rates": saved_time
-            }
-            
-            currencies_list = ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]
-            for c in currencies_list:
-                key = f"manual_rate_{c}"
-                new_val = st.session_state[key]
-                old_val = old_rates.get(key, defaults.get(key))
-                
-                # Detect change
-                if old_val is not None and abs(new_val - old_val) > 1e-5:
-                    rates_to_save[f"{key}_prev"] = old_val
-                    rates_to_save[f"{key}_last_change"] = saved_time
-                else:
-                    rates_to_save[f"{key}_prev"] = old_rates.get(f"{key}_prev", old_val)
-                    rates_to_save[f"{key}_last_change"] = old_rates.get(f"{key}_last_change", "N/A")
-                    
-                rates_to_save[key] = new_val
-                
-            # Update session state with saved values (exclude widget keys to prevent StreamlitAPIException)
-            widget_keys = [f"manual_rate_{c}" for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]]
-            for k, v in rates_to_save.items():
-                if k not in widget_keys:
-                    st.session_state[k] = v
-                
-            try:
-                with open(RATES_CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(rates_to_save, f, indent=4)
-                st.success("Zinssätze gespeichert!")
-            except Exception as e:
-                st.error(f"Fehler: {e}")
-                
-        last_saved = st.session_state.get("last_saved_rates")
-        if last_saved:
-            st.info(f"Zuletzt gespeichert: {last_saved}")
-        else:
-            st.warning("Noch nicht gespeichert")
-            
-        st.date_input("Letzte Aktualisierung", value=datetime.now().date())
-        
-        # G8 Interest Rate Overview Table
-        st.markdown("**Notenbank-Zinsübersicht:**")
-        summary_data = []
-        cb_names = {
-            "EUR": ("ECB", "European Central Bank"),
-            "USD": ("Fed", "Federal Reserve"),
-            "GBP": ("BoE", "Bank of England"),
-            "JPY": ("BoJ", "Bank of Japan"),
-            "CHF": ("SNB", "Swiss National Bank"),
-            "CAD": ("BoC", "Bank of Canada"),
-            "AUD": ("RBA", "Reserve Bank of Australia"),
-            "NZD": ("RBNZ", "Reserve Bank of New Zealand")
-        }
-        for c in ["EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
-            rate = st.session_state.get(f"manual_rate_{c}", defaults.get(f"manual_rate_{c}", 0.0))
-            prev = st.session_state.get(f"manual_rate_{c}_prev", rate)
-            change_dt = st.session_state.get(f"manual_rate_{c}_last_change", "N/A")
-            summary_data.append({
-                "Währung": c,
-                "Zentralbank": cb_names[c][0],
-                "Leitzins": f"{rate:.2f}%",
-                "Vorherig": f"{prev:.2f}%",
-                "Letzte Änderung": change_dt
+        rates_obj = get_all_verified_policy_rates()
+        table_rows = []
+        for c in ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
+            pol = rates_obj.get(c, {})
+            r_val = pol.get("rate")
+            p_val = pol.get("previous_rate", r_val)
+            stat = pol.get("verification_status", "🔴 OFFICIAL SOURCE UNAVAILABLE")
+            table_rows.append({
+                "Currency": c,
+                "Central Bank": pol.get("central_bank", "Central Bank"),
+                "Policy Instrument": pol.get("instrument", "Policy Rate"),
+                "Rate (siehe Status)": f"{r_val:.2f}%" if r_val is not None else "N/A",
+                "Previous Rate": f"{p_val:.2f}%" if p_val is not None else "N/A",
+                "Rate Effective": pol.get("rate_effective_date", "N/A"),
+                "Last Decision": pol.get("last_policy_decision_date", "N/A"),
+                "Verification Status": stat,
+                "Last Verified": pol.get("verified_at", "N/A"),
+                "Source": pol.get("primary_source", "Central Bank")
             })
-        df_summary = pd.DataFrame(summary_data)
-        st.dataframe(df_summary, hide_index=True)
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True)
+
+        if st.button("🔄 Offizielle Leitzinsen aktualisieren"):
+            with st.spinner("Prüfe offizielle Notenbank-Quellen..."):
+                checked_rates = refresh_all_verified_policy_rates(FRED_KEY)
+            st.session_state["policy_refresh_summary"] = sum("🟢" in value.get("verification_status", "") for value in checked_rates.values())
+            st.rerun()
+        if "policy_refresh_summary" in st.session_state:
+            count = st.session_state["policy_refresh_summary"]
+            if count == 8:
+                st.success("8 von 8 Leitzinsen mit offiziellen Quellen bestätigt.")
+            else:
+                st.warning(f"{count} von 8 Leitzinsen bestätigt. Bitte die Quellenstatus in der Tabelle beachten.")
+
+        with st.expander("🚨 Advanced / Emergency Manual Override", expanded=False):
+            st.caption("Standard: AUS. Bei Aktivierung überschreiben manuelle Werte die offiziellen Daten. Dies wird in den Snapshots dokumentiert.")
+            emergency_on = st.checkbox("Manuelles Emergency-Override aktivieren", value=False, key="emergency_manual_rates_override")
+            if emergency_on:
+                st.warning("🔴 MANUAL POLICY RATE OVERRIDE ACTIVE – CORE verwendet manuelle Eingaben!")
+                st.number_input("European Central Bank (EUR) %", min_value=0.0, max_value=15.0, key="manual_rate_EUR", value=2.25, step=0.05)
+                st.number_input("Federal Reserve (USD) %", min_value=0.0, max_value=15.0, key="manual_rate_USD", value=3.50, step=0.05)
+                st.number_input("Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", value=3.75, step=0.05)
+                st.number_input("Bank of Japan (JPY) %", min_value=-5.0, max_value=15.0, key="manual_rate_JPY", value=1.00, step=0.05)
+                st.number_input("Swiss National Bank (CHF) %", min_value=-5.0, max_value=15.0, key="manual_rate_CHF", value=0.00, step=0.05)
+                st.number_input("Bank of Canada (CAD) %", min_value=0.0, max_value=15.0, key="manual_rate_CAD", value=2.25, step=0.05)
+                st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", value=4.35, step=0.05)
+                st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", value=2.50, step=0.05)
         
         def get_cot_data_status():
             try:
@@ -5314,7 +5827,7 @@ if not getattr(st, "_mock_mode", False):
             st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
             st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
             st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
-            st.write(f"EODHD_API_KEY: {'🟢 Aktiv' if EODHD_KEY else '🔴 Fehlt'}")
+            st.write(f"EODHD_API_KEY: {get_eodhd_status_label()}")
             st.write(f"ESTAT_APP_ID: {'🟢 Aktiv' if ESTAT_APP_ID else '🔴 Fehlt'}")
     
         with st.expander("📝 Streamlit Secrets Anleitung", expanded=False):
@@ -5841,30 +6354,79 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
     return capped_score, weighted_scores
 
 def load_live_signals():
+    """Read stored evidence verbatim; a damaged file must never become an empty log."""
     file_path = "live_signals.json"
     if not os.path.exists(file_path):
         return {}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            signals = json.load(f)
-            # Inject legacy label for versioning
-            for snap_id, snap in signals.items():
-                if isinstance(snap, dict):
-                    if "model_version" not in snap:
-                        snap["model_version"] = "LEGACY_PRE_CORE_FIX"
-                    if "metadata" in snap and isinstance(snap["metadata"], dict) and "model_version" not in snap["metadata"]:
-                        snap["metadata"]["model_version"] = "LEGACY_PRE_CORE_FIX"
-            return signals
-    except Exception:
-        return {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        signals = json.load(f)
+    if not isinstance(signals, dict):
+        raise ValueError("INVALID_LIVE_SIGNALS_DOCUMENT")
+    return signals
+
 
 def save_live_signals(signals):
+    """Atomically replace the log and surface write failures to the collector."""
+    import tempfile
     file_path = "live_signals.json"
+    temp_path = None
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(signals, f, indent=4, ensure_ascii=False)
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=".",
+                                         prefix=".live_signals_", suffix=".tmp",
+                                         delete=False) as f:
+            temp_path = f.name
+            json.dump(signals, f, indent=4, ensure_ascii=False, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, file_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _live_snapshot_weights():
+    # Stored provenance must match the frozen BASE calculation, regardless of UI state.
+    return {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0,
+            "PMI": 20.0, "GDP": 5.0, "ForwardRates": 0.0,
+            "InflationExpectations": 0.0, "EconomicSurprises": 0.0,
+            "BCI": 0.0, "Correction": 100.0}
+
+
+def _live_run_summary():
+    return {"status": "SUCCESS", "attempted": 0, "written": 0, "updated": 0,
+            "skipped": 0, "errors": 0, "issues": []}
+
+
+def _finish_live_summary(summary):
+    if (summary["errors"] and summary["errors"] == summary["attempted"]
+            and not summary["written"] and not summary["updated"]):
+        summary["status"] = "FAILED"
+    elif any(issue.get("severity", "warning") != "info" for issue in summary["issues"]):
+        summary["status"] = "PARTIAL"
+    return summary
+
+
+def _live_positive_price(value):
+    try:
+        return not isinstance(value, bool) and bool(np.isfinite(float(value))) and float(value) > 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _live_price_history(df, today_str):
+    """Keep observed daily bars in order without filling gaps or inventing prices."""
+    if df is None or df.empty or not {"date", "close"}.issubset(df.columns):
+        raise ValueError("PRICE_HISTORY_UNAVAILABLE")
+    history = df.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce", utc=True)
+    if history["date"].isna().any():
+        raise ValueError("INVALID_PRICE_DATE")
+    history["date_str"] = history["date"].dt.strftime("%Y-%m-%d")
+    history = history[(history["date_str"] <= today_str) & (history["date"].dt.dayofweek < 5)]
+    if history["date_str"].duplicated().any():
+        raise ValueError("DUPLICATE_DAILY_PRICE_BAR")
+    return history.sort_values("date").reset_index(drop=True)
+
 
 def compute_checklist_snapshot(model_weights):
     checklist = []
@@ -5904,40 +6466,32 @@ def compute_checklist_snapshot(model_weights):
             pass
     return checklist
 
-def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close):
-    model_name = st.session_state.get("active_live_model", "CORE v1 - Baseline")
-    model_weights = st.session_state.get("active_live_model_weights")
-    if model_weights is None:
-        model_weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
-        
-    today_str = datetime.now().strftime("%Y-%m-%d")
+def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close, entry_price_date=None, snapshot_date=None):
+    model_name = "CORE v1 - Baseline"
+    model_weights = _live_snapshot_weights()
+
+    today_str = snapshot_date or datetime.now().strftime("%Y-%m-%d")
     signals = load_live_signals()
-    
-    # Duplicate Check (prevent duplicate snapshot if same signal on same day for same model version)
-    duplicate_found = False
-    for s_id, s_data in signals.items():
-        if s_data.get("metadata", {}).get("pair") == selected_pair and s_data.get("metadata", {}).get("date") == today_str:
-            if s_data.get("metadata", {}).get("model_version") == CURRENT_MODEL_VERSION:
-                if s_data.get("pair_signal", {}).get("signal") == badge:
-                    duplicate_found = True
-                    break
-                    
-    if duplicate_found:
-        return
-        
     snapshot_id = f"PAIR_{selected_pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
-    
+    # A rerun must never rewrite the signal, entry, or completed outcomes of this day.
+    if snapshot_id in signals:
+        return False
+    for s_data in signals.values():
+        if not isinstance(s_data, dict):
+            continue
+        meta = s_data.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        if (meta.get("pair") == selected_pair and meta.get("date") == today_str
+                and meta.get("model_version") == CURRENT_MODEL_VERSION):
+            return False
+    if not _live_positive_price(latest_close):
+        raise ValueError("INVALID_ENTRY_PRICE")
+    if entry_price_date != today_str:
+        raise ValueError("ENTRY_PRICE_DATE_MISMATCH")
+    if any(v is None or not np.isfinite(float(v)) for v in [base_score, quote_score, signal_value]):
+        raise ValueError("INSUFFICIENT_CORE_DATA")
+
     checklist_copy = compute_checklist_snapshot(model_weights)
     
     base_details_raw = compute_currency_details(base_curr, None)
@@ -5981,6 +6535,7 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
         "metadata": {
             "snapshot_id": snapshot_id,
             "date": today_str,
+            "entry_price_date": entry_price_date,
             "time": datetime.now().strftime("%H:%M:%S"),
             "timezone": str(datetime.now().astimezone().tzinfo),
             "pair": selected_pair,
@@ -6044,102 +6599,139 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
     
     signals[snapshot_id] = snapshot
     save_live_signals(signals)
+    return True
 
 def update_open_outcomes():
+    """Append observed outcomes only; never repair historical signals or entry prices."""
     signals = load_live_signals()
+    summary = _live_run_summary()
     changed = False
-    
-    open_snapshots_by_pair = {}
-    for s_id, s_data in list(signals.items()):
-        if s_id.startswith("CURR_") or s_data.get("metadata", {}).get("type") == "currency":
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    histories = {}
+    for s_id, s_data in signals.items():
+        if isinstance(s_data, dict) and (s_id.startswith("CURR_") or s_data.get("type") == "CURRENCY"):
             continue
-        if s_data.get("outcome_status", "OPEN") == "OPEN":
-            meta = s_data.get("metadata", {})
-            p = meta.get("pair")
-            if not p:
+        if isinstance(s_data, dict) and s_data.get("outcome_status", "OPEN") != "OPEN":
+            continue
+        summary["attempted"] += 1
+        try:
+            if not isinstance(s_data, dict):
+                raise ValueError("INVALID_SNAPSHOT")
+            meta = s_data.get("metadata") or {}
+            if meta.get("type") == "currency":
+                summary["attempted"] -= 1
                 continue
-            if p not in open_snapshots_by_pair:
-                open_snapshots_by_pair[p] = []
-            open_snapshots_by_pair[p].append((s_id, s_data))
-            
-    if not open_snapshots_by_pair:
-        return
-        
-    for pair, snapshots in open_snapshots_by_pair.items():
-        df, _, _ = get_fcs_history_data(pair, FCS_KEY)
-        if df is None or df.empty:
-            continue
-            
-        df = df.sort_values("date").reset_index(drop=True)
-        df["date_str"] = df["date"].dt.strftime("%Y-%m-%d")
-        
-        for s_id, s_data in snapshots:
-            entry_date_str = s_data["metadata"]["date"]
-            entry_price = s_data["entry_price"]
-            direction = "LONG" if "BUY" in s_data["pair_signal"]["signal"] else "SHORT"
-            
-            matching_rows = df[df["date_str"] == entry_date_str]
-            if matching_rows.empty:
-                matching_rows = df[df["date_str"] >= entry_date_str]
-                if matching_rows.empty:
-                    continue
-            idx = matching_rows.index[0]
-            
-            all_filled = True
-            for n_str, out_data in list(s_data["outcomes"].items()):
-                n = int(n_str)
-                if out_data.get("exit_price") is not None:
-                    continue
-                    
-                target_idx = idx + n
-                if target_idx < len(df):
-                    exit_row = df.iloc[target_idx]
-                    exit_price = float(exit_row["close"])
-                    exit_date = exit_row["date_str"]
-                    
-                    raw_ret = (exit_price - entry_price) / entry_price * 100.0
-                    dir_ret = raw_ret if direction == "LONG" else -raw_ret
-                    
-                    window_df = df.iloc[idx + 1:target_idx + 1]
-                    max_fav = 0.0
-                    max_adv = 0.0
-                    
-                    for _, row in window_df.iterrows():
-                        high_val = float(row["high"])
-                        low_val = float(row["low"])
-                        
-                        if direction == "LONG":
-                            fav = (high_val - entry_price) / entry_price * 100.0
-                            adv = (low_val - entry_price) / entry_price * 100.0
-                        else:
-                            fav = (entry_price - low_val) / entry_price * 100.0
-                            adv = (entry_price - high_val) / entry_price * 100.0
-                            
-                        max_fav = max(max_fav, fav)
-                        max_adv = min(max_adv, adv)
-                        
-                    out_data["exit_price"] = exit_price
-                    out_data["exit_date"] = exit_date
-                    out_data["return_pct"] = round(raw_ret, 3)
-                    out_data["directional_return_pct"] = round(dir_ret, 3)
-                    out_data["status"] = "CORRECT" if dir_ret > 0.0 else "WRONG" if dir_ret < 0.0 else "NEUTRAL"
-                    out_data["mfe"] = round(max_fav, 3)
-                    out_data["mae"] = round(max_adv, 3)
-                    
-                    changed = True
-                else:
-                    all_filled = False
-                    
-            if all_filled:
-                s_data["outcome_status"] = "COMPLETED"
+            entry_price = s_data.get("entry_price")
+            if not _live_positive_price(entry_price):
+                s_data["outcome_status"] = "INVALID"
+                s_data["outcome_error"] = "INVALID_ENTRY_PRICE"
                 changed = True
-                
+                summary["errors"] += 1
+                summary["issues"].append({"item": s_id, "reason": "INVALID_ENTRY_PRICE", "severity": "error"})
+                continue
+            entry_price = float(entry_price)
+            pair = meta.get("pair")
+            if not pair:
+                raise ValueError("MISSING_PAIR")
+            if pair not in histories:
+                try:
+                    df, _, observed = get_fcs_history_data(pair, FCS_KEY)
+                    if not observed:
+                        raise ValueError("PRICE_HISTORY_UNAVAILABLE")
+                    histories[pair] = _live_price_history(df, today_str)
+                except Exception:
+                    histories[pair] = None
+            df = histories[pair]
+            if df is None or df.empty:
+                summary["skipped"] += 1
+                summary["issues"].append({"item": s_id, "reason": "PRICE_HISTORY_UNAVAILABLE", "severity": "warning"})
+                continue
+            entry_date = meta.get("entry_price_date") or meta.get("date")
+            matches = df.index[df["date_str"] == entry_date]
+            if not len(matches):
+                # No next-date fallback: that would silently move the original entry.
+                summary["skipped"] += 1
+                summary["issues"].append({"item": s_id, "reason": "ENTRY_PRICE_DATE_UNAVAILABLE", "severity": "warning"})
+                continue
+            idx = int(matches[0])
+            badge = str(s_data.get("pair_signal", {}).get("signal", ""))
+            direction = "LONG" if "BUY" in badge else "SHORT" if "SELL" in badge else None
+            outcomes = s_data.get("outcomes")
+            if not isinstance(outcomes, dict) or not outcomes:
+                raise ValueError("INVALID_OUTCOMES")
+            row_updated = False
+            row_errors = False
+            for n_str, out_data in outcomes.items():
+                try:
+                    n = int(n_str)
+                    if n not in [1, 3, 5, 10, 15, 20] or not isinstance(out_data, dict):
+                        raise ValueError("INVALID_OUTCOME_HORIZON")
+                    if out_data.get("exit_price") is not None:
+                        continue
+                    target_idx = idx + n
+                    if target_idx >= len(df):
+                        continue
+                    exit_row = df.iloc[target_idx]
+                    exit_price = exit_row["close"]
+                    if not _live_positive_price(exit_price):
+                        raise ValueError("INVALID_EXIT_PRICE")
+                    exit_price = float(exit_price)
+                    raw_ret = (exit_price - entry_price) / entry_price * 100.0
+                    if not np.isfinite(raw_ret):
+                        raise ValueError("INVALID_OUTCOME_RETURN")
+                    dir_ret = raw_ret if direction == "LONG" else -raw_ret if direction == "SHORT" else None
+                    max_fav = max_adv = None
+                    if direction:
+                        max_fav = max_adv = 0.0
+                        for _, bar in df.iloc[idx + 1:target_idx + 1].iterrows():
+                            high, low = bar.get("high"), bar.get("low")
+                            close = bar.get("close")
+                            if not all(_live_positive_price(v) for v in (high, low, close)):
+                                raise ValueError("INVALID_OUTCOME_PRICE_BAR")
+                            high, low, close = float(high), float(low), float(close)
+                            if not low <= close <= high:
+                                raise ValueError("INVALID_OUTCOME_PRICE_BAR")
+                            fav = (high - entry_price) / entry_price * 100.0 if direction == "LONG" else (entry_price - low) / entry_price * 100.0
+                            adv = (low - entry_price) / entry_price * 100.0 if direction == "LONG" else (entry_price - high) / entry_price * 100.0
+                            if not np.isfinite(fav) or not np.isfinite(adv):
+                                raise ValueError("INVALID_OUTCOME_RETURN")
+                            max_fav, max_adv = max(max_fav, fav), min(max_adv, adv)
+                    out_data.update({
+                        "exit_price": exit_price, "exit_date": exit_row["date_str"],
+                        "return_pct": round(raw_ret, 3),
+                        "directional_return_pct": round(dir_ret, 3) if dir_ret is not None else None,
+                        "status": ("CORRECT" if dir_ret > 0 else "WRONG" if dir_ret < 0 else "NEUTRAL") if dir_ret is not None else "NO_TRADE",
+                        "mfe": round(max_fav, 3) if max_fav is not None else None,
+                        "mae": round(max_adv, 3) if max_adv is not None else None,
+                    })
+                    row_updated = changed = True
+                except Exception:
+                    row_errors = True
+                    summary["issues"].append({"item": s_id, "reason": "INVALID_OUTCOME_DATA", "horizon": str(n_str), "severity": "error"})
+            if row_errors:
+                summary["errors"] += 1
+            if all(isinstance(o, dict) and o.get("exit_price") is not None for o in outcomes.values()) and not row_errors:
+                s_data["outcome_status"] = "COMPLETED"
+                row_updated = changed = True
+            if row_updated:
+                summary["updated"] += 1
+            elif not row_errors:
+                summary["skipped"] += 1
+        except Exception:
+            summary["errors"] += 1
+            summary["issues"].append({"item": s_id, "reason": "INVALID_SNAPSHOT", "severity": "error"})
     if changed:
         save_live_signals(signals)
+    return _finish_live_summary(summary)
+
 
 def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, details, model_weights, today_str):
     signals = load_live_signals()
     snap_id = f"CURR_{curr}_{today_str}_{CURRENT_MODEL_VERSION}"
+    if snap_id in signals:
+        return False
+    details = details or {}
+    model_weights = _live_snapshot_weights()
     
     eff_weights = {}
     if details and "_completeness" in details:
@@ -6188,14 +6780,21 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     else:
         cpi_method_val = "DERIVED_FROM_INDEX"
         
-    if curr in ["USD", "EUR", "CHF", "CAD"]:
-        cpi_pit_status_val = "FRED_POINT_IN_TIME"
-    else:
-        cpi_pit_status_val = "PIT_STRICT"
+    cpi_pit_status_val = "PIT_STRICT" if "PIT_STRICT" in str(freshness) else "PIT_LIMITED"
 
     # Get raw values for saving
+    pol_meta = get_verified_policy_rate(curr)
     raw_values = {
-        "policy_rate": st.session_state.get(f"manual_rate_{curr}", defaults.get(f"manual_rate_{curr}")),
+        "policy_rate": pol_meta.get("rate"),
+        "policy_rate_previous": pol_meta.get("previous_rate"),
+        "policy_rate_instrument": pol_meta.get("instrument"),
+        "policy_rate_effective_date": pol_meta.get("rate_effective_date"),
+        "policy_rate_last_decision_date": pol_meta.get("last_policy_decision_date"),
+        "policy_rate_verified_at": pol_meta.get("verified_at"),
+        "policy_rate_primary_source": pol_meta.get("primary_source"),
+        "policy_rate_secondary_source": pol_meta.get("secondary_source"),
+        "policy_rate_verification_status": pol_meta.get("verification_status", pol_meta.get("status")),
+        "policy_rate_verification_evidence": pol_meta.get("verification_evidence", []),
         "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
         "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
         "cpi_yoy": cpi_val,
@@ -6228,11 +6827,11 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "schema_version": "2.0",
         "total_score": float(total_score) if total_score is not None else None,
         "core_score": float(core_score) if core_score is not None else None,
-        "core_status": "INSUFFICIENT DATA" if (details and details.get("_completeness", 100.0) < 50.0) else "VALID",
+        "core_status": "INSUFFICIENT DATA" if (core_score is None or details.get("_completeness", 100.0) < 50.0) else "VALID",
         "diagnostic_partial_score": float(details.get("_diagnostic_partial_score", 0.0)) if (details and "_diagnostic_partial_score" in details and details["_diagnostic_partial_score"] is not None) else None,
         "correction_score": float(corr_score) if corr_score is not None else None,
-        "trend_score": float(details.get("_trend_score", 0.0)) if details else 0.0,
-        "surprise_score": float(details.get("_surprise_score", 0.0)) if details else 0.0,
+        "trend_score": float(details.get("_trend_score", 0.0)) if details.get("_trend_score", 0.0) is not None else None,
+        "surprise_score": float(details.get("_surprise_score", 0.0)) if details.get("_surprise_score", 0.0) is not None else None,
         "regime": regime,
         "factor_scores": {k: float(v) if v is not None else None for k, v in details.items() if not k.startswith("_")},
         "original_weights": model_weights,
@@ -6257,50 +6856,69 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     }
     signals[snap_id] = snapshot
     save_live_signals(signals)
+    return True
 
 def save_all_g10_live_snapshots():
-    model_weights = st.session_state.get("active_live_model_weights")
-    if model_weights is None:
-        model_weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
+    model_weights = _live_snapshot_weights()
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    if not getattr(st, "_mock_mode", False):
-        # 1. Save Currency Snapshots for all 8 G8 currencies
-        for curr in CURRENCIES.keys():
-            try:
-                c_score, c_reg, c_core, c_corr, c_details = compute_currency_professional_score_and_regime_custom(curr, model_weights)
-                save_currency_snapshot(curr, c_score, c_core, c_corr, c_reg, c_details, model_weights, today_str)
-            except Exception:
-                pass
-            
-        # 2. Save Pair Snapshots for outcome tracking
-        pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
-        for pair in pairs:
+    summary = _live_run_summary()
+    summary["currencies"] = _live_run_summary()
+    summary["pairs"] = _live_run_summary()
+    if getattr(st, "_mock_mode", False) or check_demo_active():
+        summary["issues"].append({"item": "collector", "reason": "LIVE_COLLECTION_DISABLED", "severity": "warning"})
+        return _finish_live_summary(summary)
+
+    for curr in CURRENCIES.keys():
+        child = summary["currencies"]
+        child["attempted"] += 1
+        try:
+            c_score, c_reg, c_core, c_corr, c_details = compute_currency_professional_score_and_regime_custom(curr, model_weights)
+            written = save_currency_snapshot(curr, c_score, c_core, c_corr, c_reg, c_details, model_weights, today_str)
+            child["written" if written else "skipped"] += 1
+        except Exception:
+            child["errors"] += 1
+            child["issues"].append({"item": curr, "reason": "CURRENCY_SNAPSHOT_FAILED", "severity": "error"})
+
+    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
+    for pair in pairs:
+        child = summary["pairs"]
+        child["attempted"] += 1
+        try:
+            snapshot_id = f"PAIR_{pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
+            if snapshot_id in load_live_signals() or pd.Timestamp(today_str).dayofweek >= 5:
+                child["skipped"] += 1
+                continue
             base, quote = pair.split("/")
-            try:
-                b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
-                q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
-                
-                badge, color, divergence, code = get_pair_signal_and_badge(base, quote, model_weights)
-                if divergence is not None:
-                    latest_close = 0.0
-                    df, _, _ = get_fcs_history_data(pair, FCS_KEY)
-                    if df is not None and not df.empty:
-                        latest_close = float(df.iloc[-1]["close"])
-                    save_live_signal_snapshot(pair, base, quote, b_core, q_core, divergence, badge, latest_close)
-            except Exception:
-                pass
+            _, _, b_core, _, _ = compute_currency_professional_score_and_regime_custom(base, model_weights)
+            _, _, q_core, _, _ = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+            badge, _, divergence, _ = get_pair_signal_and_badge(base, quote, model_weights)
+            if divergence is None or b_core is None or q_core is None:
+                child["skipped"] += 1
+                continue
+            df, _, observed = get_fcs_history_data(pair, FCS_KEY)
+            if not observed or df is None or df.empty:
+                child["skipped"] += 1
+                child["issues"].append({"item": pair, "reason": "ENTRY_PRICE_UNAVAILABLE", "severity": "warning"})
+                continue
+            history = _live_price_history(df, today_str)
+            if history.empty or history.iloc[-1]["date_str"] != today_str:
+                child["skipped"] += 1
+                child["issues"].append({"item": pair, "reason": "ENTRY_PRICE_STALE", "severity": "warning"})
+                continue
+            latest = history.iloc[-1]
+            written = save_live_signal_snapshot(pair, base, quote, b_core, q_core, divergence, badge,
+                                                latest["close"], entry_price_date=latest["date_str"], snapshot_date=today_str)
+            child["written" if written else "skipped"] += 1
+        except Exception:
+            child["errors"] += 1
+            child["issues"].append({"item": pair, "reason": "PAIR_SNAPSHOT_FAILED", "severity": "error"})
+    for name in ("currencies", "pairs"):
+        child = _finish_live_summary(summary[name])
+        for key in ("attempted", "written", "updated", "skipped", "errors"):
+            summary[key] += child[key]
+        summary["issues"].extend(child["issues"])
+    return _finish_live_summary(summary)
 
 # Daily G10 snapshots & outcome updates are automatically executed by the GitHub Actions workflow scheduler
 
@@ -6335,7 +6953,7 @@ if not getattr(st, "_mock_mode", False):
         g8_data = {}
         for curr in CURRENCIES.keys():
             f_score, regime, core_score, corr_score, cat_scores = compute_currency_professional_score_and_regime(curr)
-            details = compute_currency_details(curr)
+            details = cat_scores
             g8_data[curr] = {
                 "score": f_score,
                 "core": core_score,
@@ -6467,44 +7085,55 @@ if not getattr(st, "_mock_mode", False):
         st.caption("Detaillierte Aufschlüsselung der makroökonomischen Faktoren, Berechnungsformeln und Zeitreihen für jede der 8 G8-Währungen.")
         
         sel_curr_fund = st.selectbox("Wähle eine Währung zur Tiefenanalyse:", list(CURRENCIES.keys()), index=0, key="deepdive_curr_sel")
-        details_f = compute_currency_details(sel_curr_fund)
         f_score_d, reg_d, core_d, corr_d, cats_d = compute_currency_professional_score_and_regime(sel_curr_fund)
+        details_f = cats_d
         
         st.write(f"### Detaillierte Kennzahlen für {CURRENCIES[sel_curr_fund]['flag']} {sel_curr_fund} ({CURRENCIES[sel_curr_fund]['name']})")
         
         col_fd1, col_fd2, col_fd3, col_fd4, col_fd5 = st.columns(5)
         with col_fd1:
-            st.metric("Geldpolitik (35%)", f"{cats_d.get('Geldpolitik', 0.0):+.1f}")
+            st.metric("Geldpolitik (35%)", f"{format_score(cats_d.get('Geldpolitik', 0.0))}")
         with col_fd2:
-            st.metric("Inflation (20%)", f"{cats_d.get('Inflation', 0.0):+.1f}")
+            st.metric("Inflation (20%)", f"{format_score(cats_d.get('Inflation', 0.0))}")
         with col_fd3:
-            st.metric("Arbeitsmarkt (20%)", f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}")
+            st.metric("Arbeitsmarkt (20%)", f"{format_score(cats_d.get('Arbeitsmarkt', 0.0))}")
         with col_fd4:
-            st.metric("PMI (20%)", f"{cats_d.get('PMI', 0.0):+.1f}")
+            st.metric("PMI (20%)", f"{format_score(cats_d.get('PMI', 0.0))}")
         with col_fd5:
-            st.metric("GDP (5%)", f"{cats_d.get('GDP', 0.0):+.1f}")
+            st.metric("GDP (5%)", f"{format_score(cats_d.get('GDP', 0.0))}")
             
         st.write("")
         
         col_deep1, col_deep2 = st.columns([1.2, 1])
         with col_deep1:
             st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
-            rate_val, rate_bps, _ = get_country_rate(CURRENCIES[sel_curr_fund]["wb_code"], FRED_KEY)
-            cpi_val = get_cpi_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            unemp_val = get_unemployment_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            pmi_val, _, _, _ = get_composite_pmi_score(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            gdp_val = get_gdp_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            y2_det = get_yield_details(sel_curr_fund, YIELD_2Y_SERIES, FRED_KEY)
-            y2_val = y2_det.get("value") if y2_det else None
-            
+            observations = details_f.get("_observations", {})
+            rate_val = observations.get("Geldpolitik", {}).get("policy_rate")
+            y2_val = observations.get("Geldpolitik", {}).get("yield_2y")
+            cpi_val = observations.get("Inflation", {}).get("value")
+            unemp_val = observations.get("Arbeitsmarkt", {}).get("value")
+            pmi_val = observations.get("PMI", {}).get("value")
+            gdp_val = observations.get("GDP", {}).get("value")
+
             raw_metrics = [
-                {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-                {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-                {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Inflation', 0.0):+.1f}"},
-                {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}"},
-                {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('PMI', 0.0):+.1f}"},
-                {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('GDP', 0.0):+.1f}"}
+                {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Geldpolitik', 0.0))} (Blended)"},
+                {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Geldpolitik', 0.0))} (Blended)"},
+                {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Inflation', 0.0))}"},
+                {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Arbeitsmarkt', 0.0))}"},
+                {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('PMI', 0.0))}"},
+                {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('GDP', 0.0))}"}
             ]
+            for row, factor in zip(raw_metrics, ("Geldpolitik", "Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")):
+                observation = observations.get(factor, {})
+                row["Quelle"] = observation.get("source") or "N/A"
+                row["Bezugsdatum"] = str(observation.get("date") or "N/A")
+                if factor == "PMI":
+                    row["Quelle"] = " / ".join(str(observation.get(f"{c}_src") or "N/A") for c in ("m", "s"))
+                    row["Bezugsdatum"] = " / ".join(str(observation.get(f"{c}_ref") or "N/A") for c in ("m", "s"))
+            # The monetary factor stores the 2Y observation; do not attribute
+            # that source/date to the independently verified policy rate.
+            raw_metrics[0]["Quelle"] = "Verified Policy Rate Center"
+            raw_metrics[0]["Bezugsdatum"] = "Siehe Policy Rate Center"
             st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
     
             st.subheader("📈 TREND & MOMENTUM CONTEXT")
@@ -6536,19 +7165,21 @@ if not getattr(st, "_mock_mode", False):
             st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
             st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
             st.write(f"- **Markt-Regime:** `{reg_d}`")
-            st.write(f"- **Model Version:** `CORE_V2_2_2026_08` (Schema: `2.0`)")
+            st.write(f"- **Model Version:** `{CURRENT_MODEL_VERSION}` (Schema: `2.0`)")
             
             st.subheader("🟢 Freshness & Data Quality Indicators")
             st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
             freshness_map = details_f.get("_freshness", {})
             for factor, status in freshness_map.items():
-                badge_color = "🟢" if status == "FRESH" else "🟡" if status == "AGING" else "🔴"
+                badge_color = "🟢" if normalized_freshness(status) == "FRESH" else "🟡" if normalized_freshness(status) == "AGING" else "🔴"
                 st.write(f"- **{factor} Freshness:** {badge_color} `{status}`")
                 
             if details_f.get("_missing"):
                 st.warning(f"⚠️ Fehlende/Stale Faktoren: {', '.join(details_f.get('_missing'))}")
+            elif any(normalized_freshness(status) == "AGING" for status in freshness_map.values()):
+                st.warning("🟡 Alle CORE-Faktoren verfügbar; einzelne Beobachtungen sind AGING. Die Datumsangaben oben beachten.")
             else:
-                st.success("🟢 Alle CORE-Faktoren vollständig & aktuell (100% Valid).")
+                st.success("🟢 Alle CORE-Faktoren vollständig und innerhalb ihrer Aktualitätsgrenzen.")
     
             st.subheader("🌎 MARKET CONTEXT & RESEARCH FACTORS")
             y5_det = get_yield_details(sel_curr_fund, YIELD_5Y_SERIES, FRED_KEY)
@@ -6582,8 +7213,8 @@ if not getattr(st, "_mock_mode", False):
         fig_rates_g8.add_trace(go.Bar(
             x=df_rates_plot["Zentralbank"],
             y=df_rates_plot["Zinssatz"],
-            marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
-            text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
+            marker_color=['#7d7d8a' if finite_number(r) is None else '#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
+            text=[f"{r:.2f}%" if finite_number(r) is not None else "N/A" for r in df_rates_plot["Zinssatz"]],
             textposition='auto',
             name="Zinssatz"
         ))
@@ -6598,6 +7229,8 @@ if not getattr(st, "_mock_mode", False):
             margin=dict(l=10, r=10, t=40, b=10)
         )
         st.plotly_chart(fig_rates_g8, use_container_width=True)
+        if df_rates_plot["Zinssatz"].isna().any():
+            st.caption("Für nicht bestätigte Leitzinsen wird kein Balken angezeigt. Details stehen im Policy Rate Center.")
         
         # Bond Market & Yield Curve
         st.subheader("🏦 Bond Market & 2Y Benchmark Yields")
@@ -6845,20 +7478,20 @@ if not getattr(st, "_mock_mode", False):
                 st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
                 st.metric("BASE CORE Score", f"{b_core:+.1f}" if b_core is not None else "N/A", delta=f"Regime: {b_reg}")
                 st.write(f"- Gesamt/Kontext-Score: `{b_score_str}`")
-                st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
-                st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
-                st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-                st.write(f"- PMI: `{b_details.get('PMI', 0.0):+.1f}`")
-                st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
+                st.write(f"- Geldpolitik: `{format_score(b_details.get('Geldpolitik', 0.0))}`")
+                st.write(f"- Inflation: `{format_score(b_details.get('Inflation', 0.0))}`")
+                st.write(f"- Arbeitsmarkt: `{format_score(b_details.get('Arbeitsmarkt', 0.0))}`")
+                st.write(f"- PMI: `{format_score(b_details.get('PMI', 0.0))}`")
+                st.write(f"- GDP: `{format_score(b_details.get('GDP', 0.0))}`")
             with col_pb2:
                 st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
                 st.metric("BASE CORE Score", f"{q_core:+.1f}" if q_core is not None else "N/A", delta=f"Regime: {q_reg}")
                 st.write(f"- Gesamt/Kontext-Score: `{q_score_str}`")
-                st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
-                st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
-                st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-                st.write(f"- PMI: `{q_details.get('PMI', 0.0):+.1f}`")
-                st.write(f"- GDP: `{q_details.get('GDP', 0.0):+.1f}`")
+                st.write(f"- Geldpolitik: `{format_score(q_details.get('Geldpolitik', 0.0))}`")
+                st.write(f"- Inflation: `{format_score(q_details.get('Inflation', 0.0))}`")
+                st.write(f"- Arbeitsmarkt: `{format_score(q_details.get('Arbeitsmarkt', 0.0))}`")
+                st.write(f"- PMI: `{format_score(q_details.get('PMI', 0.0))}`")
+                st.write(f"- GDP: `{format_score(q_details.get('GDP', 0.0))}`")
     
     # ----------------- TAB 11: POSITIONING (COT) -----------------
     with tab11:
@@ -6921,9 +7554,10 @@ if not getattr(st, "_mock_mode", False):
             
             num_pairs = len(pair_snapshots)
             completed_outcomes = sum(1 for s in pair_snapshots.values() if s.get("outcome_status") == "COMPLETED")
-            open_outcomes = num_pairs - completed_outcomes
-            
-            col_st1, col_st2, col_st3, col_st4 = st.columns(4)
+            open_outcomes = sum(1 for snapshot in pair_snapshots.values() if snapshot.get("outcome_status", "OPEN") == "OPEN")
+            invalid_outcomes = sum(1 for snapshot in pair_snapshots.values() if snapshot.get("outcome_status") == "INVALID")
+
+            col_st1, col_st2, col_st3, col_st4, col_st5 = st.columns(5)
             with col_st1:
                 st.metric("Einzelwährungs-Snapshots", f"{len(curr_snapshots)}")
             with col_st2:
@@ -6932,6 +7566,8 @@ if not getattr(st, "_mock_mode", False):
                 st.metric("Abgeschlossene Outcomes", f"{completed_outcomes}")
             with col_st4:
                 st.metric("Laufende Outcomes", f"{open_outcomes}")
+            with col_st5:
+                st.metric("Ungültige Outcomes", f"{invalid_outcomes}")
                 
             st.write("")
             hist_sub1, hist_sub2, hist_sub3 = st.tabs([
@@ -6951,12 +7587,8 @@ if not getattr(st, "_mock_mode", False):
                         s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
                         s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
                         
-                        # Score fallback
-                        score_val = s.get("score")
-                        if score_val is None:
-                            score_val = s.get("core_score")
-                        if score_val is None:
-                            score_val = s.get("total_score", 0.0)
+                        # Preserve explicit missing CORE; never substitute a context total.
+                        score_val = s.get("core_score") if "core_score" in s else s.get("score")
                             
                         s_factors = factors if factors else s.get("factor_scores", {})
                         
@@ -6964,7 +7596,7 @@ if not getattr(st, "_mock_mode", False):
                             "Snapshot ID": s_id,
                             "Datum": s_date,
                             "Währung": s_curr,
-                            "Score": f"{score_val:+.1f}" if score_val is not None else "N/A",
+                            "BASE CORE": format_score(score_val),
                             "Regime": s.get("regime", "Neutral"),
                             "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
                             "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
@@ -6992,12 +7624,13 @@ if not getattr(st, "_mock_mode", False):
                             "Datum": s.get("metadata", {}).get("date"),
                             "FX-Paar": s.get("metadata", {}).get("pair"),
                             "Signal": p_sig.get("signal"),
-                            "Divergenz": f"{p_sig.get('divergence', 0.0):+.1f}" if p_sig.get('divergence') is not None else "0.0",
+                            "Divergenz": format_score(p_sig.get("divergence")),
                             "Entry": s.get("entry_price"),
                             "Status": s.get("outcome_status", "OPEN"),
-                            "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "Pending",
-                            "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "Pending",
-                            "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "Pending"
+                            "Fehler / Hinweis": s.get("outcome_error", ""),
+                            "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending",
+                            "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending",
+                            "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending"
                         })
                     df_eval = pd.DataFrame(eval_rows).sort_values("Datum", ascending=False)
                     st.dataframe(df_eval, hide_index=True, use_container_width=True)
@@ -7018,8 +7651,8 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- TAB 13: BACKTESTING & MODEL LAB -----------------
     with tab13:
         st.header("📊 Backtesting, Model Lab & Quant Research")
-        st.caption("Umfassende Research-Umgebung: Historisches Backtesting, Szenario-Simulationen, Modell-Konfiguration, Forward-Testing und technische Datenanalyse.")
-        
+        st.caption("CORE-Baseline und Datenstatus. Die angekündigten Research-Funktionen sind noch nicht implementiert.")
+
         lab1, lab2, lab3, lab4, lab5, lab6 = st.tabs([
             "📊 Fundamental Backtest",
             "🧪 Model Lab & Custom Weights",
@@ -7030,73 +7663,40 @@ if not getattr(st, "_mock_mode", False):
         ])
         
         with lab1:
-            st.subheader("📊 Fundamental FX Backtest Engine")
-            st.caption("Professionelles Backtesting-System zur Validierung fundamentaler Zins- und Makrodivergenzen ohne Look-Ahead Bias.")
-            
-            col_bt1, col_bt2 = st.columns(2)
-            with col_bt1:
-                bt_pair = st.selectbox("FX-Paar:", ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"], index=0, key="bt_pair_lab")
-                bt_hold = st.selectbox("Holding Period (Trading Days):", [5, 10, 15, 20], index=1, key="bt_hold_lab")
-            with col_bt2:
-                bt_thresh = st.slider("Signal Schwellenwert (Divergenz):", 1.0, 20.0, 5.0, step=0.5, key="bt_thresh_lab")
-                bt_days = st.slider("Backtest-Zeitraum (Tage):", 180, 1460, 730, step=90, key="bt_days_lab")
-                
-            if st.button("🚀 Backtest starten", key="btn_run_bt_lab"):
-                with st.spinner(f"Führe fundamentalen Backtest für {bt_pair} über {bt_days} Tage durch..."):
-                    st.success(f"✅ Backtest für {bt_pair} erfolgreich ausgeführt!")
-                    
-                    # Performance metrics
-                    b_c1, b_c2, b_c3, b_c4 = st.columns(4)
-                    with b_c1:
-                        st.metric("Total Trades", "28")
-                    with b_c2:
-                        st.metric("Hit Rate (Win %)", "64.3%")
-                    with b_c3:
-                        st.metric("Sharpe Ratio", "1.42")
-                    with b_c4:
-                        st.metric("Profit Factor", "1.85")
-                        
-                    st.info("ℹ️ Der Backtest basiert zu 100% auf Point-in-Time Makrodaten (Geldpolitik 35%, Inflation 20%, Arbeitsmarkt 20%, PMI 20%, GDP 5%). News- und Finnhub-Faktoren fließen zu 0% ein.")
-                    
+            st.subheader("📊 Fundamental FX Backtest")
+            st.warning("Nicht verfügbar: Es ist keine validierte Backtest-Engine angeschlossen. Es werden keine Trades, Renditen oder Erfolgsquoten berechnet.")
+            st.button("Backtest starten – noch nicht verfügbar", disabled=True, key="btn_run_bt_lab")
+
         with lab2:
-            st.subheader("🧪 Model Lab & Custom Weightings")
-            st.caption("Erstellen und testen Sie eigene Gewichtungsschemata im Vergleich zur CORE-Baseline.")
-            
-            st.write("##### Standard CORE-Baseline:")
-            st.write("- **Geldpolitik (2Y Yields & Leitzinsen):** 35.0%")
-            st.write("- **Inflation / CPI:** 20.0%")
-            st.write("- **Arbeitsmarkt:** 20.0%")
-            st.write("- **PMI Frühindikatoren:** 20.0%")
-            st.write("- **GDP Wachstum:** 5.0%")
-            
+            st.subheader("🧪 CORE-Baseline")
+            st.caption("Die produktive Methodik ist eingefroren. Eigene Modelle können hier noch nicht erstellt oder aktiviert werden.")
+            for factor, weight in CORE_FACTOR_WEIGHTS.items():
+                st.write(f"- **{factor}:** {weight:.1f}%")
+            st.write(f"Modellversion: `{CURRENT_MODEL_VERSION}`")
+
         with lab3:
             st.subheader("🔬 Historical & Quant Research")
-            st.caption("Point-in-Time Zeitreihen und historische Score-Rekonstruktionen.")
-            
-            sel_res_curr = st.selectbox("Währung wählen:", list(CURRENCIES.keys()), key="res_curr_sel")
-            st.write(f"Historische Datenreihen für {CURRENCIES[sel_res_curr]['flag']} {sel_res_curr} werden point-in-time aus FRED geladen.")
-            
+            st.info("Nicht verfügbar: Historische Score-Rekonstruktion und eine Prüfung der zum damaligen Zeitpunkt verfügbaren Daten sind noch nicht implementiert.")
+
         with lab4:
             st.subheader("🚀 Forward Testing & Paper Trading")
-            st.caption("Validieren Sie Ihre Fundamental-Modelle unter Live-Bedingungen.")
-            st.info("Forward Testing läuft parallel zur Live-Datenerfassung in `forward_tests.json`.")
-            
+            st.info("Nicht verfügbar: Es läuft hier kein eigenes Forward-Testing oder Paper Trading. Vorhandene Live-Snapshots finden Sie im Tab Live Signal History & Outcomes.")
+
         with lab5:
             st.subheader("📝 Research Journal")
-            st.caption("Protokollierung von Research-Hypothesen und Modell-Entscheidungen.")
-            st.info("Alle Experimente werden versioniert in `research_journal.json` festgehalten.")
-            
+            st.info("Nicht verfügbar: Das Journal ist noch nicht angebunden; Eingaben und Experimente werden hier nicht aufgezeichnet.")
+
         with lab6:
             st.subheader("🛠 Technical API & Data Status")
-            st.caption("Verbindungsstatus der zugelassenen Datenquellen (ohne News- / Sentiment-APIs).")
+            st.caption("Konfiguration der Datenquellen. Ein vorhandener API-Schlüssel bestätigt keine erfolgreiche Datenabfrage.")
             
             api_health = [
-                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": "Aktiv 🟢" if EODHD_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "FCS Price Data API", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Aktiv 🟢" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
-                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Aktiv 🟢 (Direktverbindung)"}
+                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
+                {"API / Datenquelle": "FCS Price Data API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "World Bank Indicator API", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"},
+                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"}
             ]
             st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
             st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
