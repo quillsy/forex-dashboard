@@ -6392,30 +6392,71 @@ def compute_currency_surprise_score(curr, halflife=5, target_date=None):
     return capped_score, weighted_scores
 
 def load_live_signals():
+    """Read stored evidence verbatim; a damaged file must never become an empty log."""
     file_path = "live_signals.json"
     if not os.path.exists(file_path):
         return {}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            signals = json.load(f)
-            # Inject legacy label for versioning
-            for snap_id, snap in signals.items():
-                if isinstance(snap, dict):
-                    if "model_version" not in snap:
-                        snap["model_version"] = "LEGACY_PRE_CORE_FIX"
-                    if "metadata" in snap and isinstance(snap["metadata"], dict) and "model_version" not in snap["metadata"]:
-                        snap["metadata"]["model_version"] = "LEGACY_PRE_CORE_FIX"
-            return signals
-    except Exception:
-        return {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        signals = json.load(f)
+    if not isinstance(signals, dict):
+        raise ValueError("INVALID_LIVE_SIGNALS_DOCUMENT")
+    return signals
+
 
 def save_live_signals(signals):
+    """Atomically replace the log and surface write failures to the collector."""
+    import tempfile
     file_path = "live_signals.json"
+    temp_path = None
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(signals, f, indent=4, ensure_ascii=False)
-    except Exception:
-        pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=".",
+                                         prefix=".live_signals_", suffix=".tmp",
+                                         delete=False) as f:
+            temp_path = f.name
+            json.dump(signals, f, indent=4, ensure_ascii=False, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, file_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _live_run_summary():
+    return {"status": "SUCCESS", "attempted": 0, "written": 0, "updated": 0,
+            "skipped": 0, "errors": 0, "issues": []}
+
+
+def _finish_live_summary(summary):
+    if (summary["errors"] and summary["errors"] == summary["attempted"]
+            and not summary["written"] and not summary["updated"]):
+        summary["status"] = "FAILED"
+    elif any(issue.get("severity", "warning") != "info" for issue in summary["issues"]):
+        summary["status"] = "PARTIAL"
+    return summary
+
+
+def _live_positive_price(value):
+    try:
+        return not isinstance(value, bool) and bool(np.isfinite(float(value))) and float(value) > 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _live_price_history(df, today_str):
+    """Keep observed daily bars in order without filling gaps or inventing prices."""
+    if df is None or df.empty or not {"date", "close"}.issubset(df.columns):
+        raise ValueError("PRICE_HISTORY_UNAVAILABLE")
+    history = df.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce", utc=True)
+    if history["date"].isna().any():
+        raise ValueError("INVALID_PRICE_DATE")
+    history["date_str"] = history["date"].dt.strftime("%Y-%m-%d")
+    history = history[(history["date_str"] <= today_str) & (history["date"].dt.dayofweek < 5)]
+    if history["date_str"].duplicated().any():
+        raise ValueError("DUPLICATE_DAILY_PRICE_BAR")
+    return history.sort_values("date").reset_index(drop=True)
+
 
 def compute_checklist_snapshot(model_weights):
     checklist = []
@@ -6455,7 +6496,7 @@ def compute_checklist_snapshot(model_weights):
             pass
     return checklist
 
-def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close):
+def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close, entry_price_date=None, snapshot_date=None):
     model_name = st.session_state.get("active_live_model", "CORE v1 - Baseline")
     model_weights = st.session_state.get("active_live_model_weights")
     if model_weights is None:
@@ -6472,23 +6513,28 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
             "Correction": 100.0
         }
         
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = snapshot_date or datetime.now().strftime("%Y-%m-%d")
     signals = load_live_signals()
-    
-    # Duplicate Check (prevent duplicate snapshot if same signal on same day for same model version)
-    duplicate_found = False
-    for s_id, s_data in signals.items():
-        if s_data.get("metadata", {}).get("pair") == selected_pair and s_data.get("metadata", {}).get("date") == today_str:
-            if s_data.get("metadata", {}).get("model_version") == CURRENT_MODEL_VERSION:
-                if s_data.get("pair_signal", {}).get("signal") == badge:
-                    duplicate_found = True
-                    break
-                    
-    if duplicate_found:
-        return
-        
     snapshot_id = f"PAIR_{selected_pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
-    
+    # A rerun must never rewrite the signal, entry, or completed outcomes of this day.
+    if snapshot_id in signals:
+        return False
+    for s_data in signals.values():
+        if not isinstance(s_data, dict):
+            continue
+        meta = s_data.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        if (meta.get("pair") == selected_pair and meta.get("date") == today_str
+                and meta.get("model_version") == CURRENT_MODEL_VERSION):
+            return False
+    if not _live_positive_price(latest_close):
+        raise ValueError("INVALID_ENTRY_PRICE")
+    if entry_price_date != today_str:
+        raise ValueError("ENTRY_PRICE_DATE_MISMATCH")
+    if any(v is None or not np.isfinite(float(v)) for v in [base_score, quote_score, signal_value]):
+        raise ValueError("INSUFFICIENT_CORE_DATA")
+
     checklist_copy = compute_checklist_snapshot(model_weights)
     
     base_details_raw = compute_currency_details(base_curr, None)
@@ -6532,6 +6578,7 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
         "metadata": {
             "snapshot_id": snapshot_id,
             "date": today_str,
+            "entry_price_date": entry_price_date,
             "time": datetime.now().strftime("%H:%M:%S"),
             "timezone": str(datetime.now().astimezone().tzinfo),
             "pair": selected_pair,
@@ -6595,102 +6642,138 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
     
     signals[snapshot_id] = snapshot
     save_live_signals(signals)
+    return True
 
 def update_open_outcomes():
+    """Append observed outcomes only; never repair historical signals or entry prices."""
     signals = load_live_signals()
+    summary = _live_run_summary()
     changed = False
-    
-    open_snapshots_by_pair = {}
-    for s_id, s_data in list(signals.items()):
-        if s_id.startswith("CURR_") or s_data.get("metadata", {}).get("type") == "currency":
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    histories = {}
+    for s_id, s_data in signals.items():
+        if isinstance(s_data, dict) and (s_id.startswith("CURR_") or s_data.get("type") == "CURRENCY"):
             continue
-        if s_data.get("outcome_status", "OPEN") == "OPEN":
-            meta = s_data.get("metadata", {})
-            p = meta.get("pair")
-            if not p:
+        if isinstance(s_data, dict) and s_data.get("outcome_status", "OPEN") != "OPEN":
+            continue
+        summary["attempted"] += 1
+        try:
+            if not isinstance(s_data, dict):
+                raise ValueError("INVALID_SNAPSHOT")
+            meta = s_data.get("metadata") or {}
+            if meta.get("type") == "currency":
+                summary["attempted"] -= 1
                 continue
-            if p not in open_snapshots_by_pair:
-                open_snapshots_by_pair[p] = []
-            open_snapshots_by_pair[p].append((s_id, s_data))
-            
-    if not open_snapshots_by_pair:
-        return
-        
-    for pair, snapshots in open_snapshots_by_pair.items():
-        df, _, _ = get_fcs_history_data(pair, FCS_KEY)
-        if df is None or df.empty:
-            continue
-            
-        df = df.sort_values("date").reset_index(drop=True)
-        df["date_str"] = df["date"].dt.strftime("%Y-%m-%d")
-        
-        for s_id, s_data in snapshots:
-            entry_date_str = s_data["metadata"]["date"]
-            entry_price = s_data["entry_price"]
-            direction = "LONG" if "BUY" in s_data["pair_signal"]["signal"] else "SHORT"
-            
-            matching_rows = df[df["date_str"] == entry_date_str]
-            if matching_rows.empty:
-                matching_rows = df[df["date_str"] >= entry_date_str]
-                if matching_rows.empty:
-                    continue
-            idx = matching_rows.index[0]
-            
-            all_filled = True
-            for n_str, out_data in list(s_data["outcomes"].items()):
-                n = int(n_str)
-                if out_data.get("exit_price") is not None:
-                    continue
-                    
-                target_idx = idx + n
-                if target_idx < len(df):
-                    exit_row = df.iloc[target_idx]
-                    exit_price = float(exit_row["close"])
-                    exit_date = exit_row["date_str"]
-                    
-                    raw_ret = (exit_price - entry_price) / entry_price * 100.0
-                    dir_ret = raw_ret if direction == "LONG" else -raw_ret
-                    
-                    window_df = df.iloc[idx + 1:target_idx + 1]
-                    max_fav = 0.0
-                    max_adv = 0.0
-                    
-                    for _, row in window_df.iterrows():
-                        high_val = float(row["high"])
-                        low_val = float(row["low"])
-                        
-                        if direction == "LONG":
-                            fav = (high_val - entry_price) / entry_price * 100.0
-                            adv = (low_val - entry_price) / entry_price * 100.0
-                        else:
-                            fav = (entry_price - low_val) / entry_price * 100.0
-                            adv = (entry_price - high_val) / entry_price * 100.0
-                            
-                        max_fav = max(max_fav, fav)
-                        max_adv = min(max_adv, adv)
-                        
-                    out_data["exit_price"] = exit_price
-                    out_data["exit_date"] = exit_date
-                    out_data["return_pct"] = round(raw_ret, 3)
-                    out_data["directional_return_pct"] = round(dir_ret, 3)
-                    out_data["status"] = "CORRECT" if dir_ret > 0.0 else "WRONG" if dir_ret < 0.0 else "NEUTRAL"
-                    out_data["mfe"] = round(max_fav, 3)
-                    out_data["mae"] = round(max_adv, 3)
-                    
-                    changed = True
-                else:
-                    all_filled = False
-                    
-            if all_filled:
-                s_data["outcome_status"] = "COMPLETED"
+            entry_price = s_data.get("entry_price")
+            if not _live_positive_price(entry_price):
+                s_data["outcome_status"] = "INVALID"
+                s_data["outcome_error"] = "INVALID_ENTRY_PRICE"
                 changed = True
-                
+                summary["errors"] += 1
+                summary["issues"].append({"item": s_id, "reason": "INVALID_ENTRY_PRICE", "severity": "error"})
+                continue
+            entry_price = float(entry_price)
+            pair = meta.get("pair")
+            if not pair:
+                raise ValueError("MISSING_PAIR")
+            if pair not in histories:
+                try:
+                    df, _, observed = get_fcs_history_data(pair, FCS_KEY)
+                    if not observed:
+                        raise ValueError("PRICE_HISTORY_UNAVAILABLE")
+                    histories[pair] = _live_price_history(df, today_str)
+                except Exception:
+                    histories[pair] = None
+            df = histories[pair]
+            if df is None or df.empty:
+                summary["skipped"] += 1
+                summary["issues"].append({"item": s_id, "reason": "PRICE_HISTORY_UNAVAILABLE", "severity": "warning"})
+                continue
+            entry_date = meta.get("entry_price_date") or meta.get("date")
+            matches = df.index[df["date_str"] == entry_date]
+            if not len(matches):
+                # No next-date fallback: that would silently move the original entry.
+                summary["skipped"] += 1
+                summary["issues"].append({"item": s_id, "reason": "ENTRY_PRICE_DATE_UNAVAILABLE", "severity": "warning"})
+                continue
+            idx = int(matches[0])
+            badge = str(s_data.get("pair_signal", {}).get("signal", ""))
+            direction = "LONG" if "BUY" in badge else "SHORT" if "SELL" in badge else None
+            outcomes = s_data.get("outcomes")
+            if not isinstance(outcomes, dict) or not outcomes:
+                raise ValueError("INVALID_OUTCOMES")
+            row_updated = False
+            row_errors = False
+            for n_str, out_data in outcomes.items():
+                try:
+                    n = int(n_str)
+                    if n not in [1, 3, 5, 10, 15, 20] or not isinstance(out_data, dict):
+                        raise ValueError("INVALID_OUTCOME_HORIZON")
+                    if out_data.get("exit_price") is not None:
+                        continue
+                    target_idx = idx + n
+                    if target_idx >= len(df):
+                        continue
+                    exit_row = df.iloc[target_idx]
+                    exit_price = exit_row["close"]
+                    if not _live_positive_price(exit_price):
+                        raise ValueError("INVALID_EXIT_PRICE")
+                    exit_price = float(exit_price)
+                    raw_ret = (exit_price - entry_price) / entry_price * 100.0
+                    if not np.isfinite(raw_ret):
+                        raise ValueError("INVALID_OUTCOME_RETURN")
+                    dir_ret = raw_ret if direction == "LONG" else -raw_ret if direction == "SHORT" else None
+                    max_fav = max_adv = None
+                    if direction:
+                        max_fav = max_adv = 0.0
+                        for _, bar in df.iloc[idx + 1:target_idx + 1].iterrows():
+                            high, low = bar.get("high"), bar.get("low")
+                            close = bar.get("close")
+                            if not all(_live_positive_price(v) for v in (high, low, close)):
+                                raise ValueError("INVALID_OUTCOME_PRICE_BAR")
+                            high, low, close = float(high), float(low), float(close)
+                            if not low <= close <= high:
+                                raise ValueError("INVALID_OUTCOME_PRICE_BAR")
+                            fav = (high - entry_price) / entry_price * 100.0 if direction == "LONG" else (entry_price - low) / entry_price * 100.0
+                            adv = (low - entry_price) / entry_price * 100.0 if direction == "LONG" else (entry_price - high) / entry_price * 100.0
+                            if not np.isfinite(fav) or not np.isfinite(adv):
+                                raise ValueError("INVALID_OUTCOME_RETURN")
+                            max_fav, max_adv = max(max_fav, fav), min(max_adv, adv)
+                    out_data.update({
+                        "exit_price": exit_price, "exit_date": exit_row["date_str"],
+                        "return_pct": round(raw_ret, 3),
+                        "directional_return_pct": round(dir_ret, 3) if dir_ret is not None else None,
+                        "status": ("CORRECT" if dir_ret > 0 else "WRONG" if dir_ret < 0 else "NEUTRAL") if dir_ret is not None else "NO_TRADE",
+                        "mfe": round(max_fav, 3) if max_fav is not None else None,
+                        "mae": round(max_adv, 3) if max_adv is not None else None,
+                    })
+                    row_updated = changed = True
+                except Exception:
+                    row_errors = True
+                    summary["issues"].append({"item": s_id, "reason": "INVALID_OUTCOME_DATA", "horizon": str(n_str), "severity": "error"})
+            if row_errors:
+                summary["errors"] += 1
+            if all(isinstance(o, dict) and o.get("exit_price") is not None for o in outcomes.values()) and not row_errors:
+                s_data["outcome_status"] = "COMPLETED"
+                row_updated = changed = True
+            if row_updated:
+                summary["updated"] += 1
+            elif not row_errors:
+                summary["skipped"] += 1
+        except Exception:
+            summary["errors"] += 1
+            summary["issues"].append({"item": s_id, "reason": "INVALID_SNAPSHOT", "severity": "error"})
     if changed:
         save_live_signals(signals)
+    return _finish_live_summary(summary)
+
 
 def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, details, model_weights, today_str):
     signals = load_live_signals()
     snap_id = f"CURR_{curr}_{today_str}_{CURRENT_MODEL_VERSION}"
+    if snap_id in signals:
+        return False
+    details = details or {}
     
     eff_weights = {}
     if details and "_completeness" in details:
@@ -6788,11 +6871,11 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "schema_version": "2.0",
         "total_score": float(total_score) if total_score is not None else None,
         "core_score": float(core_score) if core_score is not None else None,
-        "core_status": "INSUFFICIENT DATA" if (details and details.get("_completeness", 100.0) < 50.0) else "VALID",
+        "core_status": "INSUFFICIENT DATA" if (core_score is None or details.get("_completeness", 100.0) < 50.0) else "VALID",
         "diagnostic_partial_score": float(details.get("_diagnostic_partial_score", 0.0)) if (details and "_diagnostic_partial_score" in details and details["_diagnostic_partial_score"] is not None) else None,
         "correction_score": float(corr_score) if corr_score is not None else None,
-        "trend_score": float(details.get("_trend_score", 0.0)) if details else 0.0,
-        "surprise_score": float(details.get("_surprise_score", 0.0)) if details else 0.0,
+        "trend_score": float(details.get("_trend_score", 0.0)) if details.get("_trend_score", 0.0) is not None else None,
+        "surprise_score": float(details.get("_surprise_score", 0.0)) if details.get("_surprise_score", 0.0) is not None else None,
         "regime": regime,
         "factor_scores": {k: float(v) if v is not None else None for k, v in details.items() if not k.startswith("_")},
         "original_weights": model_weights,
@@ -6817,6 +6900,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     }
     signals[snap_id] = snapshot
     save_live_signals(signals)
+    return True
 
 def save_all_g10_live_snapshots():
     model_weights = st.session_state.get("active_live_model_weights")
@@ -6835,32 +6919,63 @@ def save_all_g10_live_snapshots():
         }
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    if not getattr(st, "_mock_mode", False):
-        # 1. Save Currency Snapshots for all 8 G8 currencies
-        for curr in CURRENCIES.keys():
-            try:
-                c_score, c_reg, c_core, c_corr, c_details = compute_currency_professional_score_and_regime_custom(curr, model_weights)
-                save_currency_snapshot(curr, c_score, c_core, c_corr, c_reg, c_details, model_weights, today_str)
-            except Exception:
-                pass
-            
-        # 2. Save Pair Snapshots for outcome tracking
-        pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
-        for pair in pairs:
+    summary = _live_run_summary()
+    summary["currencies"] = _live_run_summary()
+    summary["pairs"] = _live_run_summary()
+    if getattr(st, "_mock_mode", False) or check_demo_active():
+        summary["issues"].append({"item": "collector", "reason": "LIVE_COLLECTION_DISABLED", "severity": "warning"})
+        return _finish_live_summary(summary)
+
+    for curr in CURRENCIES.keys():
+        child = summary["currencies"]
+        child["attempted"] += 1
+        try:
+            c_score, c_reg, c_core, c_corr, c_details = compute_currency_professional_score_and_regime_custom(curr, model_weights)
+            written = save_currency_snapshot(curr, c_score, c_core, c_corr, c_reg, c_details, model_weights, today_str)
+            child["written" if written else "skipped"] += 1
+        except Exception:
+            child["errors"] += 1
+            child["issues"].append({"item": curr, "reason": "CURRENCY_SNAPSHOT_FAILED", "severity": "error"})
+
+    pairs = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"]
+    for pair in pairs:
+        child = summary["pairs"]
+        child["attempted"] += 1
+        try:
+            snapshot_id = f"PAIR_{pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
+            if snapshot_id in load_live_signals() or pd.Timestamp(today_str).dayofweek >= 5:
+                child["skipped"] += 1
+                continue
             base, quote = pair.split("/")
-            try:
-                b_score, b_reg, b_core, b_corr, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
-                q_score, q_reg, q_core, q_corr, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
-                
-                badge, color, divergence, code = get_pair_signal_and_badge(base, quote, model_weights)
-                if divergence is not None:
-                    latest_close = 0.0
-                    df, _, _ = get_fcs_history_data(pair, FCS_KEY)
-                    if df is not None and not df.empty:
-                        latest_close = float(df.iloc[-1]["close"])
-                    save_live_signal_snapshot(pair, base, quote, b_core, q_core, divergence, badge, latest_close)
-            except Exception:
-                pass
+            _, _, b_core, _, _ = compute_currency_professional_score_and_regime_custom(base, model_weights)
+            _, _, q_core, _, _ = compute_currency_professional_score_and_regime_custom(quote, model_weights)
+            badge, _, divergence, _ = get_pair_signal_and_badge(base, quote, model_weights)
+            if divergence is None or b_core is None or q_core is None:
+                child["skipped"] += 1
+                continue
+            df, _, observed = get_fcs_history_data(pair, FCS_KEY)
+            if not observed or df is None or df.empty:
+                child["skipped"] += 1
+                child["issues"].append({"item": pair, "reason": "ENTRY_PRICE_UNAVAILABLE", "severity": "warning"})
+                continue
+            history = _live_price_history(df, today_str)
+            if history.empty or history.iloc[-1]["date_str"] != today_str:
+                child["skipped"] += 1
+                child["issues"].append({"item": pair, "reason": "ENTRY_PRICE_STALE", "severity": "warning"})
+                continue
+            latest = history.iloc[-1]
+            written = save_live_signal_snapshot(pair, base, quote, b_core, q_core, divergence, badge,
+                                                latest["close"], entry_price_date=latest["date_str"], snapshot_date=today_str)
+            child["written" if written else "skipped"] += 1
+        except Exception:
+            child["errors"] += 1
+            child["issues"].append({"item": pair, "reason": "PAIR_SNAPSHOT_FAILED", "severity": "error"})
+    for name in ("currencies", "pairs"):
+        child = _finish_live_summary(summary[name])
+        for key in ("attempted", "written", "updated", "skipped", "errors"):
+            summary[key] += child[key]
+        summary["issues"].extend(child["issues"])
+    return _finish_live_summary(summary)
 
 # Daily G10 snapshots & outcome updates are automatically executed by the GitHub Actions workflow scheduler
 
