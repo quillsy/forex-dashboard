@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: g10-live-data-collection
+  cancel-in-progress: false
+
 jobs:
   collect-data:
     runs-on: ubuntu-latest
@@ -41,9 +45,14 @@ jobs:
           python run_data_collection.py
 
       - name: Commit and push changes
+        if: ${{ always() }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add live_signals.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json || true
-          git commit -m "Auto-update: G10 Live Signal Snapshots & Outcomes [skip ci]" || echo "No changes to commit"
-          git push
+          for file in live_signals.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json; do
+            if [ -f "$file" ]; then git add -- "$file"; fi
+          done
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update: G10 Live Signal Snapshots & Outcomes [skip ci]"
+            git push
+          fi

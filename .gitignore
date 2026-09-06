@@ -20,3 +20,9 @@ ENV/
 # Scratch and test files
 scratch/
 test_*.py
+
+# Collector process locks and atomic-write scratch files
+.data_collection.lock
+.eodhd_status.json.lock
+.eodhd-*
+.collection-*
