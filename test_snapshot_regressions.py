@@ -16,7 +16,7 @@ import pandas as pd
 
 SOURCE = Path(__file__).with_name("app.py")
 FUNCTIONS = {
-    "load_live_signals", "save_live_signals", "_live_run_summary", "_finish_live_summary",
+    "load_live_signals", "save_live_signals", "_live_snapshot_weights", "_live_run_summary", "_finish_live_summary",
     "_live_positive_price", "_live_price_history", "save_live_signal_snapshot",
     "save_currency_snapshot", "save_all_g10_live_snapshots", "update_open_outcomes",
 }
@@ -145,6 +145,15 @@ class SnapshotRegressions(unittest.TestCase):
         self.assertFalse(fn("USD", -40, -40, 10, "Changed", {}, weights, "2026-09-04"))
         self.assertEqual(self.read(), original)
         self.assertIsNone(next(iter(original.values()))["factor_scores"]["PMI"])
+
+    def test_snapshot_metadata_always_uses_frozen_weights(self):
+        self.ns["st"].session_state.update({"active_live_model_weights": {"PMI": 100}, "active_live_model": "Custom experiment"})
+        self.save_pair()
+        stored = next(iter(self.read().values()))
+        weights = stored["metadata"]["core_model_weights"]
+        self.assertEqual([weights[k] for k in ("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")], [35, 20, 20, 20, 5])
+        self.assertEqual(stored["metadata"]["core_model_name"], "CORE v1 - Baseline")
+        self.assertEqual(stored["base_currency_details"]["original_weights"], weights)
 
     def test_invalid_or_undated_entries_never_create_snapshot(self):
         for value in (0, -1, None, float("nan"), float("inf"), True):

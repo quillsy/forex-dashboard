@@ -6422,6 +6422,14 @@ def save_live_signals(signals):
             os.unlink(temp_path)
 
 
+def _live_snapshot_weights():
+    # Stored provenance must match the frozen BASE calculation, regardless of UI state.
+    return {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0,
+            "PMI": 20.0, "GDP": 5.0, "ForwardRates": 0.0,
+            "InflationExpectations": 0.0, "EconomicSurprises": 0.0,
+            "BCI": 0.0, "Correction": 100.0}
+
+
 def _live_run_summary():
     return {"status": "SUCCESS", "attempted": 0, "written": 0, "updated": 0,
             "skipped": 0, "errors": 0, "issues": []}
@@ -6497,22 +6505,9 @@ def compute_checklist_snapshot(model_weights):
     return checklist
 
 def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, quote_score, signal_value, badge, latest_close, entry_price_date=None, snapshot_date=None):
-    model_name = st.session_state.get("active_live_model", "CORE v1 - Baseline")
-    model_weights = st.session_state.get("active_live_model_weights")
-    if model_weights is None:
-        model_weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
-        
+    model_name = "CORE v1 - Baseline"
+    model_weights = _live_snapshot_weights()
+
     today_str = snapshot_date or datetime.now().strftime("%Y-%m-%d")
     signals = load_live_signals()
     snapshot_id = f"PAIR_{selected_pair.replace('/', '')}_{today_str}_{CURRENT_MODEL_VERSION}"
@@ -6774,6 +6769,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     if snap_id in signals:
         return False
     details = details or {}
+    model_weights = _live_snapshot_weights()
     
     eff_weights = {}
     if details and "_completeness" in details:
@@ -6903,20 +6899,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     return True
 
 def save_all_g10_live_snapshots():
-    model_weights = st.session_state.get("active_live_model_weights")
-    if model_weights is None:
-        model_weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
+    model_weights = _live_snapshot_weights()
     today_str = datetime.now().strftime("%Y-%m-%d")
     
     summary = _live_run_summary()
