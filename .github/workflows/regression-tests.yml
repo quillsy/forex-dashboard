@@ -1,0 +1,23 @@
+name: Dashboard regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+
+permissions:
+  contents: read
+
+jobs:
+  offline-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run offline regressions
+        run: python -m unittest -v test_core_regressions test_policy_regressions test_eodhd_regressions test_snapshot_regressions test_ui_regressions

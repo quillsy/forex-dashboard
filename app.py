@@ -63,83 +63,35 @@ def find_current_rate_episode_start(observations, current_rate, default_effectiv
 POLICY_RATE_DEFINITIONS = {
     "USD": {
         "instrument": "Federal Funds Target Range (Lower Bound)",
-        "central_bank": "Federal Reserve",
-        "primary_source": "FRED / Federal Reserve Board (DFEDTARL)",
-        "secondary_source": "FRED (DFEDTARU) / Fed Target Range",
-        "default_rate": 3.50,
-        "upper_bound": 3.75,
-        "default_rate_effective_date": "2025-12-11",
-        "default_last_decision_date": "2026-07-31"
+        "central_bank": "Federal Reserve"
     },
     "EUR": {
         "instrument": "ECB Deposit Facility Rate",
-        "central_bank": "European Central Bank",
-        "primary_source": "ECB Data API (B.U2.EUR.4F.KR.DFR.LEV)",
-        "secondary_source": "ECB Key Interest Rates",
-        "default_rate": 2.25,
-        "upper_bound": None,
-        "default_rate_effective_date": "2026-06-17",
-        "default_last_decision_date": "2026-07-24"
+        "central_bank": "European Central Bank"
     },
     "GBP": {
         "instrument": "Bank of England Official Bank Rate",
-        "central_bank": "Bank of England",
-        "primary_source": "Bank of England (Official Bank Rate)",
-        "secondary_source": "Bank of England Monetary Policy Decisions",
-        "default_rate": 3.75,
-        "upper_bound": None,
-        "default_rate_effective_date": "2025-12-18",
-        "default_last_decision_date": "2026-08-01"
+        "central_bank": "Bank of England"
     },
     "CAD": {
         "instrument": "Target for the Overnight Rate",
-        "central_bank": "Bank of Canada",
-        "primary_source": "Bank of Canada Valet API (V39079)",
-        "secondary_source": "Bank of Canada Policy Interest Rate Decisions",
-        "default_rate": 2.25,
-        "upper_bound": None,
-        "default_rate_effective_date": "2025-10-30",
-        "default_last_decision_date": "2026-07-24"
+        "central_bank": "Bank of Canada"
     },
     "CHF": {
         "instrument": "SNB Policy Rate",
-        "central_bank": "Swiss National Bank",
-        "primary_source": "SNB Data API (snboffzisa/LZ)",
-        "secondary_source": "SNB Monetary Policy Assessment",
-        "default_rate": 0.00,
-        "upper_bound": None,
-        "default_rate_effective_date": "2025-06-20",
-        "default_last_decision_date": "2026-06-19"
+        "central_bank": "Swiss National Bank"
     },
     "AUD": {
         "instrument": "Cash Rate Target",
-        "central_bank": "Reserve Bank of Australia",
-        "primary_source": "Reserve Bank of Australia (Cash Rate Target)",
-        "secondary_source": "RBA Monetary Policy Decision",
-        "default_rate": 4.35,
-        "upper_bound": None,
-        "default_rate_effective_date": "2026-05-06",
-        "default_last_decision_date": "2026-08-06"
+        "central_bank": "Reserve Bank of Australia"
     },
     "NZD": {
         "instrument": "Official Cash Rate (OCR)",
-        "central_bank": "Reserve Bank of New Zealand",
-        "primary_source": "Reserve Bank of New Zealand (OCR)",
-        "secondary_source": "RBNZ Monetary Policy Decision",
-        "default_rate": 2.50,
-        "upper_bound": None,
-        "default_rate_effective_date": "2026-07-08",
-        "default_last_decision_date": "2026-08-14"
+        "central_bank": "Reserve Bank of New Zealand"
     },
     "JPY": {
         "instrument": "Short-Term Policy Interest Rate",
-        "central_bank": "Bank of Japan",
-        "primary_source": "Bank of Japan (Monetary Policy Guideline)",
-        "secondary_source": "BoJ Statement on Monetary Policy",
-        "default_rate": 1.00,
-        "upper_bound": None,
-        "default_rate_effective_date": "2026-06-17",
-        "default_last_decision_date": "2026-07-31"
+        "central_bank": "Bank of Japan"
     }
 }
 
@@ -162,10 +114,16 @@ def _policy_now():
 
 
 def _policy_date(value):
+    import re
     if value is None or not str(value).strip():
         return None
+    value = str(value).strip()
+    if re.fullmatch(r"\d{4}(?:-\d{2})?", value):
+        return None  # A month/year cannot establish an exact effective date.
     try:
-        parsed = pd.to_datetime(str(value).replace("Sept.", "Sep").replace("Jun.", "Jun"), utc=True)
+        if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", value):
+            return datetime.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
+        parsed = pd.to_datetime(value.replace("Sept.", "Sep").replace("Jun.", "Jun"), utc=True)
         return parsed.strftime("%Y-%m-%d") if not pd.isna(parsed) else None
     except (ValueError, TypeError, OverflowError):
         return None
@@ -196,7 +154,8 @@ def _policy_url_allowed(currency, url):
 def _policy_request(currency, url, params=None):
     if not _policy_url_allowed(currency, url):
         raise ValueError("UNAPPROVED_POLICY_SOURCE")
-    response = requests.get(url, params=params, timeout=(5, 15), headers={"User-Agent": "ForexDashboard/2.6 official policy verification"})
+    headers = {"User-Agent": "ForexDashboard/2.6 official policy verification"} if currency == "GBP" else {}
+    response = requests.get(url, params=params, timeout=(5, 15), headers=headers)
     response.raise_for_status()
     if not _policy_url_allowed(currency, response.url):
         raise ValueError("UNAPPROVED_POLICY_REDIRECT")
@@ -366,7 +325,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 year_soup = _policy_html(currency, urljoin(index, snippets["data-snippets"].split(",")[0]))
             else:
                 year_soup = index_soup
-            decision, statement = _policy_latest_link(currency, index, year_soup, r"ecb\.mp(\d{6})[~.]")
+            decision, statement = _policy_latest_link(currency, index, year_soup, r"ecb\.mp(\d{6})~[^/]+\.en\.html$")
             text = _policy_text(_policy_html(currency, statement))
             value = _policy_match_rate(text, [r"deposit facility.{0,180}?(?:at|to|be)\s+" + number + r"\s*%"])
             if abs(value - secondary["rate"]) > 1e-8:
@@ -395,14 +354,13 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             evidence.append(_policy_evidence(currency, url2, rate, last_policy_decision_date=decision))
 
         elif currency == "CHF":
-            url = "https://data.snb.ch/api/cube/snboffzisa/data/csv/en"
-            csv = _policy_request(currency, url).text
-            start = csv.find('"Date";')
-            if start < 0:
-                raise ValueError("SNB_SERIES_NOT_FOUND")
-            frame = pd.read_csv(io.StringIO(csv[start:]), sep=";")
-            frame = frame[frame["D0"] == "LZ"]
-            evidence.append(_policy_history_evidence(currency, url, list(zip(frame["Date"], frame["Value"]))))
+            # The monthly cube does not identify the exact effective day.
+            url = "https://www.snb.ch/en/the-snb/mandates-goals/statistics/statistics-pub/current_interest_exchange_rates"
+            text = _policy_text(_policy_html(currency, url))
+            match = re.search(r"SNB policy rate\s+" + number + r"\s*%\s+valid from\s+(\d{2}\.\d{2}\.\d{4})", text, re.I)
+            if not match:
+                raise ValueError("SNB_DATED_POLICY_RATE_NOT_FOUND")
+            evidence.append(_policy_evidence(currency, url, match[1], rate_effective_date=_policy_date(match[2])))
             index = "https://www.snb.ch/en/the-snb/mandates-goals/monetary-policy/decisions"
             decision, url2 = _policy_latest_link(currency, index, _policy_html(currency, index), r"/pre_(\d{8})(?:_\d+)?$")
             text = _policy_text(_policy_html(currency, url2))
@@ -442,7 +400,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             soup = _policy_html(currency, index)
             decision, statement = _policy_latest_link(currency, index, soup, r"/k(\d{6})a\.pdf$")
             text = _policy_pdf_text(currency, statement)
-            latest_rate = _policy_match_rate(text, [r"uncollateralized overnight call rate.{0,70}?around\s+" + number + r"\s+percent"])
+            call_rate_pattern = r"uncollateralized\s+o\s*vernight\s+call\s+rate.{0,70}?around\s+" + number + r"\s+percent"
+            latest_rate = _policy_match_rate(text, [call_rate_pattern])
             secondary = _policy_evidence(currency, statement, latest_rate, last_policy_decision_date=decision)
             # Find the latest explicit rate-changing statement, not the latest hold.
             change_links = []
@@ -455,7 +414,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             if change_links:
                 change_url = max(change_links)
                 change_text = text if change_url == statement else _policy_pdf_text(currency, change_url)
-                changed_rate = _policy_match_rate(change_text, [r"uncollateralized overnight call rate.{0,70}?around\s+" + number + r"\s+percent"])
+                changed_rate = _policy_match_rate(change_text, [call_rate_pattern])
                 effective_match = re.search(r"new guideline.{0,50}?effective from\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})", change_text, re.I)
                 if abs(changed_rate - rate) < 1e-8 and effective_match:
                     primary["rate_effective_date"] = _policy_date(effective_match[1])
@@ -472,6 +431,12 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
 def _policy_proofs_valid(obj, check_age=True):
     try:
         currency, rate = obj["currency"], _policy_rate(obj["rate"])
+        verified = pd.to_datetime(obj.get("verified_at"), utc=True)
+        if verified is None or pd.isna(verified):
+            return False
+        verified_age = (_policy_now() - verified).total_seconds()
+        if verified_age < -300 or (check_age and verified_age > POLICY_VERIFICATION_MAX_AGE_DAYS * 86400):
+            return False
         proofs = obj.get("verification_evidence", [])
         if len(proofs) != 2 or len({p.get("source_url") for p in proofs}) != 2:
             return False
@@ -480,6 +445,8 @@ def _policy_proofs_valid(obj, check_age=True):
                     or not _policy_url_allowed(currency, proof.get("source_url", "")) or abs(_policy_rate(proof["rate"]) - rate) > 1e-8):
                 return False
             checked = pd.to_datetime(proof["retrieved_at"], utc=True)
+            if pd.isna(checked):
+                return False
             age = (_policy_now() - checked).total_seconds()
             if age < -300 or (check_age and age > POLICY_VERIFICATION_MAX_AGE_DAYS * 86400):
                 return False
@@ -496,7 +463,11 @@ def policy_rate_is_usable(obj):
     status = obj.get("verification_status", "")
     if status == "🔴 MANUAL OVERRIDE":
         # Only the explicitly activated session override may bypass source verification.
-        return bool(st.session_state.get("emergency_manual_rates_override", False)) and obj.get("rate") is not None
+        try:
+            _policy_rate(obj.get("rate"))
+        except (TypeError, ValueError):
+            return False
+        return bool(st.session_state.get("emergency_manual_rates_override", False))
     return status in {"🟢 VERIFIED", "🟢 VERIFIED_UNCHANGED", "🟡 LAST VERIFIED"} and _policy_proofs_valid(obj)
 
 
@@ -547,8 +518,18 @@ def get_verified_policy_rate(currency):
                        verification_status="🔴 MANUAL OVERRIDE")
             return obj
     cached = load_policy_rates_cache().get(currency)
-    obj = dict(cached) if isinstance(cached, dict) else _policy_empty(currency)
-    obj.setdefault("currency", currency)
+    obj = _policy_empty(currency)
+    if isinstance(cached, dict):
+        obj.update(cached)
+    obj["currency"] = currency
+    if not _policy_proofs_valid(obj, check_age=False):
+        # Legacy labels/defaults are not evidence of a previous verification.
+        obj = _policy_empty(currency)
+    for field in ("rate", "previous_rate", "upper_bound"):
+        try:
+            obj[field] = _policy_rate(obj.get(field))
+        except (TypeError, ValueError):
+            obj[field] = None
     if not policy_rate_is_usable(obj) and obj.get("verification_status") != "🔴 UNVERIFIED CHANGE":
         obj["verification_status"] = "🔴 OFFICIAL SOURCE UNAVAILABLE"
     return obj
@@ -568,6 +549,8 @@ def refresh_all_verified_policy_rates(fred_key=None):
         for currency in POLICY_RATE_DEFINITIONS:
             existing = cache.get(currency)
             old = dict(existing) if isinstance(existing, dict) else _policy_empty(currency)
+            if not _policy_proofs_valid(old, check_age=False):
+                old = _policy_empty(currency)
             now = _policy_now().isoformat()
             # Repeat UI/collector runs within one hour reuse actual verified evidence.
             try:
@@ -579,7 +562,7 @@ def refresh_all_verified_policy_rates(fred_key=None):
             result = fetch_official_policy_rate_live(currency, fred_key)
             proofs = result.get("evidence", []) if isinstance(result, dict) else []
             candidate = _policy_empty(currency)
-            if len(proofs) == 2:
+            if len(proofs) == 2 and not result.get("error"):
                 first, second = proofs
                 candidate.update(rate=first.get("rate"), previous_rate=first.get("previous_rate"),
                     upper_bound=second.get("upper_bound"), rate_effective_date=first.get("rate_effective_date"),
@@ -1630,7 +1613,7 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
         m_last, m_prev, m_ref, m_src = None, None, None, "EODHD"
         s_last, s_prev, s_ref, s_src = None, None, None, "EODHD"
         
-        if eodhd_key:
+        if eodhd_key or load_eodhd_events_cache():
             res_m = get_eodhd_pmi_historical(code, "Manufacturing PMI", target_date, eodhd_key)
             if res_m:
                 m_last = res_m["last"]
@@ -1737,7 +1720,7 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
             m_prev = te_m[code]["previous"]
             m_ref = te_m[code]["reference"]
         
-        if m_last is None and eodhd_key:
+        if m_last is None:
             res_eod = get_eodhd_pmi_fallback(code, "Manufacturing PMI", eodhd_key)
             if res_eod:
                 m_last = res_eod["last"]
@@ -1762,7 +1745,7 @@ def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
             s_prev = te_s[code]["previous"]
             s_ref = te_s[code]["reference"]
             
-        if s_last is None and eodhd_key:
+        if s_last is None:
             res_eod = get_eodhd_pmi_fallback(code, "Services PMI", eodhd_key)
             if res_eod:
                 s_last = res_eod["last"]
@@ -5333,9 +5316,11 @@ def get_country_rate(country_code, fred_key):
     }
     curr = map_code.get(country_code, country_code)
     pol_obj = get_verified_policy_rate(curr)
+    if not policy_rate_is_usable(pol_obj):
+        return None, None, pol_obj.get("verification_status", "UNAVAILABLE")
     val = pol_obj.get("rate")
     prev_val = pol_obj.get("previous_rate", val)
-    bps_change = int((val - prev_val) * 100) if (val is not None and prev_val is not None) else 0
+    bps_change = round((val - prev_val) * 100) if (val is not None and prev_val is not None) else None
     return val, bps_change, pol_obj.get("primary_source", "Verified Central Bank")
 
 # Compute economic score for one currency
@@ -5743,12 +5728,12 @@ if not getattr(st, "_mock_mode", False):
             pol = rates_obj.get(c, {})
             r_val = pol.get("rate")
             p_val = pol.get("previous_rate", r_val)
-            stat = pol.get("verification_status", pol.get("status", "🟢 VERIFIED"))
+            stat = pol.get("verification_status", "🔴 OFFICIAL SOURCE UNAVAILABLE")
             table_rows.append({
                 "Currency": c,
                 "Central Bank": pol.get("central_bank", "Central Bank"),
                 "Policy Instrument": pol.get("instrument", "Policy Rate"),
-                "Verified Rate": f"{r_val:.2f}%" if r_val is not None else "N/A",
+                "Rate (siehe Status)": f"{r_val:.2f}%" if r_val is not None else "N/A",
                 "Previous Rate": f"{p_val:.2f}%" if p_val is not None else "N/A",
                 "Rate Effective": pol.get("rate_effective_date", "N/A"),
                 "Last Decision": pol.get("last_policy_decision_date", "N/A"),
@@ -5760,9 +5745,15 @@ if not getattr(st, "_mock_mode", False):
 
         if st.button("🔄 Offizielle Leitzinsen aktualisieren"):
             with st.spinner("Prüfe offizielle Notenbank-Quellen..."):
-                refresh_all_verified_policy_rates(FRED_KEY)
-            st.success("Leitzinsen aktualisiert!")
+                checked_rates = refresh_all_verified_policy_rates(FRED_KEY)
+            st.session_state["policy_refresh_summary"] = sum("🟢" in value.get("verification_status", "") for value in checked_rates.values())
             st.rerun()
+        if "policy_refresh_summary" in st.session_state:
+            count = st.session_state["policy_refresh_summary"]
+            if count == 8:
+                st.success("8 von 8 Leitzinsen mit offiziellen Quellen bestätigt.")
+            else:
+                st.warning(f"{count} von 8 Leitzinsen bestätigt. Bitte die Quellenstatus in der Tabelle beachten.")
 
         with st.expander("🚨 Advanced / Emergency Manual Override", expanded=False):
             st.caption("Standard: AUS. Bei Aktivierung überschreiben manuelle Werte die offiziellen Daten. Dies wird in den Snapshots dokumentiert.")
@@ -6789,10 +6780,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
     else:
         cpi_method_val = "DERIVED_FROM_INDEX"
         
-    if curr in ["USD", "EUR", "CHF", "CAD"]:
-        cpi_pit_status_val = "FRED_POINT_IN_TIME"
-    else:
-        cpi_pit_status_val = "PIT_STRICT"
+    cpi_pit_status_val = "PIT_STRICT" if "PIT_STRICT" in str(freshness) else "PIT_LIMITED"
 
     # Get raw values for saving
     pol_meta = get_verified_policy_rate(curr)
@@ -6806,6 +6794,7 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "policy_rate_primary_source": pol_meta.get("primary_source"),
         "policy_rate_secondary_source": pol_meta.get("secondary_source"),
         "policy_rate_verification_status": pol_meta.get("verification_status", pol_meta.get("status")),
+        "policy_rate_verification_evidence": pol_meta.get("verification_evidence", []),
         "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
         "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
         "cpi_yoy": cpi_val,
@@ -7224,8 +7213,8 @@ if not getattr(st, "_mock_mode", False):
         fig_rates_g8.add_trace(go.Bar(
             x=df_rates_plot["Zentralbank"],
             y=df_rates_plot["Zinssatz"],
-            marker_color=['#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
-            text=[f"{r:.2f}%" for r in df_rates_plot["Zinssatz"]],
+            marker_color=['#7d7d8a' if finite_number(r) is None else '#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
+            text=[f"{r:.2f}%" if finite_number(r) is not None else "N/A" for r in df_rates_plot["Zinssatz"]],
             textposition='auto',
             name="Zinssatz"
         ))
@@ -7240,6 +7229,8 @@ if not getattr(st, "_mock_mode", False):
             margin=dict(l=10, r=10, t=40, b=10)
         )
         st.plotly_chart(fig_rates_g8, use_container_width=True)
+        if df_rates_plot["Zinssatz"].isna().any():
+            st.caption("Für nicht bestätigte Leitzinsen wird kein Balken angezeigt. Details stehen im Policy Rate Center.")
         
         # Bond Market & Yield Curve
         st.subheader("🏦 Bond Market & 2Y Benchmark Yields")
