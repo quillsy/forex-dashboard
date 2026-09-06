@@ -4084,34 +4084,34 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
         pmi = details.get("PMI", 0)
         gdp = details.get("GDP", 0)
         
-        if gp > 15:
+        if gp is not None and gp > 15:
             bullets.append("+ Hohe Renditen & steigende Zinserwartungen")
-        elif gp < -15:
+        elif gp is not None and gp < -15:
             bullets.append("- Niedrige Renditen & sinkende Zinserwartungen")
             
-        if inf > 15:
+        if inf is not None and inf > 15:
             bullets.append("+ Erhöhter Inflationsdruck über dem Target")
-        elif inf < -15:
+        elif inf is not None and inf < -15:
             bullets.append("- Niedriger Inflationsdruck")
             
-        if lab > 15:
+        if lab is not None and lab > 15:
             bullets.append("+ Starker & robuster Arbeitsmarkt")
-        elif lab < -15:
+        elif lab is not None and lab < -15:
             bullets.append("- Schwacher Arbeitsmarkt")
             
-        if pmi > 15:
+        if pmi is not None and pmi > 15:
             bullets.append("+ PMI-Frühindikatoren signalisieren Expansion")
-        elif pmi < -15:
+        elif pmi is not None and pmi < -15:
             bullets.append("- PMI-Frühindikatoren signalisieren Kontraktion")
             
-        if gdp > 15:
+        if gdp is not None and gdp > 15:
             bullets.append("+ Robustes Wirtschaftswachstum (GDP)")
-        elif gdp < -15:
+        elif gdp is not None and gdp < -15:
             bullets.append("- Schwaches Wirtschaftswachstum (GDP)")
     except Exception:
         pass
     if not bullets:
-        bullets.append("⚪ Neutrale fundamentale Gesamtlage")
+        bullets.append("⚪ Keine belastbare fundamentale Tendenz aus den verfügbaren Faktoren")
     return bullets
 
 def get_cpi_yoy_details(curr: str, target_date=None):
@@ -4459,113 +4459,121 @@ def get_cpi_yoy_value(curr: str, target_date=None):
     val, _, _, _, _, _ = get_cpi_yoy_details(curr, target_date)
     return val
 
+def finite_number(value):
+    """Return a finite numeric value, preserving unavailable data as None."""
+    try:
+        if isinstance(value, (bool, np.bool_)):
+            return None
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def normalized_freshness(status):
+    """Read freshness independently of decorative badges and PIT annotations."""
+    text = str(status or "").upper()
+    for flag in ("UNAVAILABLE", "FAILED", "STALE", "AGING", "FRESH"):
+        if flag in text:
+            return flag
+    return "UNAVAILABLE"
+
+
+def observation_freshness(reference, target_date, fresh_days, max_days, monthly=False):
+    """Missing/future references cannot certify current data.
+
+    Monthly period labels use period end for age, without allowing a future
+    reference month. PMI uses the existing monthly labour limits: 45/90 days.
+    These are data-eligibility limits, not changes to CORE scoring weights.
+    """
+    try:
+        if reference is None or isinstance(reference, (int, float)):
+            return "UNAVAILABLE"
+        if isinstance(reference, str) and not reference.strip():
+            return "UNAVAILABLE"
+        if isinstance(reference, str):
+            parsed = None
+            for fmt in ("%b/%y", "%b/%Y", "%b %Y", "%Y-%m", "%m/%Y"):
+                try:
+                    parsed = datetime.strptime(reference.strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            reference = parsed if parsed is not None else reference
+        observed = pd.to_datetime(reference)
+        target = pd.to_datetime(target_date)
+        if pd.isna(observed) or observed > target:
+            return "UNAVAILABLE"
+        age_reference = observed + pd.offsets.MonthEnd(0) if monthly else observed
+        age = max(0, (target - age_reference).days)
+        return "FRESH" if age <= fresh_days else "AGING" if age <= max_days else "STALE"
+    except (TypeError, ValueError, OverflowError):
+        return "UNAVAILABLE"
+
+
+def get_macro_observation_details(curr, category, target_date=None):
+    """Keep a labour/GDP value attached to the source and date used to judge it.
+
+    Annual World Bank observations remain historical research only. They cannot
+    stand in for the current monthly labour or quarterly GDP observation.
+    """
+    target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
+    series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
+    result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
+              "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
+    try:
+        df, _, is_live = get_fred_data(series_id, FRED_KEY)
+        if df is not None and not df.empty and (is_live or check_demo_active()):
+            frame = df.copy()
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+            frame = frame[frame["date"] <= target_dt].sort_values("date").drop_duplicates("date", keep="last")
+            if not frame.empty:
+                observed = frame.iloc[-1]["date"]
+                value = frame.iloc[-1]["value"]
+                if category == "GDP" and series_id == "GDPC1":
+                    # Match the same quarter a year earlier; missing quarters
+                    # must not silently turn a four-row change into YoY.
+                    previous = frame[frame["date"] == observed - pd.DateOffset(years=1)]
+                    prior = finite_number(previous.iloc[-1]["value"]) if not previous.empty else None
+                    value = (float(value) / prior - 1.0) * 100.0 if prior not in (None, 0.0) else None
+                value = finite_number(value)
+                freshness = observation_freshness(observed, target_dt, 45 if category == "Arbeitsmarkt" else 120,
+                                                  90 if category == "Arbeitsmarkt" else 180,
+                                                  monthly=category == "Arbeitsmarkt")
+                valid_range = value is not None and (0 <= value <= 25 if category == "Arbeitsmarkt" else abs(value) <= 25)
+                result.update(date=observed.strftime("%Y-%m-%d"), source="FRED" if is_live else "Demo",
+                              freshness=freshness if valid_range else "FAILED")
+                if valid_range and freshness in ("FRESH", "AGING"):
+                    result["value"] = value
+                return result
+    except Exception:
+        result["freshness"] = "UNAVAILABLE"
+
+    # Preserve the research fallback, explicitly identified as annual and never
+    # eligible for the live CORE. Do not relabel it FRESH from an empty FRED fetch.
+    if (pd.Timestamp(datetime.now().date()) - target_dt).days > 365:
+        try:
+            indicator = "SL.UEM.TOTL.ZS" if category == "Arbeitsmarkt" else "NY.GDP.MKTP.KD.ZG"
+            value, observed, is_live = get_worldbank_data_historical(CURRENCIES[curr]["wb_code"], indicator, target_dt)
+            value = finite_number(value)
+            freshness = observation_freshness(observed, target_dt, 730, 730)
+            if value is not None and abs(value) <= 25 and freshness == "FRESH" and (is_live or check_demo_active()):
+                result.update(value=value, date=pd.to_datetime(observed).strftime("%Y-%m-%d"),
+                              source="World Bank (Historical Annual)", series_id=indicator,
+                              freshness="HISTORICAL_ANNUAL", frequency="annual")
+        except Exception:
+            pass
+    return result
+
+
 def get_unemployment_value(curr: str, target_date=None):
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = UNEMP_SERIES.get(curr, "UNRATE")
-        df, _, is_live = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(dt_str)
-                df_filtered = df[df["date"] <= target_dt].sort_values("date")
-                if not df_filtered.empty:
-                    obs_date = df_filtered.iloc[-1]["date"]
-                    days_diff = (target_dt - obs_date).days
-                    if days_diff > 90:
-                        return None  # Stale!
-                    val = df_filtered.iloc[-1]["value"]
-                    if pd.notna(val):
-                        if abs(val) > 25.0:
-                            return None
-                        return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, act_dt, is_live = get_worldbank_data_historical(code, "SL.UEM.TOTL.ZS", target_date)
-        if val is not None:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(target_date)
-                if act_dt is not None:
-                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
-                    if days_diff > 365 * 2:
-                        return None
-                if abs(val) > 25.0:
-                    return None
-                return float(val)
-    except Exception:
-        pass
-    if check_demo_active():
-        return 5.0
-    return None
+    return get_macro_observation_details(curr, "Arbeitsmarkt", target_date)["value"]
+
 
 def get_gdp_yoy_value(curr: str, target_date=None):
-    try:
-        fred_key = FRED_KEY
-        if target_date is None:
-            dt_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-            
-        series_id = GDP_SERIES.get(curr, "GDPC1")
-        df, _, is_live = get_fred_data(series_id, fred_key)
-        if df is not None and not df.empty:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                df_c = df.copy()
-                target_dt = pd.to_datetime(dt_str)
-                df_filtered = df_c[df_c["date"] <= target_dt].sort_values("date")
-                
-                if not df_filtered.empty:
-                    # Check freshness first (quarterly, max 270 days)
-                    obs_date = df_filtered.iloc[-1]["date"]
-                    days_diff = (target_dt - obs_date).days
-                    if days_diff > 180:
-                        return None  # Stale!
-                        
-                    if series_id == "GDPC1":
-                        df_c["yoy"] = df_c["value"].pct_change(periods=4) * 100
-                        df_f_yoy = df_c[df_c["date"] <= target_dt].sort_values("date")
-                        val = df_f_yoy.iloc[-1]["yoy"] if not df_f_yoy.empty else None
-                    else:
-                        val = df_filtered.iloc[-1]["value"]
-                        
-                    if val is not None and pd.notna(val):
-                        if abs(val) > 25.0:
-                            return None
-                        return float(val)
-    except Exception:
-        pass
-    try:
-        code = CURRENCIES[curr]["wb_code"]
-        val, act_dt, is_live = get_worldbank_data_historical(code, "NY.GDP.MKTP.KD.ZG", target_date)
-        if val is not None:
-            if not is_live and not check_demo_active():
-                pass
-            else:
-                target_dt = pd.to_datetime(target_date)
-                if act_dt is not None:
-                    days_diff = (target_dt - pd.to_datetime(act_dt)).days
-                    if days_diff > 365 * 2:
-                        return None
-                if abs(val) > 25.0:
-                    return None
-                return float(val)
-    except Exception:
-        pass
-    if check_demo_active():
-        return 1.5
-    return None
+    return get_macro_observation_details(curr, "GDP", target_date)["value"]
+
 
 def get_composite_pmi_score(curr: str, target_date=None):
     """Calculates the composite PMI score (Mfg + Svc average) for a given currency."""
@@ -4699,10 +4707,7 @@ def get_surprise_points(curr: str, category: str, target_date=None) -> float:
     except Exception:
         pass
         
-    import random
-    random.seed(hash(curr + category + str(target_date or "")) % 5000)
-    if random.random() < 0.35:
-        return random.choice([-20.0, 20.0])
+    # No observed release means no surprise contribution; never fabricate data.
     return 0.0
 
 def detect_market_regime(curr: str, target_date=None) -> str:
@@ -4890,329 +4895,159 @@ def get_bci_value(curr: str, target_date=None) -> dict:
         "source": source
     }
 
+CORE_FACTOR_WEIGHTS = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
+
+
 def compute_currency_details(curr: str, target_date=None) -> dict:
-    fred_key = FRED_KEY
-    if target_date is None:
-        dt_str = datetime.now().strftime("%Y-%m-%d")
-    else:
-        dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d")
-        
-    scores = {
-        "Geldpolitik": None,
-        "Inflation": None,
-        "Arbeitsmarkt": None,
-        "PMI": None,
-        "GDP": None
-    }
-    
-    missing = []
-    
-    # Freshness mapping
-    gp_freshness = "STALE"
-    cpi_freshness = "STALE"
-    lab_freshness = "STALE"
-    pmi_freshness = "STALE"
-    gdp_freshness = "STALE"
+    """Evaluate each CORE factor independently and fail closed on its errors."""
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
+    scores = {factor: None for factor in CORE_FACTOR_WEIGHTS}
+    freshness = {factor: "UNAVAILABLE" for factor in CORE_FACTOR_WEIGHTS}
+    observations = {}
+
     try:
-        # 1. Geldpolitik (Interest Rate / Yield)
-        pol_obj = get_verified_policy_rate(curr)
-        policy_rate = pol_obj.get("rate")
-        # Fail-closed if status is unverified change or source unavailable
-        if pol_obj.get("status") in ["🔴 UNVERIFIED CHANGE", "🔴 OFFICIAL SOURCE UNAVAILABLE"]:
-            policy_rate = None
-            
-        yield_2y, act_dt, is_live = get_genuine_2y_yield_historical(curr, dt_str, fred_key, EODHD_KEY)
-        
-        if policy_rate is not None and yield_2y is not None:
-            days_2y = (pd.to_datetime(dt_str) - pd.to_datetime(act_dt)).days if act_dt else 999
-            if days_2y <= 5:
-                gp_freshness = "FRESH"
-            elif days_2y <= 15:
-                gp_freshness = "AGING"
-                
-        if gp_freshness == "STALE":
-            missing.append("Geldpolitik")
-        else:
+        policy = get_verified_policy_rate(curr)
+        policy_rate = finite_number(policy.get("rate")) if policy_rate_is_usable(policy) else None
+        yield_2y, observed, source = get_genuine_2y_yield_historical(curr, dt_str, FRED_KEY, EODHD_KEY)
+        yield_2y = finite_number(yield_2y)
+        freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
+        observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
+        if freshness["Geldpolitik"] in ("FRESH", "AGING"):
             gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
             gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
-            scores["Geldpolitik"] = np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0)
-            
-        # 2. Inflation
-        cpi_val, obs_date, metric_type, source, series_id, cpi_freshness = get_cpi_yoy_details(curr, dt_str)
-        if cpi_val is None or "STALE" in cpi_freshness or "UNAVAILABLE" in cpi_freshness or "FAILED" in cpi_freshness:
-            missing.append("Inflation")
-        else:
-            scores["Inflation"] = np.clip((cpi_val - 2.0) * 50.0, -100.0, 100.0)
-            
-        # 3. Arbeitsmarkt
-        unrate = get_unemployment_value(curr, dt_str)
-        if unrate is not None:
-            series_id = UNEMP_SERIES.get(curr, "UNRATE")
-            df_un, _, _ = get_fred_data(series_id, fred_key)
-            if df_un is not None and not df_un.empty:
-                df_filtered = df_un[df_un["date"] <= pd.to_datetime(dt_str)].sort_values("date")
-                if not df_filtered.empty:
-                    obs_dt = df_filtered.iloc[-1]["date"]
-                    days = max(0, (pd.to_datetime(dt_str) - (obs_dt + pd.offsets.MonthEnd(0))).days)
-                    lab_freshness = "FRESH" if days <= 45 else "AGING" if days <= 90 else "STALE"
-            else:
-                lab_freshness = "FRESH"
-                
-        if lab_freshness == "STALE":
-            missing.append("Arbeitsmarkt")
-        else:
-            scores["Arbeitsmarkt"] = np.clip((5.0 - unrate) / 3.0 * 100.0, -100.0, 100.0)
-            
-        # 4. PMI
-        pmi_all = get_all_pmi_data(fred_key, EODHD_KEY, target_date=dt_str)
-        pmi_data = pmi_all.get(curr, {}) if pmi_all else {}
-        m_val = pmi_data.get("m_last")
-        s_val = pmi_data.get("s_last")
-        pmi_vals = [v for v in [m_val, s_val] if v is not None and v > 0]
-        if pmi_vals:
-            pmi_freshness = "FRESH"
-            
-        if pmi_freshness == "STALE":
-            missing.append("PMI")
-        else:
-            pmi_avg = np.mean(pmi_vals)
-            scores["PMI"] = np.clip((pmi_avg - 50.0) / 10.0 * 100.0, -100.0, 100.0)
-            
-        # 5. GDP
-        gdp = get_gdp_yoy_value(curr, dt_str)
-        if gdp is not None:
-            series_id = GDP_SERIES.get(curr, "GDPC1")
-            df_gdp, _, _ = get_fred_data(series_id, fred_key)
-            if df_gdp is not None and not df_gdp.empty:
-                df_filtered = df_gdp[df_gdp["date"] <= pd.to_datetime(dt_str)].sort_values("date")
-                if not df_filtered.empty:
-                    obs_dt = df_filtered.iloc[-1]["date"]
-                    days = (pd.to_datetime(dt_str) - obs_dt).days
-                    gdp_freshness = "FRESH" if days <= 120 else "AGING" if days <= 180 else "STALE"
-            else:
-                gdp_freshness = "FRESH"
-                
-        if gdp_freshness == "STALE":
-            missing.append("GDP")
-        else:
-            scores["GDP"] = np.clip((gdp - 1.5) / 1.5 * 100.0, -100.0, 100.0)
-            
+            scores["Geldpolitik"] = float(np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0))
     except Exception:
-        pass
-        
-    bci_data = get_bci_value(curr, dt_str)
-    if bci_data is not None:
-        scores["BCI"] = bci_data["value"]
-    else:
+        freshness["Geldpolitik"] = "UNAVAILABLE"
+
+    try:
+        cpi, observed, metric_type, source, series_id, status = get_cpi_yoy_details(curr, dt_str)
+        cpi = finite_number(cpi)
+        freshness["Inflation"] = status
+        observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+        if cpi is not None and normalized_freshness(status) in ("FRESH", "AGING"):
+            scores["Inflation"] = float(np.clip((cpi - 2.0) * 50.0, -100.0, 100.0))
+    except Exception:
+        freshness["Inflation"] = "UNAVAILABLE"
+
+    try:
+        labour = get_macro_observation_details(curr, "Arbeitsmarkt", dt_str)
+        observations["Arbeitsmarkt"] = labour
+        freshness["Arbeitsmarkt"] = labour["freshness"]
+        value = finite_number(labour.get("value"))
+        if value is not None and normalized_freshness(labour["freshness"]) in ("FRESH", "AGING") and labour.get("frequency") != "annual":
+            scores["Arbeitsmarkt"] = float(np.clip((5.0 - value) / 3.0 * 100.0, -100.0, 100.0))
+    except Exception:
+        freshness["Arbeitsmarkt"] = "UNAVAILABLE"
+
+    try:
+        pmi = (get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=dt_str) or {}).get(curr, {})
+        eligible = []
+        component_status = []
+        observations["PMI"] = dict(pmi)
+        for component in ("m", "s"):
+            value = finite_number(pmi.get(f"{component}_last"))
+            status = observation_freshness(pmi.get(f"{component}_ref"), dt_str, 45, 90, monthly=True)
+            observations["PMI"][f"{component}_freshness"] = status
+            if value is not None and 0 < value <= 100 and status in ("FRESH", "AGING"):
+                eligible.append(value)
+                component_status.append(status)
+        observations["PMI"]["value"] = float(np.mean(eligible)) if eligible else None
+        if eligible:
+            freshness["PMI"] = "AGING" if "AGING" in component_status else "FRESH"
+            scores["PMI"] = float(np.clip((observations["PMI"]["value"] - 50.0) / 10.0 * 100.0, -100.0, 100.0))
+        else:
+            freshness["PMI"] = "STALE" if any(observations["PMI"].get(f"{c}_freshness") == "STALE" for c in ("m", "s")) else "UNAVAILABLE"
+    except Exception:
+        freshness["PMI"] = "UNAVAILABLE"
+
+    try:
+        gdp = get_macro_observation_details(curr, "GDP", dt_str)
+        observations["GDP"] = gdp
+        freshness["GDP"] = gdp["freshness"]
+        value = finite_number(gdp.get("value"))
+        if value is not None and normalized_freshness(gdp["freshness"]) in ("FRESH", "AGING") and gdp.get("frequency") != "annual":
+            scores["GDP"] = float(np.clip((value - 1.5) / 1.5 * 100.0, -100.0, 100.0))
+    except Exception:
+        freshness["GDP"] = "UNAVAILABLE"
+
+    try:
+        bci = get_bci_value(curr, dt_str)
+        scores["BCI"] = finite_number(bci.get("value")) if bci else None
+    except Exception:
         scores["BCI"] = None
-        
-    scores["_missing"] = missing
-    
-    # Weighted completeness: GP=35, CPI=20, LAB=20, PMI=20, GDP=5
-    weights_map = {
-        "Geldpolitik": 35.0,
-        "Inflation": 20.0,
-        "Arbeitsmarkt": 20.0,
-        "PMI": 20.0,
-        "GDP": 5.0
-    }
-    scores["_completeness"] = sum(weights_map[k] for k in weights_map if k not in missing)
-    
-    scores["_freshness"] = {
-        "Geldpolitik": gp_freshness,
-        "Inflation": cpi_freshness,
-        "Arbeitsmarkt": lab_freshness,
-        "PMI": pmi_freshness,
-        "GDP": gdp_freshness
-    }
+    scores["_missing"] = [factor for factor in CORE_FACTOR_WEIGHTS if finite_number(scores[factor]) is None]
+    scores["_completeness"] = sum(weight for factor, weight in CORE_FACTOR_WEIGHTS.items() if factor not in scores["_missing"])
+    scores["_freshness"] = freshness
+    scores["_observations"] = observations
     return scores
 
 
 def compute_currency_professional_score_and_regime(curr: str, target_date=None):
-    
-    # Load dynamically from session state if promoted, otherwise default to CORE v1 Baseline
-    weights = st.session_state.get("active_live_model_weights")
-    if weights is None:
-        weights = {
-            "Geldpolitik": 35.0,
-            "Inflation": 20.0,
-            "Arbeitsmarkt": 20.0,
-            "PMI": 20.0,
-            "GDP": 5.0,
-            "ForwardRates": 0.0,
-            "InflationExpectations": 0.0,
-            "EconomicSurprises": 0.0,
-            "BCI": 0.0,
-            "Correction": 100.0
-        }
-        
-    return compute_currency_professional_score_and_regime_custom(curr, weights, target_date)
+    return compute_currency_professional_score_and_regime_custom(curr, None, target_date)
+
 
 def compute_currency_professional_score_and_regime_custom(curr: str, weights: dict = None, target_date=None):
-    if weights is None:
-        weights = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
-    regime = detect_market_regime(curr, target_date)
+    # Signature retained for callers; frozen live weights cannot be promoted or
+    # changed through session state, custom dictionaries or context parameters.
+    weights = CORE_FACTOR_WEIGHTS
     scores = compute_currency_details(curr, target_date)
-    
-    w_gp = weights.get("Geldpolitik", 35.0) / 100.0
-    w_inf = weights.get("Inflation", 20.0) / 100.0
-    w_lab = weights.get("Arbeitsmarkt", 20.0) / 100.0
-    w_pmi = weights.get("PMI", 20.0) / 100.0
-    w_gdp = weights.get("GDP", 5.0) / 100.0
-    w_fw = weights.get("ForwardRates", 0.0) / 100.0
-    w_inf_exp = weights.get("InflationExpectations", 0.0) / 100.0
-    w_surp = weights.get("EconomicSurprises", 0.0) / 100.0
-    w_bci = weights.get("BCI", 0.0) / 100.0
-    w_corr = weights.get("Correction", 100.0) / 100.0
-    
-    fw_score = 0.0
-    fw_available = False
-    if w_fw > 0.0:
-        try:
-            fd = get_forward_rates_data(curr, target_date)
-            exp_chg = fd.get("expected_change")
-            if exp_chg is not None:
-                fw_score = float(np.clip(exp_chg * 10.0, -10.0, 10.0))
-                fw_available = True
-        except Exception:
-            pass
-            
-    inf_exp_score = 0.0
-    inf_exp_available = False
-    if w_inf_exp > 0.0:
-        try:
-            ed = get_inflation_expectations_data(curr, target_date)
-            oecd_val = ed.get("oecd_expectation")
-            if oecd_val is not None:
-                expect_id = OECD_INFLATION_EXP_SERIES.get(curr)
-                if expect_id:
-                    df, _, is_live = get_fred_data(expect_id, FRED_KEY)
-                    if df is not None and not df.empty:
-                        target_dt = pd.to_datetime(target_date) if target_date else datetime.now()
-                        df_past = df[df["date"] <= target_dt]
-                        if len(df_past) >= 24:
-                            mean_past = float(df_past["value"].mean())
-                            std_past = float(df_past["value"].std())
-                            if std_past > 0:
-                                z = (float(oecd_val) - mean_past) / std_past
-                                z_clipped = float(np.clip(z, -2.0, 2.0))
-                                inf_exp_score = z_clipped * 5.0
-                                inf_exp_available = True
-        except Exception:
-            pass
-            
-    surp_score = 0.0
-    surp_available = False
-    if w_surp > 0.0:
-        try:
-            s_val, _ = compute_currency_surprise_score(curr, target_date=target_date)
-            if s_val is not None:
-                surp_score = float(s_val)
-                surp_available = True
-        except Exception:
-            pass
+    missing = set(scores.get("_missing", []))
+    for factor in CORE_FACTOR_WEIGHTS:
+        if finite_number(scores.get(factor)) is None:
+            scores[factor] = None
+            missing.add(factor)
+    scores["_missing"] = [factor for factor in CORE_FACTOR_WEIGHTS if factor in missing]
+    scores["_completeness"] = sum(weight for factor, weight in CORE_FACTOR_WEIGHTS.items() if factor not in missing)
+    # Context-only additions can never enter BASE CORE, even in custom research.
+    active = {factor: (scores[factor], weights.get(factor, default) / 100.0)
+              for factor, default in CORE_FACTOR_WEIGHTS.items() if factor not in missing}
+    total_weight = sum(weight for value, weight in active.values())
+    core_score = sum(value * weight for value, weight in active.values()) / total_weight if total_weight > 0 else None
 
-    # Extract target date string for trend and surprise lookups
-    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date else datetime.now().strftime("%Y-%m-%d")
-    
-    # Calculate trend points
-    gp_trend = get_series_trend_points(YIELD_2Y_SERIES.get(curr, "DGS2"), dt_str)
-    cpi_trend = get_series_trend_points(CPI_SERIES.get(curr, "CPIAUCSL"), dt_str)
-    lab_trend = get_series_trend_points(UNEMP_SERIES.get(curr, "UNRATE"), dt_str, reverse=True)
-    pmi_trend = get_series_trend_points(PMI_SERIES.get(curr, "MANEMP") if curr in PMI_SERIES else "USISMT", dt_str)
-    gdp_trend = get_series_trend_points(GDP_SERIES.get(curr, "GDPC1"), dt_str)
-    
-    gp_surprise = get_surprise_points(curr, "Geldpolitik", dt_str)
-    cpi_surprise = get_surprise_points(curr, "Inflation", dt_str)
-    lab_surprise = get_surprise_points(curr, "Arbeitsmarkt", dt_str)
-    pmi_surprise = get_surprise_points(curr, "Wachstum", dt_str)
+    dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
+    series = {"Geldpolitik": YIELD_2Y_SERIES.get(curr), "Inflation": CPI_SERIES.get(curr),
+              "Arbeitsmarkt": UNEMP_SERIES.get(curr), "PMI": PMI_SERIES.get(curr), "GDP": GDP_SERIES.get(curr)}
+    trends, surprises = {}, {}
+    for factor in CORE_FACTOR_WEIGHTS:
+        trends[factor] = 0.0
+        surprises[factor] = 0.0
+        if factor not in missing:
+            try:
+                trends[factor] = finite_number(get_series_trend_points(series[factor], dt_str, reverse=factor == "Arbeitsmarkt")) or 0.0
+            except Exception:
+                pass
+            if factor != "GDP":
+                try:
+                    surprises[factor] = finite_number(get_surprise_points(curr, "Wachstum" if factor == "PMI" else factor, dt_str)) or 0.0
+                except Exception:
+                    pass
+    trend_score = sum(trends[factor] * weight for factor, (_, weight) in active.items()) / total_weight if total_weight > 0 else 0.0
+    surprise_score = sum(surprises[factor] * weight for factor, (_, weight) in active.items()) / total_weight if total_weight > 0 else 0.0
+    try:
+        corr_score = (finite_number(compute_correction_score(curr, target_date)) or 0.0) * weights.get("Correction", 100.0) / 100.0
+    except Exception:
+        corr_score = 0.0
+    try:
+        regime = detect_market_regime(curr, target_date)
+    except Exception:
+        regime = "Normal"
 
-    # Dynamic Weight Normalization for BASE CORE
-    available_factors = {}
-    missing_factors = scores.get("_missing", [])
-    
-    if "Geldpolitik" not in missing_factors and scores.get("Geldpolitik") is not None:
-        available_factors["Geldpolitik"] = (scores["Geldpolitik"], w_gp)
-    if "Inflation" not in missing_factors and scores.get("Inflation") is not None:
-        available_factors["Inflation"] = (scores["Inflation"], w_inf)
-    if "Arbeitsmarkt" not in missing_factors and scores.get("Arbeitsmarkt") is not None:
-        available_factors["Arbeitsmarkt"] = (scores["Arbeitsmarkt"], w_lab)
-    if "PMI" not in missing_factors and scores.get("PMI") is not None:
-        available_factors["PMI"] = (scores["PMI"], w_pmi)
-    if "GDP" not in missing_factors and scores.get("GDP") is not None:
-        available_factors["GDP"] = (scores["GDP"], w_gdp)
-        
-    if w_fw > 0.0 and fw_available:
-        available_factors["ForwardRates"] = (fw_score, w_fw)
-    if w_inf_exp > 0.0 and inf_exp_available:
-        available_factors["InflationExpectations"] = (inf_exp_score, w_inf_exp)
-    if w_surp > 0.0 and surp_available:
-        available_factors["EconomicSurprises"] = (surp_score, w_surp)
-    if w_bci > 0.0 and scores.get("BCI") is not None:
-        available_factors["BCI"] = (scores["BCI"], w_bci)
-
-    total_weight = sum(weight for val, weight in available_factors.values())
-    if total_weight > 0.0:
-        core_score = sum(val * (weight / total_weight) for val, weight in available_factors.values())
-    else:
-        core_score = 0.0
-
-    # Calculate isolated trends and surprises scores
-    core_total_weight = sum(weights[k] / 100.0 for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"] if k not in missing_factors)
-    active_trend = 0.0
-    active_surprise = 0.0
-    if "Geldpolitik" not in missing_factors:
-        active_trend += gp_trend * w_gp
-        active_surprise += gp_surprise * w_gp
-    if "Inflation" not in missing_factors:
-        active_trend += cpi_trend * w_inf
-        active_surprise += cpi_surprise * w_inf
-    if "Arbeitsmarkt" not in missing_factors:
-        active_trend += lab_trend * w_lab
-        active_surprise += lab_surprise * w_lab
-    if "PMI" not in missing_factors:
-        active_trend += pmi_trend * w_pmi
-        active_surprise += pmi_surprise * w_pmi
-    if "GDP" not in missing_factors:
-        active_trend += gdp_trend * w_gdp
-        
-    trend_score = active_trend / core_total_weight if core_total_weight > 0.0 else 0.0
-    surprise_score = active_surprise / core_total_weight if core_total_weight > 0.0 else 0.0
-
-    corr_score = compute_correction_score(curr, target_date) * w_corr
-    final_score = np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0)
-    
-    # Enforce minimum data coverage of 50.0%
-    if scores.get("_completeness", 100.0) < 50.0:
-        diagnostic_partial_core = core_score
+    scores["_diagnostic_partial_score"] = core_score
+    if scores["_completeness"] < 50.0 or core_score is None:
         core_score = None
         final_score = None
-        trend_score = 0.0
-        surprise_score = 0.0
+        trend_score = surprise_score = 0.0
         scores["_core_status"] = "INSUFFICIENT DATA"
-        scores["_diagnostic_partial_score"] = diagnostic_partial_core
     else:
+        final_score = float(np.clip(core_score + trend_score + surprise_score + corr_score, -100.0, 100.0))
         scores["_core_status"] = "VALID"
-        scores["_diagnostic_partial_score"] = core_score
-    
-    # Store context scores inside the returned details dict
     scores["_trend_score"] = trend_score
     scores["_surprise_score"] = surprise_score
-    scores["_trend_details"] = {
-        "gp_trend": gp_trend, "cpi_trend": cpi_trend, "lab_trend": lab_trend,
-        "pmi_trend": pmi_trend, "gdp_trend": gdp_trend
-    }
-    scores["_surprise_details"] = {
-        "gp_surprise": gp_surprise, "cpi_surprise": cpi_surprise, "lab_surprise": lab_surprise,
-        "pmi_surprise": pmi_surprise
-    }
-    
-    # Preserve key integrity for callers
-    for k in ["Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"]:
-        if scores[k] is None:
-            scores[k] = 0.0
-            
+    scores["_trend_details"] = dict(zip(("gp_trend", "cpi_trend", "lab_trend", "pmi_trend", "gdp_trend"), trends.values()))
+    scores["_surprise_details"] = dict(zip(("gp_surprise", "cpi_surprise", "lab_surprise", "pmi_surprise"), (surprises[k] for k in list(CORE_FACTOR_WEIGHTS)[:4])))
+    # Missing factor scores stay None in UI, charts and persisted snapshots.
     return final_score, regime, core_score, corr_score, scores
+
 
 def compute_currency_score_historical(curr: str, target_date) -> float:
     try:
@@ -5776,6 +5611,11 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
     </div>
     """
     st.markdown(html_content, unsafe_allow_html=True)
+
+def format_score(value, digits=1):
+    number = finite_number(value)
+    return f"{number:+.{digits}f}" if number is not None else "N/A"
+
 
 def render_metric_card(title, val_str, source_text, is_live):
     live_class = "source-tag-live" if is_live else ""
@@ -7055,7 +6895,7 @@ if not getattr(st, "_mock_mode", False):
         g8_data = {}
         for curr in CURRENCIES.keys():
             f_score, regime, core_score, corr_score, cat_scores = compute_currency_professional_score_and_regime(curr)
-            details = compute_currency_details(curr)
+            details = cat_scores
             g8_data[curr] = {
                 "score": f_score,
                 "core": core_score,
@@ -7187,44 +7027,55 @@ if not getattr(st, "_mock_mode", False):
         st.caption("Detaillierte Aufschlüsselung der makroökonomischen Faktoren, Berechnungsformeln und Zeitreihen für jede der 8 G8-Währungen.")
         
         sel_curr_fund = st.selectbox("Wähle eine Währung zur Tiefenanalyse:", list(CURRENCIES.keys()), index=0, key="deepdive_curr_sel")
-        details_f = compute_currency_details(sel_curr_fund)
         f_score_d, reg_d, core_d, corr_d, cats_d = compute_currency_professional_score_and_regime(sel_curr_fund)
+        details_f = cats_d
         
         st.write(f"### Detaillierte Kennzahlen für {CURRENCIES[sel_curr_fund]['flag']} {sel_curr_fund} ({CURRENCIES[sel_curr_fund]['name']})")
         
         col_fd1, col_fd2, col_fd3, col_fd4, col_fd5 = st.columns(5)
         with col_fd1:
-            st.metric("Geldpolitik (35%)", f"{cats_d.get('Geldpolitik', 0.0):+.1f}")
+            st.metric("Geldpolitik (35%)", f"{format_score(cats_d.get('Geldpolitik', 0.0))}")
         with col_fd2:
-            st.metric("Inflation (20%)", f"{cats_d.get('Inflation', 0.0):+.1f}")
+            st.metric("Inflation (20%)", f"{format_score(cats_d.get('Inflation', 0.0))}")
         with col_fd3:
-            st.metric("Arbeitsmarkt (20%)", f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}")
+            st.metric("Arbeitsmarkt (20%)", f"{format_score(cats_d.get('Arbeitsmarkt', 0.0))}")
         with col_fd4:
-            st.metric("PMI (20%)", f"{cats_d.get('PMI', 0.0):+.1f}")
+            st.metric("PMI (20%)", f"{format_score(cats_d.get('PMI', 0.0))}")
         with col_fd5:
-            st.metric("GDP (5%)", f"{cats_d.get('GDP', 0.0):+.1f}")
+            st.metric("GDP (5%)", f"{format_score(cats_d.get('GDP', 0.0))}")
             
         st.write("")
         
         col_deep1, col_deep2 = st.columns([1.2, 1])
         with col_deep1:
             st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
-            rate_val, rate_bps, _ = get_country_rate(CURRENCIES[sel_curr_fund]["wb_code"], FRED_KEY)
-            cpi_val = get_cpi_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            unemp_val = get_unemployment_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            pmi_val, _, _, _ = get_composite_pmi_score(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            gdp_val = get_gdp_yoy_value(sel_curr_fund, datetime.now().strftime("%Y-%m-%d"))
-            y2_det = get_yield_details(sel_curr_fund, YIELD_2Y_SERIES, FRED_KEY)
-            y2_val = y2_det.get("value") if y2_det else None
-            
+            observations = details_f.get("_observations", {})
+            rate_val = observations.get("Geldpolitik", {}).get("policy_rate")
+            y2_val = observations.get("Geldpolitik", {}).get("yield_2y")
+            cpi_val = observations.get("Inflation", {}).get("value")
+            unemp_val = observations.get("Arbeitsmarkt", {}).get("value")
+            pmi_val = observations.get("PMI", {}).get("value")
+            gdp_val = observations.get("GDP", {}).get("value")
+
             raw_metrics = [
-                {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-                {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Geldpolitik', 0.0):+.1f} (Blended)"},
-                {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Inflation', 0.0):+.1f}"},
-                {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('Arbeitsmarkt', 0.0):+.1f}"},
-                {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{cats_d.get('PMI', 0.0):+.1f}"},
-                {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{cats_d.get('GDP', 0.0):+.1f}"}
+                {"Kategorie": "Zentralbank Leitzins", "Wert": f"{rate_val:.2f}%" if rate_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Geldpolitik', 0.0))} (Blended)"},
+                {"Kategorie": "2Y Sovereign Yield", "Wert": f"{y2_val:.3f}%" if y2_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Geldpolitik', 0.0))} (Blended)"},
+                {"Kategorie": "Verbraucherpreise (CPI YoY)", "Wert": f"{cpi_val:.2f}%" if cpi_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Inflation', 0.0))}"},
+                {"Kategorie": "Arbeitslosenquote", "Wert": f"{unemp_val:.2f}%" if unemp_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('Arbeitsmarkt', 0.0))}"},
+                {"Kategorie": "PMI Einkaufsmanagerindex", "Wert": f"{pmi_val:.1f}" if pmi_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('PMI', 0.0))}"},
+                {"Kategorie": "Reales BIP-Wachstum (YoY)", "Wert": f"{gdp_val:.2f}%" if gdp_val is not None else "N/A", "Modell-Score": f"{format_score(cats_d.get('GDP', 0.0))}"}
             ]
+            for row, factor in zip(raw_metrics, ("Geldpolitik", "Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")):
+                observation = observations.get(factor, {})
+                row["Quelle"] = observation.get("source") or "N/A"
+                row["Bezugsdatum"] = str(observation.get("date") or "N/A")
+                if factor == "PMI":
+                    row["Quelle"] = " / ".join(str(observation.get(f"{c}_src") or "N/A") for c in ("m", "s"))
+                    row["Bezugsdatum"] = " / ".join(str(observation.get(f"{c}_ref") or "N/A") for c in ("m", "s"))
+            # The monetary factor stores the 2Y observation; do not attribute
+            # that source/date to the independently verified policy rate.
+            raw_metrics[0]["Quelle"] = "Verified Policy Rate Center"
+            raw_metrics[0]["Bezugsdatum"] = "Siehe Policy Rate Center"
             st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
     
             st.subheader("📈 TREND & MOMENTUM CONTEXT")
@@ -7256,19 +7107,21 @@ if not getattr(st, "_mock_mode", False):
             st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
             st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
             st.write(f"- **Markt-Regime:** `{reg_d}`")
-            st.write(f"- **Model Version:** `CORE_V2_2_2026_08` (Schema: `2.0`)")
+            st.write(f"- **Model Version:** `{CURRENT_MODEL_VERSION}` (Schema: `2.0`)")
             
             st.subheader("🟢 Freshness & Data Quality Indicators")
             st.write(f"- **Datenvollständigkeit:** `{details_f.get('_completeness', 100.0):.0f}%`")
             freshness_map = details_f.get("_freshness", {})
             for factor, status in freshness_map.items():
-                badge_color = "🟢" if status == "FRESH" else "🟡" if status == "AGING" else "🔴"
+                badge_color = "🟢" if normalized_freshness(status) == "FRESH" else "🟡" if normalized_freshness(status) == "AGING" else "🔴"
                 st.write(f"- **{factor} Freshness:** {badge_color} `{status}`")
                 
             if details_f.get("_missing"):
                 st.warning(f"⚠️ Fehlende/Stale Faktoren: {', '.join(details_f.get('_missing'))}")
+            elif any(normalized_freshness(status) == "AGING" for status in freshness_map.values()):
+                st.warning("🟡 Alle CORE-Faktoren verfügbar; einzelne Beobachtungen sind AGING. Die Datumsangaben oben beachten.")
             else:
-                st.success("🟢 Alle CORE-Faktoren vollständig & aktuell (100% Valid).")
+                st.success("🟢 Alle CORE-Faktoren vollständig und innerhalb ihrer Aktualitätsgrenzen.")
     
             st.subheader("🌎 MARKET CONTEXT & RESEARCH FACTORS")
             y5_det = get_yield_details(sel_curr_fund, YIELD_5Y_SERIES, FRED_KEY)
@@ -7565,20 +7418,20 @@ if not getattr(st, "_mock_mode", False):
                 st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
                 st.metric("BASE CORE Score", f"{b_core:+.1f}" if b_core is not None else "N/A", delta=f"Regime: {b_reg}")
                 st.write(f"- Gesamt/Kontext-Score: `{b_score_str}`")
-                st.write(f"- Geldpolitik: `{b_details.get('Geldpolitik', 0.0):+.1f}`")
-                st.write(f"- Inflation: `{b_details.get('Inflation', 0.0):+.1f}`")
-                st.write(f"- Arbeitsmarkt: `{b_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-                st.write(f"- PMI: `{b_details.get('PMI', 0.0):+.1f}`")
-                st.write(f"- GDP: `{b_details.get('GDP', 0.0):+.1f}`")
+                st.write(f"- Geldpolitik: `{format_score(b_details.get('Geldpolitik', 0.0))}`")
+                st.write(f"- Inflation: `{format_score(b_details.get('Inflation', 0.0))}`")
+                st.write(f"- Arbeitsmarkt: `{format_score(b_details.get('Arbeitsmarkt', 0.0))}`")
+                st.write(f"- PMI: `{format_score(b_details.get('PMI', 0.0))}`")
+                st.write(f"- GDP: `{format_score(b_details.get('GDP', 0.0))}`")
             with col_pb2:
                 st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
                 st.metric("BASE CORE Score", f"{q_core:+.1f}" if q_core is not None else "N/A", delta=f"Regime: {q_reg}")
                 st.write(f"- Gesamt/Kontext-Score: `{q_score_str}`")
-                st.write(f"- Geldpolitik: `{q_details.get('Geldpolitik', 0.0):+.1f}`")
-                st.write(f"- Inflation: `{q_details.get('Inflation', 0.0):+.1f}`")
-                st.write(f"- Arbeitsmarkt: `{q_details.get('Arbeitsmarkt', 0.0):+.1f}`")
-                st.write(f"- PMI: `{q_details.get('PMI', 0.0):+.1f}`")
-                st.write(f"- GDP: `{q_details.get('GDP', 0.0):+.1f}`")
+                st.write(f"- Geldpolitik: `{format_score(q_details.get('Geldpolitik', 0.0))}`")
+                st.write(f"- Inflation: `{format_score(q_details.get('Inflation', 0.0))}`")
+                st.write(f"- Arbeitsmarkt: `{format_score(q_details.get('Arbeitsmarkt', 0.0))}`")
+                st.write(f"- PMI: `{format_score(q_details.get('PMI', 0.0))}`")
+                st.write(f"- GDP: `{format_score(q_details.get('GDP', 0.0))}`")
     
     # ----------------- TAB 11: POSITIONING (COT) -----------------
     with tab11:
@@ -7641,9 +7494,10 @@ if not getattr(st, "_mock_mode", False):
             
             num_pairs = len(pair_snapshots)
             completed_outcomes = sum(1 for s in pair_snapshots.values() if s.get("outcome_status") == "COMPLETED")
-            open_outcomes = num_pairs - completed_outcomes
-            
-            col_st1, col_st2, col_st3, col_st4 = st.columns(4)
+            open_outcomes = sum(1 for snapshot in pair_snapshots.values() if snapshot.get("outcome_status", "OPEN") == "OPEN")
+            invalid_outcomes = sum(1 for snapshot in pair_snapshots.values() if snapshot.get("outcome_status") == "INVALID")
+
+            col_st1, col_st2, col_st3, col_st4, col_st5 = st.columns(5)
             with col_st1:
                 st.metric("Einzelwährungs-Snapshots", f"{len(curr_snapshots)}")
             with col_st2:
@@ -7652,6 +7506,8 @@ if not getattr(st, "_mock_mode", False):
                 st.metric("Abgeschlossene Outcomes", f"{completed_outcomes}")
             with col_st4:
                 st.metric("Laufende Outcomes", f"{open_outcomes}")
+            with col_st5:
+                st.metric("Ungültige Outcomes", f"{invalid_outcomes}")
                 
             st.write("")
             hist_sub1, hist_sub2, hist_sub3 = st.tabs([
@@ -7671,12 +7527,8 @@ if not getattr(st, "_mock_mode", False):
                         s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
                         s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
                         
-                        # Score fallback
-                        score_val = s.get("score")
-                        if score_val is None:
-                            score_val = s.get("core_score")
-                        if score_val is None:
-                            score_val = s.get("total_score", 0.0)
+                        # Preserve explicit missing CORE; never substitute a context total.
+                        score_val = s.get("core_score") if "core_score" in s else s.get("score")
                             
                         s_factors = factors if factors else s.get("factor_scores", {})
                         
@@ -7684,7 +7536,7 @@ if not getattr(st, "_mock_mode", False):
                             "Snapshot ID": s_id,
                             "Datum": s_date,
                             "Währung": s_curr,
-                            "Score": f"{score_val:+.1f}" if score_val is not None else "N/A",
+                            "BASE CORE": format_score(score_val),
                             "Regime": s.get("regime", "Neutral"),
                             "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
                             "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
@@ -7712,12 +7564,13 @@ if not getattr(st, "_mock_mode", False):
                             "Datum": s.get("metadata", {}).get("date"),
                             "FX-Paar": s.get("metadata", {}).get("pair"),
                             "Signal": p_sig.get("signal"),
-                            "Divergenz": f"{p_sig.get('divergence', 0.0):+.1f}" if p_sig.get('divergence') is not None else "0.0",
+                            "Divergenz": format_score(p_sig.get("divergence")),
                             "Entry": s.get("entry_price"),
                             "Status": s.get("outcome_status", "OPEN"),
-                            "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "Pending",
-                            "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "Pending",
-                            "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "Pending"
+                            "Fehler / Hinweis": s.get("outcome_error", ""),
+                            "Return 5D": f"{ret5:+.2f}%" if ret5 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending",
+                            "Return 10D": f"{ret10:+.2f}%" if ret10 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending",
+                            "Return 20D": f"{ret20:+.2f}%" if ret20 is not None else "N/A" if s.get("outcome_status") == "INVALID" else "Pending"
                         })
                     df_eval = pd.DataFrame(eval_rows).sort_values("Datum", ascending=False)
                     st.dataframe(df_eval, hide_index=True, use_container_width=True)
@@ -7738,8 +7591,8 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- TAB 13: BACKTESTING & MODEL LAB -----------------
     with tab13:
         st.header("📊 Backtesting, Model Lab & Quant Research")
-        st.caption("Umfassende Research-Umgebung: Historisches Backtesting, Szenario-Simulationen, Modell-Konfiguration, Forward-Testing und technische Datenanalyse.")
-        
+        st.caption("CORE-Baseline und Datenstatus. Die angekündigten Research-Funktionen sind noch nicht implementiert.")
+
         lab1, lab2, lab3, lab4, lab5, lab6 = st.tabs([
             "📊 Fundamental Backtest",
             "🧪 Model Lab & Custom Weights",
@@ -7750,73 +7603,40 @@ if not getattr(st, "_mock_mode", False):
         ])
         
         with lab1:
-            st.subheader("📊 Fundamental FX Backtest Engine")
-            st.caption("Professionelles Backtesting-System zur Validierung fundamentaler Zins- und Makrodivergenzen ohne Look-Ahead Bias.")
-            
-            col_bt1, col_bt2 = st.columns(2)
-            with col_bt1:
-                bt_pair = st.selectbox("FX-Paar:", ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"], index=0, key="bt_pair_lab")
-                bt_hold = st.selectbox("Holding Period (Trading Days):", [5, 10, 15, 20], index=1, key="bt_hold_lab")
-            with col_bt2:
-                bt_thresh = st.slider("Signal Schwellenwert (Divergenz):", 1.0, 20.0, 5.0, step=0.5, key="bt_thresh_lab")
-                bt_days = st.slider("Backtest-Zeitraum (Tage):", 180, 1460, 730, step=90, key="bt_days_lab")
-                
-            if st.button("🚀 Backtest starten", key="btn_run_bt_lab"):
-                with st.spinner(f"Führe fundamentalen Backtest für {bt_pair} über {bt_days} Tage durch..."):
-                    st.success(f"✅ Backtest für {bt_pair} erfolgreich ausgeführt!")
-                    
-                    # Performance metrics
-                    b_c1, b_c2, b_c3, b_c4 = st.columns(4)
-                    with b_c1:
-                        st.metric("Total Trades", "28")
-                    with b_c2:
-                        st.metric("Hit Rate (Win %)", "64.3%")
-                    with b_c3:
-                        st.metric("Sharpe Ratio", "1.42")
-                    with b_c4:
-                        st.metric("Profit Factor", "1.85")
-                        
-                    st.info("ℹ️ Der Backtest basiert zu 100% auf Point-in-Time Makrodaten (Geldpolitik 35%, Inflation 20%, Arbeitsmarkt 20%, PMI 20%, GDP 5%). News- und Finnhub-Faktoren fließen zu 0% ein.")
-                    
+            st.subheader("📊 Fundamental FX Backtest")
+            st.warning("Nicht verfügbar: Es ist keine validierte Backtest-Engine angeschlossen. Es werden keine Trades, Renditen oder Erfolgsquoten berechnet.")
+            st.button("Backtest starten – noch nicht verfügbar", disabled=True, key="btn_run_bt_lab")
+
         with lab2:
-            st.subheader("🧪 Model Lab & Custom Weightings")
-            st.caption("Erstellen und testen Sie eigene Gewichtungsschemata im Vergleich zur CORE-Baseline.")
-            
-            st.write("##### Standard CORE-Baseline:")
-            st.write("- **Geldpolitik (2Y Yields & Leitzinsen):** 35.0%")
-            st.write("- **Inflation / CPI:** 20.0%")
-            st.write("- **Arbeitsmarkt:** 20.0%")
-            st.write("- **PMI Frühindikatoren:** 20.0%")
-            st.write("- **GDP Wachstum:** 5.0%")
-            
+            st.subheader("🧪 CORE-Baseline")
+            st.caption("Die produktive Methodik ist eingefroren. Eigene Modelle können hier noch nicht erstellt oder aktiviert werden.")
+            for factor, weight in CORE_FACTOR_WEIGHTS.items():
+                st.write(f"- **{factor}:** {weight:.1f}%")
+            st.write(f"Modellversion: `{CURRENT_MODEL_VERSION}`")
+
         with lab3:
             st.subheader("🔬 Historical & Quant Research")
-            st.caption("Point-in-Time Zeitreihen und historische Score-Rekonstruktionen.")
-            
-            sel_res_curr = st.selectbox("Währung wählen:", list(CURRENCIES.keys()), key="res_curr_sel")
-            st.write(f"Historische Datenreihen für {CURRENCIES[sel_res_curr]['flag']} {sel_res_curr} werden point-in-time aus FRED geladen.")
-            
+            st.info("Nicht verfügbar: Historische Score-Rekonstruktion und eine Prüfung der zum damaligen Zeitpunkt verfügbaren Daten sind noch nicht implementiert.")
+
         with lab4:
             st.subheader("🚀 Forward Testing & Paper Trading")
-            st.caption("Validieren Sie Ihre Fundamental-Modelle unter Live-Bedingungen.")
-            st.info("Forward Testing läuft parallel zur Live-Datenerfassung in `forward_tests.json`.")
-            
+            st.info("Nicht verfügbar: Es läuft hier kein eigenes Forward-Testing oder Paper Trading. Vorhandene Live-Snapshots finden Sie im Tab Live Signal History & Outcomes.")
+
         with lab5:
             st.subheader("📝 Research Journal")
-            st.caption("Protokollierung von Research-Hypothesen und Modell-Entscheidungen.")
-            st.info("Alle Experimente werden versioniert in `research_journal.json` festgehalten.")
-            
+            st.info("Nicht verfügbar: Das Journal ist noch nicht angebunden; Eingaben und Experimente werden hier nicht aufgezeichnet.")
+
         with lab6:
             st.subheader("🛠 Technical API & Data Status")
-            st.caption("Verbindungsstatus der zugelassenen Datenquellen (ohne News- / Sentiment-APIs).")
+            st.caption("Konfiguration der Datenquellen. Ein vorhandener API-Schlüssel bestätigt keine erfolgreiche Datenabfrage.")
             
             api_health = [
-                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Aktiv 🟢" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
                 {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
-                {"API / Datenquelle": "FCS Price Data API", "Status": "Aktiv 🟢" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Aktiv 🟢" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "World Bank Indicator API", "Status": "Aktiv 🟢 (Direktverbindung)"},
-                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Aktiv 🟢 (Direktverbindung)"}
+                {"API / Datenquelle": "FCS Price Data API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "World Bank Indicator API", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"},
+                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"}
             ]
             st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
             st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
