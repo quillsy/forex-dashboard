@@ -20,4 +20,4 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Run offline regressions
-        run: python -m unittest -v test_core_regressions test_policy_regressions test_eodhd_regressions test_snapshot_regressions test_ui_regressions test_free_sources test_official_macro test_official_yields test_source_contracts test_live_data test_official_inflation test_official_ons test_official_hicp test_official_quarterly_labour
+        run: python -m unittest -v test_core_regressions test_policy_regressions test_eodhd_regressions test_snapshot_regressions test_ui_regressions test_free_sources test_official_macro test_official_yields test_source_contracts test_live_data test_official_inflation test_official_ons test_official_hicp test_official_quarterly_labour test_provider_retry
