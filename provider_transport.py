@@ -28,6 +28,8 @@ class CollectorTransport:
         if os.environ.get("FX_COLLECTOR") != "1":
             raise http.RequestException("LIVE_DATA_IS_COLLECTED_CENTRALLY")
         host = urlparse(url).hostname or "unknown"
+        if (host == "rbnz.govt.nz" or host.endswith(".rbnz.govt.nz")) and os.environ.get("FX_RBNZ_AUTOMATION_APPROVED") != "1":
+            raise http.RequestException("PROVIDER_AUTOMATION_PERMISSION_REQUIRED")
         compromised = {"fcsapi.com", "alphavantage.co", "benzinga.com",
                        "financialmodelingprep.com", "stockdata.org"}
         rotated = set(os.environ.get("FX_ROTATED_PROVIDER_HOSTS", "").split(","))

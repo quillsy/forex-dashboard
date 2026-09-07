@@ -116,7 +116,13 @@ def main():
                 old_count = old.get("requests_observed_utc_day", 0) if old.get("counted_day_utc") == day else 0
                 usage["requests_observed_utc_day"] = int(old_count) + usage["requests_this_run"]
                 usage["counted_day_utc"] = day
-            status["providers"] = app.requests.usage
+            providers = {}
+            for host, old in old_providers.items():
+                providers[host] = dict(old, requests_this_run=0, status="NOT_REQUESTED",
+                    requests_observed_utc_day=old.get("requests_observed_utc_day", 0) if old.get("counted_day_utc") == day else 0,
+                    counted_day_utc=day)
+            providers.update(app.requests.usage)
+            status["providers"] = providers
         counter = {"SUCCESS": "total_successful_runs", "PARTIAL": "total_partial_runs", "FAILED": "total_failed_runs"}[overall]
         status[counter] = status.get(counter, 0) + 1
         status["history"] = (status.get("history", []) + [{"timestamp": timestamp, "status": overall, "error": error}])[-50:]
