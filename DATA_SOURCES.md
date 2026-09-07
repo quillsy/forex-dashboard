@@ -1,6 +1,6 @@
 # Data access and reliability
 
-The frozen CORE model is `CORE_V2_6_2026_08` (35/20/20/20/5). Access keys do not certify data accuracy. Missing, future-dated and stale observations must remain unavailable. Coverage is not a probability of success.
+Current model: `CORE_V2_7_2026_09`. User-approved change on 7 September 2026: pair signals and new pair snapshots require all five CORE factors (100% coverage) on both sides. Currency research retains the 50% availability gate. Factor formulas and weights (35/20/20/20/5) are unchanged. Existing V2.6 and older snapshots remain untouched. Access keys do not certify data accuracy. Missing, future-dated and stale observations must remain unavailable. Coverage is not a probability of success.
 
 ## Verified changes, 7 September 2026
 

@@ -16,7 +16,7 @@ FUNCTIONS = {
     'get_macro_observation_details', 'get_unemployment_value', 'get_gdp_yoy_value',
     'compute_currency_details', 'compute_currency_professional_score_and_regime',
     'compute_currency_professional_score_and_regime_custom', 'get_pair_signal_and_badge',
-    'get_surprise_points', 'format_score',
+    'get_surprise_points', 'format_score', 'pair_core_is_complete',
 }
 CONSTANTS = {'CORE_FACTOR_WEIGHTS', 'UNEMP_SERIES', 'GDP_SERIES', 'YIELD_2Y_SERIES', 'CPI_SERIES', 'PMI_SERIES'}
 
@@ -155,12 +155,27 @@ class CoreRegressionTests(unittest.TestCase):
     def test_pair_thresholds_and_reverse_symmetry(self):
         for divergence, signal in ((50, 'SB'), (49.99, 'MB'), (20, 'MB'), (19.99, 'NT'), (-19.99, 'NT'), (-20, 'MS'), (-49.99, 'MS'), (-50, 'SS')):
             def scores(curr, *args):
-                return 0, 'Normal', divergence if curr == 'USD' else 0, 0, {'_completeness': 100}
+                return 0, 'Normal', divergence if curr == 'USD' else 0, 0, {**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_completeness': 100}
             self.core['compute_currency_professional_score_and_regime'] = scores
             self.assertEqual(self.core['get_pair_signal_and_badge']('USD', 'EUR')[3], signal)
             self.assertEqual(self.core['get_pair_signal_and_badge']('EUR', 'USD')[2], -divergence)
         self.core['compute_currency_professional_score_and_regime'] = lambda *args: (None, 'Normal', None, 0, {'_completeness': 45})
         self.assertIsNone(self.core['get_pair_signal_and_badge']('USD', 'EUR')[2])
+
+    def test_pair_requires_complete_both_sides_but_currency_keeps_original_gate(self):
+        complete={**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_completeness':100}
+        for missing_side in ('USD','EUR'):
+            for coverage in (0, 50, 65, 75, 95, 99.99):
+                def score(curr, *args):
+                    details=dict(complete)
+                    if curr==missing_side: details['_completeness']=coverage
+                    return 30,'Normal',30 if curr=='USD' else 0,0,details
+                self.core['compute_currency_professional_score_and_regime']=score
+                self.assertIsNone(self.core['get_pair_signal_and_badge']('USD','EUR')[2])
+        broken=dict(complete, PMI=None)
+        self.assertFalse(self.core['pair_core_is_complete'](broken))
+        self.assertFalse(self.core['pair_core_is_complete']({}))
+        self.assertTrue(self.core['pair_core_is_complete'](complete))
 
     def actual_macro_loader(self):
         # Restore just this production function after fixture stubbing.

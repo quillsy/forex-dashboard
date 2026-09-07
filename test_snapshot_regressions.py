@@ -16,7 +16,7 @@ import pandas as pd
 
 SOURCE = Path(__file__).with_name("app.py")
 FUNCTIONS = {
-    "load_live_signals", "save_live_signals", "_live_snapshot_weights", "_live_run_summary", "_finish_live_summary",
+    "finite_number", "pair_core_is_complete", "load_live_signals", "save_live_signals", "_live_snapshot_weights", "_live_run_summary", "_finish_live_summary",
     "_live_positive_price", "_live_price_history", "save_live_signal_snapshot",
     "save_currency_snapshot", "save_all_g10_live_snapshots", "update_open_outcomes",
 }
@@ -34,12 +34,12 @@ def harness():
     assert {n.name for n in selected} == FUNCTIONS
     namespace = {
         "os": os, "json": json, "np": np, "pd": pd, "datetime": Clock,
-        "CURRENT_MODEL_VERSION": "CORE_V2_6_2026_08", "FCS_KEY": "offline-test",
+        "CURRENT_MODEL_VERSION": "CORE_V2_7_2026_09", "FCS_KEY": "offline-test",
         "CURRENCIES": {"USD": {}, "EUR": {}},
         "st": SimpleNamespace(session_state={}),
         "check_demo_active": lambda: False,
         "compute_checklist_snapshot": lambda weights: [],
-        "compute_currency_details": lambda *args: {"Geldpolitik": 20.0, "PMI": None, "_completeness": 80.0, "_missing": ["PMI"]},
+        "compute_currency_details": lambda *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), 20.0), "_completeness": 100.0, "_missing": []},
         "compute_currency_professional_score_and_regime_custom": lambda *args: (20, "Normal", 20, 0, {}),
         "get_pair_signal_and_badge": lambda *args: ("MID BUY", "green", 25, "BUY"),
         "get_vix_value": lambda *args: None,
@@ -134,7 +134,7 @@ class SnapshotRegressions(unittest.TestCase):
         self.assertEqual(self.read(), original)
         stored = next(iter(original.values()))
         self.assertEqual(stored["metadata"]["entry_price_date"], "2026-09-04")
-        self.assertIsNone(stored["base_currency_details"]["factor_scores"]["PMI"])
+        self.assertEqual(stored["base_currency_details"]["factor_scores"]["PMI"], 20.0)
 
     def test_currency_first_snapshot_wins_and_retains_missing_factors(self):
         weights = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
@@ -154,6 +154,12 @@ class SnapshotRegressions(unittest.TestCase):
         self.assertEqual([weights[k] for k in ("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")], [35, 20, 20, 20, 5])
         self.assertEqual(stored["metadata"]["core_model_name"], "CORE v1 - Baseline")
         self.assertEqual(stored["base_currency_details"]["original_weights"], weights)
+
+    def test_incomplete_pair_cannot_be_written_directly(self):
+        self.ns['compute_currency_details']=lambda *args: {'Geldpolitik':20,'_completeness':75}
+        with self.assertRaisesRegex(ValueError,'PAIR_REQUIRES_COMPLETE_CORE'):
+            self.save_pair()
+        self.assertFalse(Path('live_signals.json').exists())
 
     def test_invalid_or_undated_entries_never_create_snapshot(self):
         for value in (0, -1, None, float("nan"), float("inf"), True):
