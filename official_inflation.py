@@ -38,7 +38,7 @@ def _result(records, now, source, series):
     if not records:
         return None
     period = max(records)
-    return {"value": records[period], "date": period + "-01", "refperiod": period,
+    return {"value": records[period], "date": period + "-01", "refperiod": period, "reference_period": period,
             "unit": "percent_yoy", "frequency": "monthly", "seasonal_adjustment": "unadjusted",
             "source": source, "series_id": series, "checked_at": now.isoformat(), "published_at": None}
 
@@ -113,12 +113,29 @@ def parse_abs_cpi(payload, now=None):
     return _result(records, now, "Australian Bureau of Statistics headline CPI YoY", "CPI/3.10001.10.50.M")
 
 
-def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None):
-    """Return validated observation or None, using injected budget-aware transport."""
+_DIAGNOSTIC_ERRORS = frozenset({
+    "ESTAT_FAILURE", "ESTAT_TABLE_INVALID", "ESTAT_IDENTITY_INVALID", "ESTAT_UNIT_INVALID",
+    "ESTAT_OBSERVATION_IDENTITY_INVALID", "ABS_DIMENSIONS_INVALID", "ABS_SERIES_COUNT_INVALID",
+    "ABS_SERIES_KEY_INVALID", "ABS_SERIES_IDENTITY_INVALID", "ABS_UNIT_INVALID",
+    "ABS_TIME_DIMENSION_INVALID", "CPI_PERIOD_INVALID", "CPI_VALUE_INVALID", "CPI_CONFLICT",
+})
+
+
+def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagnostics=None):
+    """Return observation or None; optional diagnostics contains allowlisted fields.
+
+    Never copy exception messages, response bodies, URLs or credentials to the
+    diagnostics. provider_status is exclusively e-Stat's bounded numeric STATUS.
+    """
     client = client or requests
+    diagnostic = diagnostics if isinstance(diagnostics, dict) else {}
+    diagnostic.clear()
+    diagnostic["code"] = "SOURCE_UNAVAILABLE"
+    phase = "transport"
     try:
         if currency == "JPY":
             if not estat_key:
+                diagnostic["code"] = "KEY_MISSING"
                 return None
             response = client.get(ESTAT_URL, params={"appId": estat_key, "statsDataId": ESTAT_TABLE,
                 "cdCat01": "0001", "cdArea": "00000", "cdTab": "3", "limit": 24}, timeout=15)
@@ -128,8 +145,26 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None):
                                   headers={"Accept": "application/json"}, timeout=15)
             parser = parse_abs_cpi
         else:
+            diagnostic["code"] = "UNSUPPORTED_CURRENCY"
             return None
         response.raise_for_status()
-        return parser(response.json(), now=now)
-    except (requests.RequestException, ValueError, TypeError, KeyError, IndexError, AttributeError):
+        phase = "json"
+        payload = response.json()
+        phase = "schema"
+        if currency == "JPY":
+            status = payload.get("GET_STATS_DATA", {}).get("RESULT", {}).get("STATUS")
+            if type(status) is int and 0 <= status <= 9999:
+                diagnostic["provider_status"] = status
+            elif isinstance(status, str) and re.fullmatch(r"[0-9]{1,4}", status):
+                diagnostic["provider_status"] = int(status)
+        result = parser(payload, now=now)
+        diagnostic["code"] = "OK" if result is not None else "NO_ELIGIBLE_OBSERVATION"
+        return result
+    except requests.RequestException:
+        diagnostic["code"] = "HTTP_ERROR" if phase == "transport" else "INVALID_JSON"
+        return None
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        token = exc.args[0] if len(exc.args) == 1 else None
+        diagnostic["code"] = token if isinstance(token, str) and token in _DIAGNOSTIC_ERRORS else (
+            "INVALID_JSON" if phase == "json" else "SCHEMA_INVALID")
         return None
