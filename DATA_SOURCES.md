@@ -31,6 +31,8 @@ The public cache includes only an explicit projection of market observations and
 
 Provider telemetry counts requests in the last run and UTC day. Actual account limits, reset times and remaining balances are UNKNOWN unless independently established; local counts must never be advertised as provider-confirmed balances. The operator view is password protected. No outbound alert service is configured.
 
+HTTP 429/503 Retry-After deadlines are normalized to UTC and carried in collector status across restarts. Later runs send no request before a confirmed deadline. This is a request cooldown, not proof of quota reset or remaining budget. Only normalized deadlines are persisted, never raw headers. An abrupt process termination before the existing status write can still lose a newly received deadline.
+
 ## Intentional live blocks
 
 - PMI: exact survey consistency and public redistribution rights are not established. All live PMI factors are withheld; consequently no pair currently meets 100%.

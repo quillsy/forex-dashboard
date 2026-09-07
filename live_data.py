@@ -288,6 +288,7 @@ def render_status(st, authorized=False):
             providers = status.get("providers", {})
             st.dataframe([{"Anbieter": host, "Status": item.get("status"),
                            "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
+                           "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
                            "Anfragen im letzten Lauf": item.get("requests_this_run"),
                            "Heute gezählt (UTC)": item.get("requests_observed_utc_day"),
                            "Restkontingent": "Unbekannt", "Limit": "Unbekannt", "Rücksetzung": "Unbekannt",
