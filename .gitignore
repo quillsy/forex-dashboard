@@ -16,6 +16,11 @@ ENV/
 
 # Environment files
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+.live-core-*
 
 # Scratch and test files
 scratch/

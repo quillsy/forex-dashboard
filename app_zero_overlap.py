@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import requests
 import pandas as pd
@@ -389,15 +390,15 @@ st.sidebar.title("⚙️ Einstellungen")
 # API Keys Expander
 with st.sidebar.expander("🔑 API Schlüssel"):
     try:
-        fred_default = st.secrets.get("FRED_API_KEY", "16a7c7fcd052b9da3b801f2691a37d3b")
-        av_default = st.secrets.get("AV_API_KEY", "BATX15WEXQJY7SS5")
-        newsdata_default = st.secrets.get("NEWSDATA_KEY", "pub_de1743243cb64703ac59bf87ae1566b7")
-        newsapi_default = st.secrets.get("NEWSAPI_KEY", "498a4855604345789b4a6eb4757f6ce8")
+        fred_default = st.secrets.get("FRED_API_KEY", os.getenv("FRED_API_KEY", ""))
+        av_default = st.secrets.get("AV_API_KEY", os.getenv("AV_API_KEY", ""))
+        newsdata_default = st.secrets.get("NEWSDATA_KEY", os.getenv("NEWSDATA_API_KEY", ""))
+        newsapi_default = st.secrets.get("NEWSAPI_KEY", os.getenv("NEWSAPI_KEY", ""))
     except Exception:
-        fred_default = "16a7c7fcd052b9da3b801f2691a37d3b"
-        av_default = "BATX15WEXQJY7SS5"
-        newsdata_default = "pub_de1743243cb64703ac59bf87ae1566b7"
-        newsapi_default = "498a4855604345789b4a6eb4757f6ce8"
+        fred_default = os.getenv("FRED_API_KEY", "")
+        av_default = os.getenv("AV_API_KEY", "")
+        newsdata_default = os.getenv("NEWSDATA_API_KEY", "")
+        newsapi_default = os.getenv("NEWSAPI_KEY", "")
 
     fred_key = st.text_input("FRED API-Key", type="password", value=fred_default)
     av_key = st.text_input("Alpha Vantage API-Key", type="password", value=av_default)
