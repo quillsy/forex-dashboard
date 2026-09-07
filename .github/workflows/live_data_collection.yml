@@ -1,6 +1,17 @@
 name: G8 Live Data Collection
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'live_data.py'
+      - 'provider_transport.py'
+      - 'official_macro.py'
+      - 'official_yields.py'
+      - 'source_contracts.py'
+      - 'run_data_collection.py'
+      - '.github/workflows/live_data_collection.yml'
   schedule:
     # Run once daily at 22:00 UTC (after market close)
     - cron: '0 22 * * *'
@@ -18,6 +29,7 @@ concurrency:
 jobs:
   collect-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
