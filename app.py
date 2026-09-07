@@ -467,7 +467,7 @@ def policy_rate_is_usable(obj):
             _policy_rate(obj.get("rate"))
         except (TypeError, ValueError):
             return False
-        return bool(st.session_state.get("emergency_manual_rates_override", False))
+        return operator_is_authorized() and bool(st.session_state.get("emergency_manual_rates_override", False))
     return status in {"🟢 VERIFIED", "🟢 VERIFIED_UNCHANGED", "🟡 LAST VERIFIED"} and _policy_proofs_valid(obj)
 
 
@@ -509,7 +509,7 @@ def get_verified_policy_rate(currency):
     """Read-only canonical interface; legacy defaults cannot create verification."""
     if currency not in POLICY_RATE_DEFINITIONS:
         raise ValueError("UNSUPPORTED_CURRENCY")
-    if st.session_state.get("emergency_manual_rates_override", False):
+    if operator_is_authorized() and st.session_state.get("emergency_manual_rates_override", False):
         value = st.session_state.get(f"manual_rate_{currency}")
         if value is not None:
             obj = _policy_empty(currency)
@@ -765,6 +765,14 @@ def load_api_key(name, alt_names=None):
             pass
     return None
 
+def operator_is_authorized():
+    import hmac
+    expected = load_api_key("DASHBOARD_OPERATOR_PASSWORD")
+    supplied = st.session_state.get("operator_password", "")
+    return bool(expected and len(expected) >= 16 and isinstance(supplied, str)
+                and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")))
+
+
 def get_estat_app_id():
     """
     Central resolver for Japan e-Stat Application ID (ESTAT_APP_ID).
@@ -780,7 +788,7 @@ def get_stats_nz_api_key():
     return load_api_key("STATS_NZ_API_KEY", alt_names=["STATSNZ_API_KEY", "OCP_APIM_SUBSCRIPTION_KEY", "OCP_APIM_KEY"])
 
 FRED_KEY = load_api_key("FRED_API_KEY")
-AV_KEY = load_api_key("ALPHA_VANTAGE_API_KEY")
+AV_KEY = load_api_key("ALPHA_VANTAGE_API_KEY", alt_names=["AV_API_KEY"])
 NEWSDATA_KEY = load_api_key("NEWSDATA_API_KEY")
 NEWSAPI_KEY = load_api_key("NEWSAPI_KEY")
 BENZINGA_KEY = load_api_key("BENZINGA_API_KEY")
@@ -1145,25 +1153,55 @@ def fetch_itick_live(pair, key):
     }
 
 def fetch_fcs_history_live(pair, key):
-    url = f"https://api-v4.fcsapi.com/forex/history?symbol={pair}&period=1d&access_key={key}"
-    r = requests.get(url, timeout=8)
-    r.raise_for_status()
-    res = r.json()
-    if res.get("status") != True:
-        raise ValueError("FCS API historical candles failure")
-    candles = res.get("response", [])
+    """Read FCS v4 daily candles; reject another pair, interval or invalid OHLC."""
+    symbol = pair.replace("/", "").upper()
+    if len(symbol) != 6 or not symbol.isalpha() or not key:
+        raise ValueError("FCS_INVALID_REQUEST")
+    response = requests.get("https://api-v4.fcsapi.com/forex/history",
+                            params={"symbol": symbol, "period": "1D", "access_key": key}, timeout=8)
+    if response.status_code != 200:
+        raise ValueError(f"FCS_HTTP_{response.status_code}")
+    payload = response.json()
+    if payload.get("status") is not True:
+        raise ValueError("FCS_HISTORY_UNAVAILABLE")
+    info = payload.get("info", {})
+    identifiers = [info.get("symbol"), info.get("profile", {}).get("symbol"), info.get("ticker")]
+    identifiers = [str(value).rsplit(":", 1)[-1].replace("/", "").upper() for value in identifiers if value]
+    if not identifiers or any(value != symbol for value in identifiers) or str(info.get("period", "")).upper() != "1D":
+        raise ValueError("FCS_SERIES_MISMATCH")
+    candles = payload.get("response", {})
+    if isinstance(candles, dict):
+        candles = list(candles.values())
+    if not isinstance(candles, list):
+        raise ValueError("FCS_INVALID_CANDLES")
     parsed = []
-    for c in candles:
-        parsed.append({
-            "date": c.get("date") or c.get("tm"),
-            "open": float(c.get("o")),
-            "high": float(c.get("h")),
-            "low": float(c.get("l")),
-            "close": float(c.get("c"))
-        })
-    df = pd.DataFrame(parsed)
-    df["date"] = pd.to_datetime(df["date"])
-    return df.sort_values("date").reset_index(drop=True)
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        values = {name: finite_number(candle.get(field))
+                  for name, field in (("open", "o"), ("high", "h"), ("low", "l"), ("close", "c"))}
+        if any(value is None or value <= 0 for value in values.values()):
+            continue
+        if values["low"] > min(values["open"], values["close"]) or values["high"] < max(values["open"], values["close"]):
+            continue
+        timestamp = finite_number(candle.get("t"))
+        if timestamp is not None:
+            date = pd.to_datetime(timestamp, unit="s", utc=True, errors="coerce").tz_localize(None)
+        else:
+            raw_date = candle.get("date") or candle.get("tm")
+            if not isinstance(raw_date, str) or not raw_date.strip():
+                continue
+            date = pd.to_datetime(raw_date, utc=True, errors="coerce").tz_localize(None)
+        if pd.notna(date) and date <= now:
+            parsed.append({"date": date, **values})
+    if not parsed:
+        raise ValueError("FCS_NO_VALID_CANDLES")
+    frame = pd.DataFrame(parsed).sort_values("date").drop_duplicates().reset_index(drop=True)
+    if frame["date"].dt.normalize().duplicated().any():
+        raise ValueError("FCS_CONFLICTING_DAILY_CANDLES")
+    return frame
+
 
 def fetch_stockdata_live(pair, key):
     if not key:
@@ -2126,14 +2164,14 @@ def get_estat_cpi_data():
     for stats_id, base_year in [("0004052037", "2025"), ("0003427113", "2020")]:
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            url_yoy = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=3&limit=200"
+            url_yoy = f"https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=3&limit=200"
             r_yoy = requests.get(url_yoy, headers=headers, timeout=15)
             if r_yoy.status_code != 200:
                 continue
             data_yoy = r_yoy.json()
             values_yoy = data_yoy.get("GET_STATS_DATA", {}).get("STATISTICAL_DATA", {}).get("DATA_INF", {}).get("VALUE", [])
 
-            url_idx = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=1&limit=200"
+            url_idx = f"https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={app_id}&statsDataId={stats_id}&cdCat01=0001&cdArea=00000&cdTab=1&limit=200"
             r_idx = requests.get(url_idx, headers=headers, timeout=15)
             if r_idx.status_code != 200:
                 continue
@@ -2204,81 +2242,65 @@ def get_estat_cpi_data():
     return None, datetime.now(), False
 
 
-# Official Stats NZ Verified Historical CPI Records (Quarterly All Groups CPIQ.SE9A)
-NZD_STATS_NZ_CPI_RECORDS = [
-    {"date": "2026-06-30", "period": "2026-Q2", "value": 4.1, "index_level": 1248.0, "release_date": "2026-07-21"},
-    {"date": "2026-03-31", "period": "2026-Q1", "value": 3.1, "index_level": 1229.0, "release_date": "2026-04-17"},
-    {"date": "2025-12-31", "period": "2025-Q4", "value": 2.2, "index_level": 1218.0, "release_date": "2026-01-22"},
-    {"date": "2025-09-30", "period": "2025-Q3", "value": 2.5, "index_level": 1212.0, "release_date": "2025-10-16"},
-    {"date": "2025-06-30", "period": "2025-Q2", "value": 3.3, "index_level": 1198.85, "release_date": "2025-07-18"},
-    {"date": "2025-03-31", "period": "2025-Q1", "value": 4.0, "index_level": 1194.0, "release_date": "2025-04-17"},
-    {"date": "2024-12-31", "period": "2024-Q4", "value": 4.7, "index_level": 1182.0, "release_date": "2025-01-23"},
-    {"date": "2024-09-30", "period": "2024-Q3", "value": 5.6, "index_level": 1176.0, "release_date": "2024-10-16"},
-    {"date": "2024-06-30", "period": "2024-Q2", "value": 7.3, "index_level": 1165.0, "release_date": "2024-07-17"},
-    {"date": "2024-03-31", "period": "2024-Q1", "value": 6.0, "index_level": 1152.0, "release_date": "2024-04-17"},
-    {"date": "2023-12-31", "period": "2023-Q4", "value": 4.7, "index_level": 1140.0, "release_date": "2024-01-24"},
-    {"date": "2023-09-30", "period": "2023-Q3", "value": 5.6, "index_level": 1135.0, "release_date": "2023-10-17"},
-    {"date": "2023-06-30", "period": "2023-Q2", "value": 6.0, "index_level": 1115.0, "release_date": "2023-07-19"},
-    {"date": "2023-03-31", "period": "2023-Q1", "value": 6.7, "index_level": 1098.0, "release_date": "2023-04-20"},
-]
+def parse_statsnz_cpi_release(html, expected_period):
+    """Read the published all-groups annual CPI, never an embedded local fixture."""
+    import csv
+    from bs4 import BeautifulSoup
+    period = pd.Period(expected_period, freq="Q")
+    expected_title = f"Consumers price index: {period.end_time.strftime('%B %Y')} quarter"
+    for tag in BeautifulSoup(html, "html.parser").select("[data-value]"):
+        try:
+            payload = json.loads(tag["data-value"])
+            if not isinstance(payload, dict) or payload.get("Title") != expected_title:
+                continue
+            release = pd.Timestamp(payload["DateTaxonomyTerm"]["PublicationDate"])
+            # Stats NZ publishes in New Zealand local time; keep a UTC-naive timestamp.
+            release = release.tz_localize("Pacific/Auckland").tz_convert("UTC").tz_localize(None)
+            if release > pd.Timestamp.now(tz="UTC").tz_localize(None) or release < period.end_time.normalize():
+                continue
+            for series in payload.get("FeaturedMedia", {}).get("SeriesData", []):
+                rows = list(csv.reader(io.StringIO(series.get("GraphCsvData", "").lstrip("\ufeff"))))
+                if not rows or rows[0][0] != "Quarter":
+                    continue
+                for row in rows[1:]:
+                    if not row or row[0] != "CPI all groups (annual)":
+                        continue
+                    for label, raw in zip(rows[0][1:], row[1:]):
+                        observed = pd.to_datetime(label.replace("Sept-", "Sep-"), format="%b-%y").to_period("Q")
+                        value = finite_number(raw)
+                        if observed == period and value is not None and abs(value) <= 25:
+                            return {"date": period.end_time.normalize(), "value": value,
+                                    "index_level": None, "derived_yoy": None,
+                                    "release_date": release, "is_pit_limited": True}
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+    return None
 
-@st.cache_data(ttl=86400, show_spinner=False)
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_statsnz_cpi_data():
-    """
-    Fetches official Headline CPI YoY and Index level for New Zealand (Stats NZ / Tatauranga Aotearoa).
-    Dataset: Consumers Price Index – All Groups / All Items (CPIQ.SE9A)
-    Frequency: Quarterly
-    Value: DIRECT_OFFICIAL annual CPI YoY
-    Release metadata: Exact historical release dates with zero look-ahead bias.
-    """
-    api_key = get_stats_nz_api_key()
-    if not api_key:
-        return None
-        
-    try:
-        # Authenticated heartbeat ping to ADE API to verify subscription key validity
-        headers = {
-            "Ocp-Apim-Subscription-Key": api_key,
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
-        }
-        ping_url = "https://apis.stats.govt.nz/ade-api/rest/categoryscheme/STATSNZ/CS_ECONOMY/latest"
-        r = requests.get(ping_url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            raise ValueError(f"Stats NZ API HTTP Error {r.status_code}")
+    """Fetch the latest published quarter from Stats NZ without an API key.
 
-        records = []
-        for rec in NZD_STATS_NZ_CPI_RECORDS:
-            obs_dt = pd.to_datetime(rec["date"])
-            rel_dt = pd.to_datetime(rec["release_date"])
-            records.append({
-                "date": obs_dt,
-                "value": float(rec["value"]),
-                "index_level": float(rec["index_level"]),
-                "release_date": rel_dt,
-                "is_pit_limited": True
-            })
-
-        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
-        df["derived_yoy"] = (df["index_level"] / df["index_level"].shift(4) - 1.0) * 100.0
-        return df, datetime.now(), True
-    except Exception:
-        if check_demo_active():
-            mock_records = []
-            now = datetime.now()
-            for i in range(12):
-                dt = (now - timedelta(days=90 * (11 - i))).replace(day=1)
-                mock_records.append({
-                    "date": pd.to_datetime(dt.strftime("%Y-%m-%d")),
-                    "value": 3.0 + 0.1 * i,
-                    "index_level": 1150.0 + 10.0 * i,
-                    "derived_yoy": 3.0 + 0.1 * i,
-                    "release_date": pd.to_datetime((dt + timedelta(days=21)).strftime("%Y-%m-%d")),
-                    "is_pit_limited": True
-                })
-            df_mock = pd.DataFrame(mock_records)
-            return df_mock, datetime.now(), False
-        return None, datetime.now(), False
+    Release title, quarter, annual all-groups series and publication timestamp
+    must agree. A successful API heartbeat is never proof of economic data.
+    Only the observed release is returned; historical vintages are not invented.
+    """
+    completed = pd.Timestamp.now(tz="UTC").tz_localize(None).to_period("Q") - 1
+    for offset in range(3):
+        period = completed - offset
+        slug = period.end_time.strftime("%B-%Y").lower()
+        url = f"https://www.stats.govt.nz/information-releases/consumers-price-index-{slug}-quarter/"
+        try:
+            response = requests.get(url, timeout=12)
+            if response.status_code != 200:
+                continue
+            record = parse_statsnz_cpi_release(response.text, str(period))
+            if record is not None:
+                record["source_url"] = url
+                return pd.DataFrame([record]), datetime.now(), True
+        except requests.RequestException:
+            continue
+    return None, datetime.now(), False
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -2976,7 +2998,74 @@ def get_eodhd_bond_historical(ticker, target_date, api_key=EODHD_KEY):
             return float(closest_row["value"]), closest_row["date"], True
     return None, None, False
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_official_2y_data(curr, target_date):
+    """Two keyless official benchmark series; no alternate maturity or curve proxy."""
+    try:
+        target = pd.Timestamp(target_date).normalize()
+        end = min(target, pd.Timestamp(datetime.now().date()))
+        start = end - pd.Timedelta(days=30)
+        records = []
+        if curr == "EUR":
+            series = "BBSSY.D.REN.EUR.A610.000000WT0202.A"
+            response = requests.get(
+                "https://api.statistiken.bundesbank.de/rest/data/BBSSY/D.REN.EUR.A610.000000WT0202.A",
+                params={"format": "csv", "lang": "en", "startPeriod": start.strftime("%Y-%m-%d"),
+                        "endPeriod": end.strftime("%Y-%m-%d")}, timeout=12)
+            response.raise_for_status()
+            frame = pd.read_csv(io.StringIO(response.text.lstrip("\ufeff")), dtype=str)
+            if len(frame.columns) != 3 or frame.columns[1] != series:
+                return None
+            metadata = dict(zip(frame.iloc[:, 0], frame.iloc[:, 1]))
+            if metadata.get("unit") != "PROZENT" or metadata.get("unit multiplier") != "One":
+                return None
+            for row in frame.itertuples(index=False, name=None):
+                if isinstance(row[0], str) and len(row[0]) == 10 and row[0][4] == "-" and row[0][7] == "-":
+                    # Bundesbank flags such as provisional/estimated are not silently accepted.
+                    if pd.notna(row[2]) and str(row[2]).strip():
+                        continue
+                    records.append({"date": row[0], "value": row[1]})
+            source = f"Bundesbank (Germany 2Y benchmark; {series})"
+        elif curr == "CAD":
+            series = "BD.CDN.2YR.DQ.YLD"
+            response = requests.get(f"https://www.bankofcanada.ca/valet/observations/{series}/json",
+                                    params={"start_date": start.strftime("%Y-%m-%d"),
+                                            "end_date": end.strftime("%Y-%m-%d")}, timeout=12)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("seriesDetail", {}).get(series, {}).get("label") != "Benchmark bond yield: 2 year":
+                return None
+            records = [{"date": row.get("d"), "value": row.get(series, {}).get("v")}
+                       for row in payload.get("observations", [])]
+            source = f"Bank of Canada (2Y benchmark; {series})"
+        else:
+            return None
+        valid = []
+        for row in records:
+            value = finite_number(row.get("value"))
+            date = pd.to_datetime(row.get("date"), errors="coerce")
+            if value is not None and -5 <= value <= 30 and pd.notna(date) and date <= end:
+                valid.append({"date": date, "value": value})
+        if not valid:
+            return None
+        frame = pd.DataFrame(valid).sort_values("date").reset_index(drop=True)
+        # Conflicting records for an observation date must not be arbitrarily resolved.
+        if frame.groupby("date")["value"].nunique().gt(1).any():
+            return None
+        frame = frame.drop_duplicates("date")
+        frame.attrs["source"] = source
+        return frame
+    except (requests.RequestException, ValueError, TypeError, KeyError, IndexError):
+        return None
+
+
 def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_key=EODHD_KEY):
+    if curr in {"EUR", "CAD"}:
+        official = get_official_2y_data(curr, target_date)
+        if official is not None and not official.empty:
+            row = official.iloc[-1]
+            if observation_freshness(row["date"], target_date, 5, 15) in {"FRESH", "AGING"}:
+                return float(row["value"]), row["date"], official.attrs["source"]
     # USD: FRED DGS2 preferred
     if curr == "USD":
         if fred_key:
@@ -3848,7 +3937,7 @@ def get_trade_balance(target_date=None):
     try:
         if ESTAT_APP_ID:
             try:
-                url = f"http://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={ESTAT_APP_ID}&statsDataId=0003444800&limit=10"
+                url = f"https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData?appId={ESTAT_APP_ID}&statsDataId=0003444800&limit=10"
                 r = requests.get(url, timeout=8)
                 if r.status_code == 200:
                     data = r.json()
@@ -5429,10 +5518,7 @@ def get_cot_signal(symbol_code, target_date):
 def load_manual_cot():
     file_path = "manual_cot.json"
     if not os.path.exists(file_path):
-        default_cot = {}
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(default_cot, f, indent=4)
-        return default_cot
+        return {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -5440,6 +5526,8 @@ def load_manual_cot():
         return {}
 
 def save_manual_cot_entry(curr, position, net_pos, percentile, date_str):
+    if not operator_is_authorized():
+        raise PermissionError("OPERATOR_ACCESS_REQUIRED")
     file_path = "manual_cot.json"
     cot_data = load_manual_cot()
     cot_data[curr] = {
@@ -5716,7 +5804,12 @@ if not getattr(st, "_mock_mode", False):
             st.error("⚠️ Basis- und Quote-Währung dürfen nicht identisch sein.")
             
         show_all_pairs = st.checkbox("Alle Paare anzeigen (inkl. Neutral)", value=False, key="show_all_pairs_chk")
-        st.button("🔄 System-Cache leeren", on_click=st.cache_data.clear)
+        with st.expander("🔒 Betreiberzugang", expanded=False):
+            if load_api_key("DASHBOARD_OPERATOR_PASSWORD"):
+                st.text_input("Betreiber-Passwort", type="password", key="operator_password")
+            else:
+                st.caption("Bearbeitungsfunktionen sind gesperrt. Betreiberzugang ist nicht eingerichtet.")
+        st.button("🔄 System-Cache leeren", on_click=st.cache_data.clear, disabled=not operator_is_authorized())
         
         st.markdown("---")
         st.markdown("### 🏦 VERIFIED POLICY RATE CENTER")
@@ -5743,7 +5836,7 @@ if not getattr(st, "_mock_mode", False):
             })
         st.dataframe(pd.DataFrame(table_rows), hide_index=True)
 
-        if st.button("🔄 Offizielle Leitzinsen aktualisieren"):
+        if st.button("🔄 Offizielle Leitzinsen aktualisieren", disabled=not operator_is_authorized()) and operator_is_authorized():
             with st.spinner("Prüfe offizielle Notenbank-Quellen..."):
                 checked_rates = refresh_all_verified_policy_rates(FRED_KEY)
             st.session_state["policy_refresh_summary"] = sum("🟢" in value.get("verification_status", "") for value in checked_rates.values())
@@ -5757,8 +5850,8 @@ if not getattr(st, "_mock_mode", False):
 
         with st.expander("🚨 Advanced / Emergency Manual Override", expanded=False):
             st.caption("Standard: AUS. Bei Aktivierung überschreiben manuelle Werte die offiziellen Daten. Dies wird in den Snapshots dokumentiert.")
-            emergency_on = st.checkbox("Manuelles Emergency-Override aktivieren", value=False, key="emergency_manual_rates_override")
-            if emergency_on:
+            emergency_on = st.checkbox("Manuelles Emergency-Override aktivieren", value=False, key="emergency_manual_rates_override", disabled=not operator_is_authorized())
+            if emergency_on and operator_is_authorized():
                 st.warning("🔴 MANUAL POLICY RATE OVERRIDE ACTIVE – CORE verwendet manuelle Eingaben!")
                 st.number_input("European Central Bank (EUR) %", min_value=0.0, max_value=15.0, key="manual_rate_EUR", value=2.25, step=0.05)
                 st.number_input("Federal Reserve (USD) %", min_value=0.0, max_value=15.0, key="manual_rate_USD", value=3.50, step=0.05)
@@ -5841,8 +5934,8 @@ if not getattr(st, "_mock_mode", False):
             ```
             """)
             
-        df_cal, t_cal, is_live_cal = get_benzinga_data(BENZINGA_KEY)
-        st.caption(f"**Benzinga:** {format_freshness(t_cal)} ({'Live' if is_live_cal else 'Demo'})")
+        df_cal, t_cal, is_live_cal = None, None, False
+        st.caption("News-Termine werden manuell geprüft; automatische News-Abfragen sind deaktiviert.")
     
 # ----------------- 4. GLOBAL DATA INITIALIZATION & FRESHNESS -----------------
     if invalid_pair:
@@ -5883,7 +5976,10 @@ if not getattr(st, "_mock_mode", False):
         pair_completeness = (base_comp + quote_comp) / 2.0
         
         if pair_completeness < 100.0:
-            st.warning(f"⚠️ **Incomplete Data Warning (Data Quality: {pair_completeness:.0f}%):** Signal calculation is based on incomplete G10 macro data. Missing factors: {', '.join(set(base_details_raw.get('_missing', []) + quote_details_raw.get('_missing', [])))}")
+            st.warning(f"⚠️ **CORE-Datenabdeckung: {base_curr} {base_comp:.0f}% · {quote_curr} {quote_comp:.0f}%**. "
+                       f"Fehlend bei {base_curr}: {', '.join(base_details_raw.get('_missing', [])) or 'keine'}; "
+                       f"bei {quote_curr}: {', '.join(quote_details_raw.get('_missing', [])) or 'keine'}. "
+                       "Abdeckung ist keine Trefferwahrscheinlichkeit.")
         st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
     
 # ----------------- 6. TABS MODULES -----------------
@@ -7058,9 +7154,10 @@ if not getattr(st, "_mock_mode", False):
             status_dq = "🟢 100%" if comp == 100.0 else f"🟡 {comp:.0f}% ({', '.join(missing)})"
             
             table_rows.append({
-                "Rang": f"#{rank_idx}",
+                "Rang": f"#{rank_idx}" if d["core"] is not None else "—",
                 "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
                 "CORE Score": f"{d['core']:+.1f}" if d['core'] is not None else "N/A",
+                "CORE-Abdeckung": f"{comp:.0f}%",
                 "Gesamt-Score": f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
                 "Signal / Tendenz": badge_str,
                 "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}" if cats.get('Geldpolitik') is not None else "N/A",
@@ -7498,7 +7595,7 @@ if not getattr(st, "_mock_mode", False):
         st.header("📍 Positioning (COT Report)")
         st.caption("Netto-Spekulanten-Positionierung der G8-Währungen aus dem Commitment of Traders Report.")
         
-        st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Sie können hier manuelle COT-Daten eintragen, die persistent in `manual_cot.json` gespeichert werden.")
+        st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Manuelle Korrekturen sind ausschließlich im geschützten Betreiberzugang möglich.")
         
         with st.expander("📝 Manuelle COT-Daten eingeben / aktualisieren"):
             m_curr = st.selectbox("Währung:", list(CURRENCIES.keys()), key="cot_m_curr_new")
@@ -7507,7 +7604,7 @@ if not getattr(st, "_mock_mode", False):
             m_perc = st.slider("Percentile (0-100%):", 0.0, 100.0, 50.0, step=1.0, key="cot_m_perc_new")
             m_date = st.date_input("Berichtsdatum:", key="cot_m_date_new")
             
-            if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn_new"):
+            if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn_new", disabled=not operator_is_authorized()) and operator_is_authorized():
                 save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"))
                 st.success(f"COT-Daten für {m_curr} gespeichert!")
                 st.rerun()

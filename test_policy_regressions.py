@@ -19,7 +19,7 @@ NOW = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
 
 def load_policy():
     tree = ast.parse(Path(__file__).with_name('app.py').read_text())
-    names = {'find_current_rate_episode_start', 'fetch_official_policy_rate_live', 'policy_rate_is_usable',
+    names = {'operator_is_authorized', 'find_current_rate_episode_start', 'fetch_official_policy_rate_live', 'policy_rate_is_usable',
              'load_policy_rates_cache', 'save_policy_rates_cache', 'get_verified_policy_rate',
              'get_all_verified_policy_rates', 'refresh_all_verified_policy_rates'}
     constants = {'POLICY_RATE_DEFINITIONS', 'POLICY_VERIFICATION_MAX_AGE_DAYS', 'POLICY_OFFICIAL_HOSTS', 'POLICY_RATES_CACHE_FILE'}
@@ -28,6 +28,7 @@ def load_policy():
     scope = dict(datetime=datetime, timedelta=timedelta, io=io, json=json, os=os, pd=pd,
                  st=SimpleNamespace(session_state={}), requests=SimpleNamespace(get=Mock(side_effect=AssertionError('Network forbidden'))))
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<policy-functions>', 'exec'), scope)
+    scope['load_api_key'] = lambda name: None
     scope['_policy_now'] = lambda: NOW
     return scope
 
@@ -141,6 +142,9 @@ class PolicyRegressions(unittest.TestCase):
         manual={'rate':1,'verification_status':'🔴 MANUAL OVERRIDE'}
         self.assertFalse(self.p['policy_rate_is_usable'](manual))
         self.p['st'].session_state.update(emergency_manual_rates_override=True,manual_rate_JPY=1.0)
+        self.assertFalse(self.p['policy_rate_is_usable'](manual))
+        self.p['load_api_key'] = lambda name: 'fixture-password-12345'
+        self.p['st'].session_state['operator_password'] = 'fixture-password-12345'
         obj=self.p['get_verified_policy_rate']('JPY')
         self.assertTrue(self.p['policy_rate_is_usable'](obj))
         self.assertIsNone(obj['verified_at'])
