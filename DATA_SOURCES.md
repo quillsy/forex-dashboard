@@ -32,7 +32,7 @@ Provider telemetry counts requests in the last run and UTC day. Actual account l
 ## Intentional live blocks
 
 - PMI: exact survey consistency and public redistribution rights are not established. All live PMI factors are withheld; consequently no pair currently meets 100%.
-- CHF inflation: the existing HICP source is not silently represented as Swiss national CPI; qualification remains open.
+- CHF inflation now uses Eurostat `prc_hicp_minr:M.RCH_A.TOTAL.CH`, preserving HICP rather than switching to national CPI. The September 7 source check returned July 2026 0.7% YoY; the empty August slot is excluded. Dataset update time is not treated as an observation publication time.
 - Unsupported CHF/NZD FRED unemployment identifiers remain disabled. GBP now uses the explicitly qualified ONS sources above.
 - GBP/CHF/AUD/NZD genuine compatible 2Y access remains unresolved. RBNZ automated access requires provider permission; the existing failure is not bypassed.
 - A zero value, proxy, old release or additional free account never fills one of these gaps.

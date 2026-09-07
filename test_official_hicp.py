@@ -31,4 +31,26 @@ class HICPTests(unittest.TestCase):
         self.assertEqual(parse_hicp(data,now=NOW)['value'],-0.2)
         data['dimension']['time']['category']['index']={'2026-07':0,'2026-09':1}
         with self.assertRaises(ValueError):parse_hicp(data,now=NOW)
+    def test_ch_exact_geography_and_null_latest(self):
+        data = fixture()
+        data['dimension']['geo']['category']['index'] = {'CH': 0}
+        data['value'] = {'0': 0.7, '1': None}
+        data['status'] = {}
+        result = parse_hicp(data, now=NOW, geo='CH')
+        self.assertEqual(result['value'], 0.7)
+        self.assertEqual(result['date'], '2026-07-31')
+        self.assertTrue(result['series_id'].endswith('.CH'))
+        self.assertFalse(result['is_estimate'])
+        with self.assertRaises(ValueError): parse_hicp(data, now=NOW)
+        with self.assertRaises(ValueError): parse_hicp(fixture(), now=NOW, geo='CH')
+        with self.assertRaises(ValueError): parse_hicp(data, now=NOW, geo='US')
+    def test_ch_request_filter(self):
+        from official_hicp import fetch_hicp
+        from unittest.mock import Mock
+        data = fixture()
+        data['dimension']['geo']['category']['index'] = {'CH': 0}
+        client = Mock(); client.get.return_value.json.return_value = data
+        fetch_hicp(now=NOW, session=client, geo='CH')
+        self.assertEqual(client.get.call_args.kwargs['params']['geo'], 'CH')
+        client.get.assert_called_once()
 if __name__=='__main__':unittest.main()

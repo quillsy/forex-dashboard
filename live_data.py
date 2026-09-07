@@ -202,8 +202,6 @@ def collect(app, path=PATH):
             validation, reason = "VALID", None
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
-            elif factor == "Inflation" and currency == "CHF":
-                validation, reason = "UNVERIFIED", "Inflation: Gebietsstand, Messgröße oder Einheitenprüfung noch offen"
             elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP"):
                 if not fred_contract(observation.get("series_id"), factor):
                     validation, reason = "UNVERIFIED", "Amtliche Serien-Metadaten fehlen oder passen nicht"
