@@ -281,6 +281,21 @@ def render_status(st, authorized=False):
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")
     if retained:
         st.warning("Einzelne Quellen konnten zuletzt nicht bestätigt werden. Ihre gespeicherten Werte bleiben nur innerhalb der bestehenden Freigabefrist nutzbar; Details stehen in der Quellentabelle.")
+    st.markdown("**Verfügbare Fundamentaldaten je Währung**")
+    overview = []
+    labels = {"Geldpolitik": "2J-Rendite (%)", "Inflation": "Inflation (% zum Vorjahr)",
+              "Arbeitsmarkt": "Arbeitslosenquote (%)", "PMI": "PMI (Index)", "GDP": "Reales GDP (% zum Vorjahr)"}
+    for currency in CURRENCIES:
+        item = {"Währung": currency}
+        for factor, label in labels.items():
+            row = next(row for row in rows if row["Währung"] == currency and row["Faktor"] == factor)
+            value = number(row["Wert"])
+            item[label] = f"{value:.2f} · {row['Referenzperiode']}" if row["Status"] == "Verfügbar" and value is not None else "—"
+            if item[label] != "—" and row["Veröffentlichungsstatus"] == "Amtlich vorläufig":
+                item[label] += " (vorläufig)"
+        overview.append(item)
+    st.dataframe(overview, hide_index=True, use_container_width=True)
+    st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
         st.dataframe(rows, hide_index=True, use_container_width=True)
         st.caption("Eurostat-Daten: Quelle Eurostat, Abrufzeit siehe Tabelle. CORE-Scores sind eigene Berechnungen; Eurostat ist für diese Berechnungen nicht verantwortlich.")

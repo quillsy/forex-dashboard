@@ -93,12 +93,38 @@ class LiveDataTests(unittest.TestCase):
         st=MagicMock()
         with patch.object(live,'load',return_value=data), patch.object(live,'now_utc',return_value=NOW):
             live.render_status(st)
-        rows=st.dataframe.call_args_list[0].args[0]
+        rows=st.dataframe.call_args_list[1].args[0]
         usd=next(r for r in rows if r['Währung']=='USD' and r['Faktor']=='Geldpolitik')
         gbp=next(r for r in rows if r['Währung']=='GBP' and r['Faktor']=='Geldpolitik')
         self.assertEqual(usd['Wert'],4.34)
         self.assertEqual(usd['Leitzins (%)'],4.25)
         self.assertEqual(gbp['Letzter Abruf'],'Fehlgeschlagen; kein geprüfter Wert')
+
+    def test_individual_observation_visible_below_score_threshold_but_expired_hidden(self):
+        record=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30',
+            'frequency':'quarterly','next_due_at':'2026-11-03T11:00:00+00:00'},'FRESH',NOW.isoformat())
+        expired=self.record()
+        data={'completed_at':NOW.isoformat(),'currencies':{'NZD':{'Arbeitsmarkt':record,'GDP':expired}}}
+        st=MagicMock()
+        with patch.object(live,'load',return_value=data), patch.object(live,'now_utc',return_value=NOW+timedelta(hours=2)):
+            live.render_status(st)
+        overview=st.dataframe.call_args_list[0].args[0]
+        nzd=next(row for row in overview if row['Währung']=='NZD')
+        self.assertEqual(nzd['Arbeitslosenquote (%)'],'5.60 · 2026-06-30')
+        self.assertEqual(nzd['Reales GDP (% zum Vorjahr)'],'—')
+        self.assertEqual(live.details('NZD',NOW+timedelta(hours=2),data)['_completeness'],20)
+
+    def test_overview_preserves_official_provisional_flag(self):
+        for flag in ('p', 'e'):
+            record=live.build_record('Inflation',20,{'value':3.2,'date':'2026-08-01',
+                'reference_period':'2026-08','provider_status':flag},'FRESH',NOW.isoformat())
+            data={'completed_at':NOW.isoformat(),'currencies':{'EUR':{'Inflation':record}}}
+            st=MagicMock()
+            with patch.object(live,'load',return_value=data), patch.object(live,'now_utc',return_value=NOW):
+                live.render_status(st)
+            overview=st.dataframe.call_args_list[0].args[0]
+            eur=next(row for row in overview if row['Währung']=='EUR')
+            self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig)')
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
