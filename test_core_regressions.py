@@ -209,8 +209,8 @@ class CoreRegressionTests(unittest.TestCase):
         self.core['get_fred_data'] = lambda *args: (data, None, True)
         result = loader('USD', 'GDP', '2026-09-06')
         self.assertAlmostEqual(result['value'], 3)
-        self.assertEqual(result['date'], '2026-06-30')  # End of the actual reference quarter, not its FRED label.
-        self.assertEqual(result['freshness'], 'FRESH')
+        self.assertEqual(result['date'], '2026-04-01')  # Preserve existing historical research date semantics.
+        self.assertEqual(result['freshness'], 'AGING')
         data.drop(data[data['date'] == pd.Timestamp('2025-04-01')].index, inplace=True)
         self.assertIsNone(loader('USD', 'GDP', '2026-09-06')['value'])
 

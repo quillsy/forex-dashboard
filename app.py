@@ -4608,7 +4608,8 @@ def get_macro_observation_details(curr, category, target_date=None):
                     prior = finite_number(previous.iloc[-1]["value"]) if not previous.empty else None
                     value = (float(value) / prior - 1.0) * 100.0 if prior not in (None, 0.0) else None
                 value = finite_number(value)
-                age_observed = observed + pd.offsets.QuarterEnd(0) if category == "GDP" else observed
+                is_live_date = target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()
+                age_observed = observed + pd.offsets.QuarterEnd(0) if category == "GDP" and is_live_date else observed
                 freshness = observation_freshness(age_observed, target_dt, 45 if category == "Arbeitsmarkt" else 120,
                                                   90 if category == "Arbeitsmarkt" else 180,
                                                   monthly=category == "Arbeitsmarkt")
