@@ -4183,7 +4183,16 @@ def get_current_official_cpi(curr):
             return fetch_hicp(session=requests)
         if curr in ("JPY", "AUD"):
             from official_inflation import fetch_official_cpi
-            return fetch_official_cpi(curr, client=requests, estat_key=ESTAT_APP_ID)
+            diagnostics = {}
+            result = fetch_official_cpi(curr, client=requests, estat_key=ESTAT_APP_ID, diagnostics=diagnostics)
+            usage = getattr(requests, "usage", None)
+            if isinstance(usage, dict):
+                host = "api.e-stat.go.jp" if curr == "JPY" else "data.api.abs.gov.au"
+                item = usage.setdefault(host, {"requests_this_run": 0, "status": "NOT_REQUESTED",
+                    "remaining": None, "limit": None, "reset_at": None, "budget_evidence": "unknown"})
+                item["data_status"] = diagnostics.get("code", "UNKNOWN")
+                item["provider_response_status"] = diagnostics.get("provider_status")
+            return result
     except Exception:
         return None
     return None

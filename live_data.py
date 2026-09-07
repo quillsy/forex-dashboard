@@ -261,6 +261,7 @@ def render_status(st, authorized=False):
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
+                         "Letzter Abruf": "Fehlgeschlagen; letzter geprüfter Wert" if record.get("last_error") else "Siehe Prüfzeit",
                          "Wert": observation.get("value", observation.get("yield_2y")),
                          "Referenzperiode": observation.get("reference_period") or observation.get("date"),
                          "Quelle": observation.get("source"), "Einheit": observation.get("unit"),
@@ -280,6 +281,7 @@ def render_status(st, authorized=False):
                 status = {}
             providers = status.get("providers", {})
             st.dataframe([{"Anbieter": host, "Status": item.get("status"),
+                           "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
                            "Anfragen im letzten Lauf": item.get("requests_this_run"),
                            "Heute gezählt (UTC)": item.get("requests_observed_utc_day"),
                            "Restkontingent": "Unbekannt", "Limit": "Unbekannt", "Rücksetzung": "Unbekannt",

@@ -82,5 +82,45 @@ class OfficialInflationTests(unittest.TestCase):
         client.get.reset_mock()
         self.assertIsNone(fetch_official_cpi("JPY", client=client, now=NOW)); client.get.assert_not_called()
 
+    def test_safe_diagnostics_success_api_rejection_and_schema(self):
+        client = Mock(); client.get.return_value.json.return_value = estat()
+        diagnostics = {"old_field": "old"}
+        result = fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics)
+        self.assertEqual(result["reference_period"], "2026-07")
+        self.assertEqual(diagnostics, {"code": "OK", "provider_status": 0})
+        payload = estat(); payload["GET_STATS_DATA"]["RESULT"] = {"STATUS": "100", "ERROR_MSG": "private-key-value"}
+        client.get.return_value.json.return_value = payload
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "ESTAT_FAILURE", "provider_status": 100})
+        payload = estat(); payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["TABLE_INF"]["@id"] = "other"
+        client.get.return_value.json.return_value = payload
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "ESTAT_TABLE_INVALID", "provider_status": 0})
+
+    def test_diagnostics_never_include_provider_messages_or_unbounded_status(self):
+        client = Mock(); diagnostics = {}
+        for status in ["private-key-value", -1, 10000, True, "12345", {"secret": "private-key-value"}]:
+            payload = estat(); payload["GET_STATS_DATA"]["RESULT"]["STATUS"] = status
+            client.get.return_value.json.return_value = payload
+            self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+            self.assertEqual(diagnostics, {"code": "ESTAT_FAILURE"})
+        client.get.return_value.json.side_effect = ValueError("https://example.test/?key=private-key-value")
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "INVALID_JSON"})
+        client.get.return_value.json.side_effect = None
+        client.get.return_value.raise_for_status.side_effect = requests.HTTPError("private-key-value")
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "HTTP_ERROR"})
+
+    def test_diagnostics_missing_key_and_empty_observations(self):
+        diagnostics = {}
+        self.assertIsNone(fetch_official_cpi("JPY", diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "KEY_MISSING"})
+        client = Mock(); payload = estat()
+        payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"] = []
+        client.get.return_value.json.return_value = payload
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "NO_ELIGIBLE_OBSERVATION", "provider_status": 0})
+
 
 if __name__ == "__main__": unittest.main()
