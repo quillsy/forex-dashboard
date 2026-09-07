@@ -46,6 +46,7 @@ def load_core():
         'compute_correction_score': lambda *args: 0.0,
         'detect_market_regime': lambda *args: 'Normal',
         'check_demo_active': lambda: False,
+        'use_live_core_cache': lambda *args: False,
         'get_fred_data': lambda *args: (None, None, False),
         'get_worldbank_data_historical': lambda *args: (None, None, False),
         'CURRENCIES': {'USD': {'wb_code': 'USA'}},
@@ -155,7 +156,7 @@ class CoreRegressionTests(unittest.TestCase):
     def test_pair_thresholds_and_reverse_symmetry(self):
         for divergence, signal in ((50, 'SB'), (49.99, 'MB'), (20, 'MB'), (19.99, 'NT'), (-19.99, 'NT'), (-20, 'MS'), (-49.99, 'MS'), (-50, 'SS')):
             def scores(curr, *args):
-                return 0, 'Normal', divergence if curr == 'USD' else 0, 0, {**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_completeness': 100}
+                return 0, 'Normal', divergence if curr == 'USD' else 0, 0, {**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_live_checked': True, '_completeness': 100}
             self.core['compute_currency_professional_score_and_regime'] = scores
             self.assertEqual(self.core['get_pair_signal_and_badge']('USD', 'EUR')[3], signal)
             self.assertEqual(self.core['get_pair_signal_and_badge']('EUR', 'USD')[2], -divergence)
@@ -163,7 +164,7 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertIsNone(self.core['get_pair_signal_and_badge']('USD', 'EUR')[2])
 
     def test_pair_requires_complete_both_sides_but_currency_keeps_original_gate(self):
-        complete={**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_completeness':100}
+        complete={**dict.fromkeys(('Geldpolitik','Inflation','Arbeitsmarkt','PMI','GDP'), 0.0), '_live_checked': True, '_completeness':100}
         for missing_side in ('USD','EUR'):
             for coverage in (0, 50, 65, 75, 95, 99.99):
                 def score(curr, *args):
@@ -208,8 +209,8 @@ class CoreRegressionTests(unittest.TestCase):
         self.core['get_fred_data'] = lambda *args: (data, None, True)
         result = loader('USD', 'GDP', '2026-09-06')
         self.assertAlmostEqual(result['value'], 3)
-        self.assertEqual(result['date'], '2026-04-01')
-        self.assertEqual(result['freshness'], 'AGING')
+        self.assertEqual(result['date'], '2026-06-30')  # End of the actual reference quarter, not its FRED label.
+        self.assertEqual(result['freshness'], 'FRESH')
         data.drop(data[data['date'] == pd.Timestamp('2025-04-01')].index, inplace=True)
         self.assertIsNone(loader('USD', 'GDP', '2026-09-06')['value'])
 
