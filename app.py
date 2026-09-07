@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
-CURRENT_MODEL_VERSION = "CORE_V2_6_2026_08"
+CURRENT_MODEL_VERSION = "CORE_V2_7_2026_09"
 
 # Set up page config
 st.set_page_config(
@@ -5565,7 +5565,7 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
         border_color = "#444c56"
         text_color = "#8b949e"
         title = f"INSUFFICIENT FUNDAMENTAL DATA ({base_curr}/{quote_curr})"
-        desc = f"Mindestabdeckung von 50.0% für mindestens eine der Währungen ({base_curr} oder {quote_curr}) nicht erreicht. Pair Divergence Signal blockiert."
+        desc = f"Paar-Signale erfordern 100% CORE-Abdeckung bei beiden Währungen ({base_curr} und {quote_curr}). Mindestens eine Seite ist unvollständig; das Signal bleibt gesperrt."
         badge = "INSUFFICIENT DATA"
     elif sig == "SB":
         bg_color = "rgba(16, 185, 129, 0.08)"
@@ -5720,6 +5720,15 @@ def render_articles_grid(articles_list):
             """, unsafe_allow_html=True)
 
 
+def pair_core_is_complete(details):
+    """V2.7 pair eligibility: all five factors, not a rounded coverage badge."""
+    return (isinstance(details, dict)
+            and finite_number(details.get("_completeness")) == 100.0
+            and not details.get("_missing")
+            and all(finite_number(details.get(factor)) is not None
+                    for factor in ("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")))
+
+
 def get_pair_signal_and_badge(base, quote, model_weights=None):
     """
     Canonical pair fundamental divergence function based strictly on BASE CORE.
@@ -5739,10 +5748,7 @@ def get_pair_signal_and_badge(base, quote, model_weights=None):
         _, _, b_core, _, b_details = compute_currency_professional_score_and_regime(base)
         _, _, q_core, _, q_details = compute_currency_professional_score_and_regime(quote)
     
-    b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
-    q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
-    
-    if b_core is None or q_core is None or b_comp < 50.0 or q_comp < 50.0:
+    if finite_number(b_core) is None or finite_number(q_core) is None or not pair_core_is_complete(b_details) or not pair_core_is_complete(q_details):
         return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
         
     divergence = float(b_core - q_core)
@@ -5980,7 +5986,7 @@ if not getattr(st, "_mock_mode", False):
                        f"Fehlend bei {base_curr}: {', '.join(base_details_raw.get('_missing', [])) or 'keine'}; "
                        f"bei {quote_curr}: {', '.join(quote_details_raw.get('_missing', [])) or 'keine'}. "
                        "Abdeckung ist keine Trefferwahrscheinlichkeit.")
-        st.caption(f"Professionelle makroökonomische Divergenz-Engine für das Paar **{selected_pair}**.")
+        st.caption(f"Modell {CURRENT_MODEL_VERSION}: Paar-Signale nur bei 100% CORE-Abdeckung beider Währungen. Einzelwährungsanalysen bleiben ab 50% sichtbar.")
     
 # ----------------- 6. TABS MODULES -----------------
 
@@ -6592,6 +6598,8 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
     
     base_details_raw = compute_currency_details(base_curr, None)
     quote_details_raw = compute_currency_details(quote_curr, None)
+    if not pair_core_is_complete(base_details_raw) or not pair_core_is_complete(quote_details_raw):
+        raise ValueError("PAIR_REQUIRES_COMPLETE_CORE")
     
     def get_effective_weights(details, w):
         av_factors = {}
@@ -7546,7 +7554,7 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- TAB 10: FX PAIR DIVERGENCE ANALYZER -----------------
     with tab10:
         st.header("💱 FX Pair Divergence Analyzer")
-        st.caption("Sekundäre Währungspaar-Analyse: Wählen Sie zwei Währungen aus, um fundamentale Divergenz, Zinsspreads und Signalstärke zu analysieren.")
+        st.caption("Paar-Signale erfordern 100% CORE-Abdeckung beider Währungen. Vollständigkeit ist keine Garantie für Datenrichtigkeit oder Handelserfolg.")
         
         col_pa1, col_pa2 = st.columns(2)
         with col_pa1:
