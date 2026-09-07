@@ -14,6 +14,8 @@ The user explicitly approved labelled official provisional releases and the UK o
 
 Known ONS release calendar dates are retained as dates, not invented publication hours. Live detail readers use the same normalized cache as the CORE. Provider counters preserve totals across runs where a provider is not queried. RBNZ requests remain disabled until provider automation permission is confirmed. Other unresolved source definitions remain blocked.
 
+Live CPI observations now retain frequency, annual-rate unit and reference period consistently. In particular, Stats NZ CPI is quarterly; its existing 180-day maximum in the source reader is also preserved by the normalized cache, rather than accidentally applying the 90-day monthly limit.
+
 ## New verified public adapters
 
 - Eurostat EUR unemployment: `une_rt_m:M.SA.TOTAL.PC_ACT.T.EA21`, monthly, seasonally adjusted labour-force percent. Live probe July 2026: 6.4%.
@@ -33,7 +35,7 @@ Provider telemetry counts requests in the last run and UTC day. Actual account l
 
 - PMI: exact survey consistency and public redistribution rights are not established. All live PMI factors are withheld; consequently no pair currently meets 100%.
 - CHF inflation now uses Eurostat `prc_hicp_minr:M.RCH_A.TOTAL.CH`, preserving HICP rather than switching to national CPI. The September 7 source check returned July 2026 0.7% YoY; the empty August slot is excluded. Dataset update time is not treated as an observation publication time.
-- Unsupported CHF/NZD FRED unemployment identifiers remain disabled. GBP now uses the explicitly qualified ONS sources above.
+- Unsupported CHF/NZD FRED unemployment identifiers remain disabled. The user approved official quarterly seasonally adjusted unemployment for both currencies: Stats NZ HLFS total and BFS ILO total, clearly labelled as quarterly. They use 120-day fresh/180-day maximum age from quarter end, with release deadlines taking precedence. NZ's known next release date is enforced conservatively from midnight NZ time because the exact future publication hour is unknown; CHF requires hourly checks while its calendar is unknown. Both adapters discover releases/resources dynamically and reject mismatched metadata. Source links and attribution are shown in the public table.
 - GBP/CHF/AUD/NZD genuine compatible 2Y access remains unresolved. RBNZ automated access requires provider permission; the existing failure is not bypassed.
 - A zero value, proxy, old release or additional free account never fills one of these gaps.
 
