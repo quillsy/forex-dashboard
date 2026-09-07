@@ -4178,9 +4178,9 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_current_official_cpi(curr):
     try:
-        if curr == "EUR":
+        if curr in ("EUR", "CHF"):
             from official_hicp import fetch_hicp
-            return fetch_hicp(session=requests)
+            return fetch_hicp(session=requests, geo="EA21" if curr == "EUR" else "CH")
         if curr in ("JPY", "AUD"):
             from official_inflation import fetch_official_cpi
             diagnostics = {}
@@ -4203,15 +4203,15 @@ def get_cpi_yoy_details(curr: str, target_date=None):
         detail = live_data.details(curr)
         observation = detail["_observations"].get("Inflation", {})
         return (observation.get("value") if detail.get("Inflation") is not None else None,
-                observation.get("date"), "HICP_YOY" if curr == "EUR" else "CPI_YOY", observation.get("source", "UNAVAILABLE"),
+                observation.get("date"), "HICP_YOY" if curr in ("EUR", "CHF") else "CPI_YOY", observation.get("source", "UNAVAILABLE"),
                 observation.get("series_id"), detail["_freshness"].get("Inflation", "UNAVAILABLE"))
-    if curr in ("EUR", "JPY", "AUD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+    if curr in ("EUR", "CHF", "JPY", "AUD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         observation = get_current_official_cpi(curr)
         if not observation:
             return None, None, "CPI_YOY", "UNAVAILABLE", None, "UNAVAILABLE"
         status = observation_freshness(observation["date"], datetime.now(), 45, 90, monthly=True)
         return (observation["value"] if status in ("FRESH", "AGING") else None,
-                observation["date"], "HICP_YOY" if curr == "EUR" else "CPI_YOY",
+                observation["date"], "HICP_YOY" if curr in ("EUR", "CHF") else "CPI_YOY",
                 observation["source"], observation["series_id"], status)
     try:
         fred_key = FRED_KEY
@@ -5074,7 +5074,7 @@ def compute_currency_details(curr: str, target_date=None, include_context=True) 
         cpi = finite_number(cpi)
         freshness["Inflation"] = status
         observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
-        if curr in ("EUR", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
+        if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
             official = get_current_official_cpi(curr)
             if official:
                 observations["Inflation"].update(official)
