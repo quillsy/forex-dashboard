@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 import requests
 import live_data as live
@@ -84,6 +84,21 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(live.public_observation({'source_url':url})['source_url'], url)
         for bad in (url+'?token=private',url+'#private',url.replace('www.stats.govt.nz','evil.example'),url.replace('https:','http:')):
             self.assertNotIn('source_url', live.public_observation({'source_url':bad}))
+
+    def test_source_table_shows_both_policy_and_yield_when_value_is_null(self):
+        record=live.build_record('Geldpolitik',20,{'value':None,'yield_2y':4.34,'policy_rate':4.25,
+            'date':'2026-09-04','source':'FRED'},'FRESH',NOW.isoformat())
+        data={'completed_at':NOW.isoformat(),'currencies':{'USD':{'Geldpolitik':record},
+            'GBP':{'Geldpolitik':{'score':None,'last_error':'SOURCE_UNAVAILABLE','observation':{}}}}}
+        st=MagicMock()
+        with patch.object(live,'load',return_value=data), patch.object(live,'now_utc',return_value=NOW):
+            live.render_status(st)
+        rows=st.dataframe.call_args_list[0].args[0]
+        usd=next(r for r in rows if r['Währung']=='USD' and r['Faktor']=='Geldpolitik')
+        gbp=next(r for r in rows if r['Währung']=='GBP' and r['Faktor']=='Geldpolitik')
+        self.assertEqual(usd['Wert'],4.34)
+        self.assertEqual(usd['Leitzins (%)'],4.25)
+        self.assertEqual(gbp['Letzter Abruf'],'Fehlgeschlagen; kein geprüfter Wert')
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',

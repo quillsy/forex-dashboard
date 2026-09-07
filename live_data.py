@@ -265,8 +265,9 @@ def render_status(st, authorized=False):
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
-                         "Letzter Abruf": "Fehlgeschlagen; letzter geprüfter Wert" if record.get("last_error") else "Siehe Prüfzeit",
-                         "Wert": observation.get("value", observation.get("yield_2y")),
+                         "Letzter Abruf": ("Fehlgeschlagen; letzter geprüfter Wert" if number(record.get("score")) is not None else "Fehlgeschlagen; kein geprüfter Wert") if record.get("last_error") else "Siehe Prüfzeit",
+                         "Wert": observation.get("yield_2y") if factor == "Geldpolitik" else observation.get("value"),
+                         "Leitzins (%)": observation.get("policy_rate") if factor == "Geldpolitik" else None,
                          "Referenzperiode": observation.get("reference_period") or observation.get("date"),
                          "Quelle": observation.get("source"), "Einheit": observation.get("unit"),
                          "Quellenlink": public_observation(observation).get("source_url"),
@@ -275,6 +276,11 @@ def render_status(st, authorized=False):
                          "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
                          "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn NZ; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") == "date_only_start_of_NZ_day" else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+    available = sum(row["Status"] == "Verfügbar" for row in rows)
+    retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
+    st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")
+    if retained:
+        st.warning("Einzelne Quellen konnten zuletzt nicht bestätigt werden. Ihre gespeicherten Werte bleiben nur innerhalb der bestehenden Freigabefrist nutzbar; Details stehen in der Quellentabelle.")
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
         st.dataframe(rows, hide_index=True, use_container_width=True)
         st.caption("Eurostat-Daten: Quelle Eurostat, Abrufzeit siehe Tabelle. CORE-Scores sind eigene Berechnungen; Eurostat ist für diese Berechnungen nicht verantwortlich.")

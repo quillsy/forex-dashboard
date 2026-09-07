@@ -49,6 +49,14 @@ GitHub Actions and Streamlit secrets are separate configurations. Existing local
 
 ## Verification evidence
 
+### Live display consistency audit
+
+The labour hub and current 2Y detail views now consume the same validated live cache as CORE. They retain official source, reference period and rolling/quarterly measurement labels. Missing comparison history is unavailable, not a zero change or sideways trend. The 40-factor source table shows the actual 2Y yield and policy rate separately, even when the generic value field is null. Its current eligible count and retained-value warning are re-evaluated at read time.
+
+No central publicly qualified VIX observation is available. Live context therefore shows unknown/unavailable rather than the legacy constant 15 or a VIXY ETF price. New snapshot confidence is null rather than an uncalibrated percentage derived from score magnitude. Historical research readers and existing snapshots are unchanged.
+
+An additional source review did not establish new public redistribution permissions for PMI or CBOE VIX. FRED's API access does not itself sublicense third-party data; see https://fred.stlouisfed.org/docs/api/terms_of_use.html . No temporary-email account or additional free quota account was created. The existing e-Stat GitHub credential still needs user-side correction.
+
 See `CORE_SOURCE_AUDIT.md` for all 40 factor source routes and remaining qualifications. Eurostat attribution is displayed in the source table; CORE scores are our calculations, not Eurostat publications.
 
 - https://ec.europa.eu/eurostat/help/copyright-notice

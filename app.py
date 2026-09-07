@@ -4058,7 +4058,9 @@ UNEMP_SERIES = {
 }
 
 def get_unemp_rate_value(curr, target_date=None):
-    """Returns the latest or point-in-time unemployment rate for a given currency."""
+    """Use the published live observation; retain the historical reader for past dates."""
+    if use_live_core_cache(target_date):
+        return get_macro_observation_details(curr, "Arbeitsmarkt", target_date).get("value")
     try:
         series_id = UNEMP_SERIES.get(curr)
         if not series_id:
@@ -4071,6 +4073,21 @@ def get_unemp_rate_value(curr, target_date=None):
     except Exception:
         pass
     return None
+
+
+def get_live_labour_display_row(curr, info, target_date=None):
+    observation = get_macro_observation_details(curr, "Arbeitsmarkt", target_date)
+    value = finite_number(observation.get("value"))
+    return {
+        "Währung": f"{info['flag']} {curr}",
+        "Arbeitslosenquote": f"{value:.2f}%" if value is not None else "N/A",
+        "Quelle": observation.get("source") or "Nicht verfügbar",
+        "Referenzperiode": observation.get("reference_period") or observation.get("date") or "Unbekannt",
+        "Messzeitraum": observation.get("period_label") or observation.get("frequency") or "Unbekannt",
+        "Aktualität": observation.get("freshness") or "UNAVAILABLE",
+        "Status": "Nicht verfügbar" if value is None else "🟢 Normal" if value < 6.0 else "🟡 Erhöht",
+    }
+
 
 GDP_SERIES = {
     "USD": "GDPC1",
@@ -4095,7 +4112,11 @@ PMI_SERIES = {
 }
 
 def get_vix_value(target_date=None):
-    """Retrieves the VIX index value using FRED VIXCLS with fallbacks to APIFreaks and Tiingo."""
+    """Live VIX requires a centrally validated index observation; history is unchanged."""
+    if use_live_core_cache(target_date):
+        # No VIX index is currently collected. An ETF price or constant cannot
+        # certify today's volatility regime.
+        return None
     if target_date is None:
         target_date = datetime.now().strftime("%Y-%m-%d")
         
@@ -4865,6 +4886,8 @@ def get_surprise_points(curr: str, category: str, target_date=None) -> float:
 def detect_market_regime(curr: str, target_date=None) -> str:
     try:
         vix = get_vix_value(target_date)
+        if vix is None and use_live_core_cache(target_date):
+            return "Unbekannt (VIX nicht geprüft)"
         if vix > 22.0:
             return "Risk-Off"
         elif vix < 14.0:
@@ -4962,12 +4985,12 @@ def compute_correction_score(curr: str, target_date=None) -> float:
     # 2. Risk-On / Risk-Off correction
     try:
         vix = get_vix_value(dt_str)
-        if vix > 22.0:
+        if vix is not None and vix > 22.0:
             if curr in ["USD", "CHF", "JPY"]:
                 corr += 3.0
             else:
                 corr -= 3.0
-        elif vix < 14.0:
+        elif vix is not None and vix < 14.0:
             if curr in ["USD", "CHF", "JPY"]:
                 corr -= 2.0
             else:
@@ -6161,6 +6184,17 @@ def get_yield_details(curr, series_map=None, fred_key=None):
     source = "FRED"
     series_id_used = series_map.get(curr, "")
     
+    if is_2y and use_live_core_cache():
+        detail = live_data.details(curr)
+        observation = detail.get("_observations", {}).get("Geldpolitik", {})
+        value = finite_number(observation.get("yield_2y"))
+        if detail.get("Geldpolitik") is None or value is None:
+            return None
+        return {"value": value, "chg_1w": None, "chg_1m": None,
+                "trend": "N/A", "series_id": observation.get("series_id"),
+                "source": observation.get("source") or "UNAVAILABLE",
+                "date": observation.get("date")}
+
     if is_2y:
         val_now, dt_now, src_now = get_genuine_2y_yield_historical(curr, datetime.now().strftime("%Y-%m-%d"), fred_key, EODHD_KEY)
         if val_now is not None:
@@ -6805,9 +6839,9 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
             "final_score": float(signal_value),
             "signal": badge,
             "signal_strength": "STARK" if abs(signal_value) >= 50.0 else "MITTEL" if abs(signal_value) >= 20.0 else "SCHWACH",
-            "confidence": min(int(abs(signal_value) / 50.0 * 100.0), 100),
+            "confidence": None,  # Score magnitude is not a calibrated success probability.
             "regime": base_details_raw.get("regime", "Normal"),
-            "risk_on_off": "Risk-Off" if (vix_val and vix_val > 22.0) else "Risk-On",
+            "risk_on_off": "Unbekannt (VIX nicht geprüft)" if vix_val is None else "Risk-Off" if vix_val > 22.0 else "Risk-On",
             "data_quality": (base_details_raw.get("_completeness", 100.0) + quote_details_raw.get("_completeness", 100.0)) / 2.0
         },
         "base_currency_details": {
@@ -7230,7 +7264,9 @@ if not getattr(st, "_mock_mode", False):
         cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
         gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
         
-        if vix > 22.0:
+        if vix is None:
+            global_regime = "Unbekannt · VIX nicht geprüft"
+        elif vix > 22.0:
             global_regime = "Risk-Off 🛡️"
         elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
             global_regime = "Risk-On / Growth 🚀"
@@ -7251,7 +7287,7 @@ if not getattr(st, "_mock_mode", False):
             else:
                 st.metric("🔴 Schwächste Währung (BASE CORE)", "N/A (Insufficient Data)")
         with m_col3:
-            st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})")
+            st.metric("Globale Marktphase", f"{global_regime} (VIX: {vix:.1f})" if vix is not None else global_regime)
         with m_col4:
             st.metric("Modell-Baseline", "35/20/20/20/5 (Yield/CPI/Lab/PMI/GDP)")
             
@@ -7493,16 +7529,6 @@ if not getattr(st, "_mock_mode", False):
             y5_det = get_yield_details(curr, YIELD_5Y_SERIES, FRED_KEY)
             y10_det = get_yield_details(curr, YIELD_10Y_SERIES, FRED_KEY)
             
-            y2_str = f"{y2_det['value']:.2f}%" if y2_det else "nicht verfügbar"
-            y5_str = f"{y5_det['value']:.2f}%" if y5_det else "nicht verfügbar"
-            y10_str = f"{y10_det['value']:.2f}%" if y10_det else "nicht verfügbar"
-            
-            spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det) else "N/A"
-            chg_1w = f"{y2_det['chg_1w']:+.2f}%" if y2_det else "N/A"
-            chg_1m = f"{y2_det['chg_1m']:+.2f}%" if y2_det else "N/A"
-            trend_str = y2_det["trend"] if y2_det else "▬"
-            src_str = y2_det["source"] if y2_det else "N/A"
-            
             status_2y = "🟢 REAL 2Y YIELD" if (y2_det and y2_det.get("source") != "Demo Mock" and y2_det.get("value") is not None) else "🟡 2Y YIELD UNAVAILABLE"
             status_5y = "🟢 REAL 5Y YIELD" if (y5_det and y5_det.get("source") != "Demo Mock" and y5_det.get("value") is not None) else "🟡 5Y YIELD UNAVAILABLE"
             
@@ -7576,15 +7602,7 @@ if not getattr(st, "_mock_mode", False):
         today_s = datetime.now().strftime("%Y-%m-%d")
         unemp_rows = []
         for curr, info in CURRENCIES.items():
-            u_val = get_unemp_rate_value(curr, today_s)
-            u_mom = compute_macro_momentum(curr)
-            unemp_rows.append({
-                "Währung": f"{info['flag']} {curr}",
-                "Arbeitslosenquote": f"{u_val:.2f}%" if u_val is not None else "N/A",
-                "Macro Momentum": f"{u_mom:+.1f}",
-                "Quelle": "FRED / World Bank",
-                "Status": "🟢 Normal" if (u_val and u_val < 6.0) else "🟡 Erhöht"
-            })
+            unemp_rows.append(get_live_labour_display_row(curr, info, today_s))
             
         st.dataframe(pd.DataFrame(unemp_rows), hide_index=True, use_container_width=True)
     
@@ -7638,7 +7656,10 @@ if not getattr(st, "_mock_mode", False):
         cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
         gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
         
-        if vix > 22.0:
+        if vix is None:
+            current_regime = "Unbekannt · VIX nicht geprüft"
+            regime_desc = "Für den VIX liegt kein zentral geprüfter Live-Wert vor. Eine Risikoeinstufung wird deshalb nicht angezeigt."
+        elif vix > 22.0:
             current_regime = "Risk-Off 🛡️"
             regime_desc = "Erhöhte Volatilität und Risikoaversion. Sichere Häfen (USD, CHF, JPY) tendieren zur Stärke."
         elif vix < 14.0 and (gdp_us is not None and gdp_us > 1.5):
@@ -7653,7 +7674,7 @@ if not getattr(st, "_mock_mode", False):
             
         col_reg1, col_reg2 = st.columns([1, 2])
         with col_reg1:
-            st.metric("Aktueller VIX Index", f"{vix:.2f}")
+            st.metric("Aktueller VIX Index", f"{vix:.2f}" if vix is not None else "Nicht verfügbar")
             st.metric("Regime-Einstufung", current_regime)
         with col_reg2:
             st.markdown("### Regime-Interpretation")
