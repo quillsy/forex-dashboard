@@ -28,7 +28,7 @@ def load_sources():
               st=SimpleNamespace(session_state={}), load_api_key=lambda name: None,
               requests=SimpleNamespace(get=Mock(side_effect=AssertionError('Network forbidden')),
                                        RequestException=requests.RequestException),
-              check_demo_active=lambda: False)
+              check_demo_active=lambda: False, use_live_core_cache=lambda *args: False)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<free-sources>', 'exec'), ns)
     return ns
 

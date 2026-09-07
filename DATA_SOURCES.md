@@ -2,6 +2,18 @@
 
 Current model: `CORE_V2_8_2026_09`. Pair signals require five qualified factors on both currencies AND an unexpired collector check. Unknown release calendars expire after one hour. Known future release deadlines are represented separately from maximum observation ages. A failed fetch never renews the successful-check timestamp.
 
+## Additional qualification, September 7
+
+The user explicitly approved labelled official provisional releases and the UK official rolling three-month unemployment rate. The live probe now qualifies 25/40 factors (no pair reaches 100% because PMI remains unqualified).
+
+- EUR HICP: current `prc_hicp_minr:M.RCH_A.TOTAL.EA21`, direct annual rate. August 2026 3.2%, official estimated flag `e`, visibly labelled. No private forecast substituted.
+- JPY CPI: current 2025-base table `0004052037`, all-Japan all-items direct YoY1.9% July; exact metadata and monthly time-code guards. No old-base fallback.
+- AUD CPI: exact ABS `CPI/3.10001.10.50.M`, series unitPCT and all five dimensions validated; July3.5% YoY.
+- GBP GDP: ONS IHYR PN2/QNA quarterly real YoY; latestQ2 1.2%. Both publication families checked; conflicting same-release values block.
+- GBP labour: ONS MGSX/LMS, 4.9% April–June rolling three-month rate. Never represented as a standalone May monthly reading.
+
+Known ONS release calendar dates are retained as dates, not invented publication hours. Live detail readers use the same normalized cache as the CORE. Provider counters preserve totals across runs where a provider is not queried. RBNZ requests remain disabled until provider automation permission is confirmed. Other unresolved source definitions remain blocked.
+
 ## New verified public adapters
 
 - Eurostat EUR unemployment: `une_rt_m:M.SA.TOTAL.PC_ACT.T.EA21`, monthly, seasonally adjusted labour-force percent. Live probe July 2026: 6.4%.
@@ -20,8 +32,8 @@ Provider telemetry counts requests in the last run and UTC day. Actual account l
 ## Intentional live blocks
 
 - PMI: exact survey consistency and public redistribution rights are not established. All live PMI factors are withheld; consequently no pair currently meets 100%.
-- EUR/CHF/AUD/JPY inflation: geography, metric identity or original-unit checks remain open; these factors are withheld pending qualification.
-- Unsupported old FRED unemployment identifiers and unknown GBP GDP mapping are not enabled by guessing replacements.
+- CHF inflation: the existing HICP source is not silently represented as Swiss national CPI; qualification remains open.
+- Unsupported CHF/NZD FRED unemployment identifiers remain disabled. GBP now uses the explicitly qualified ONS sources above.
 - GBP/CHF/AUD/NZD genuine compatible 2Y access remains unresolved. RBNZ automated access requires provider permission; the existing failure is not bypassed.
 - A zero value, proxy, old release or additional free account never fills one of these gaps.
 

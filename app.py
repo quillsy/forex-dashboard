@@ -3068,6 +3068,11 @@ def get_official_2y_data(curr, target_date):
 
 
 def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_key=EODHD_KEY):
+    if use_live_core_cache(target_date):
+        detail = live_data.details(curr)
+        observation = detail["_observations"].get("Geldpolitik", {})
+        return (observation.get("yield_2y") if detail.get("Geldpolitik") is not None else None,
+                observation.get("date"), observation.get("source", "UNAVAILABLE"))
     if curr in {"EUR", "CAD"}:
         official = get_official_2y_data(curr, target_date)
         if official is not None and not official.empty:
@@ -4170,7 +4175,35 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
         bullets.append("⚪ Keine belastbare fundamentale Tendenz aus den verfügbaren Faktoren")
     return bullets
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_current_official_cpi(curr):
+    try:
+        if curr == "EUR":
+            from official_hicp import fetch_hicp
+            return fetch_hicp(session=requests)
+        if curr in ("JPY", "AUD"):
+            from official_inflation import fetch_official_cpi
+            return fetch_official_cpi(curr, client=requests, estat_key=ESTAT_APP_ID)
+    except Exception:
+        return None
+    return None
+
+
 def get_cpi_yoy_details(curr: str, target_date=None):
+    if use_live_core_cache(target_date):
+        detail = live_data.details(curr)
+        observation = detail["_observations"].get("Inflation", {})
+        return (observation.get("value") if detail.get("Inflation") is not None else None,
+                observation.get("date"), "HICP_YOY" if curr == "EUR" else "CPI_YOY", observation.get("source", "UNAVAILABLE"),
+                observation.get("series_id"), detail["_freshness"].get("Inflation", "UNAVAILABLE"))
+    if curr in ("EUR", "JPY", "AUD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        observation = get_current_official_cpi(curr)
+        if not observation:
+            return None, None, "CPI_YOY", "UNAVAILABLE", None, "UNAVAILABLE"
+        status = observation_freshness(observation["date"], datetime.now(), 45, 90, monthly=True)
+        return (observation["value"] if status in ("FRESH", "AGING") else None,
+                observation["date"], "HICP_YOY" if curr == "EUR" else "CPI_YOY",
+                observation["source"], observation["series_id"], status)
     try:
         fred_key = FRED_KEY
         if target_date is None:
@@ -4573,7 +4606,31 @@ def get_macro_observation_details(curr, category, target_date=None):
     Annual World Bank observations remain historical research only. They cannot
     stand in for the current monthly labour or quarterly GDP observation.
     """
+    if use_live_core_cache(target_date):
+        detail = live_data.details(curr)
+        observation = dict(detail["_observations"].get(category, {}))
+        observation["value"] = observation.get("value") if detail.get(category) is not None else None
+        observation["freshness"] = detail["_freshness"].get(category, "UNAVAILABLE")
+        observation.setdefault("date", None)
+        observation.setdefault("source", "UNAVAILABLE")
+        return observation
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
+    if curr == "GBP" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_ons import fetch_ons_gdp, fetch_ons_labour
+        try:
+            result = (fetch_ons_gdp if category == "GDP" else fetch_ons_labour)(session=requests)
+            if result:
+                result["freshness"] = observation_freshness(result["date"], target_dt, 45 if category == "Arbeitsmarkt" else 120,
+                    90 if category == "Arbeitsmarkt" else 180, monthly=category == "Arbeitsmarkt")
+                if category == "Arbeitsmarkt":
+                    result["period_label"] = "Rollierende 3-Monats-Quote"
+                if result["freshness"] not in ("FRESH", "AGING"):
+                    result["value"] = None
+                return result
+        except Exception:
+            pass
+        return {"value": None, "date": None, "source": "ONS", "series_id": None,
+                "frequency": "quarterly" if category == "GDP" else "rolling_three_month_monthly_release", "freshness": "UNAVAILABLE"}
     if curr == "EUR" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_macro import fetch_eurostat_observation
         try:
@@ -4588,6 +4645,9 @@ def get_macro_observation_details(curr, category, target_date=None):
             pass
         return {"value": None, "date": None, "source": "Eurostat", "series_id": None,
                 "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE"}
+    if category == "Arbeitsmarkt" and curr in ("CHF", "NZD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        return {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": None,
+                "frequency": "unverified", "freshness": "UNAVAILABLE"}
     series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
     result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
               "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
@@ -4977,7 +5037,7 @@ def use_live_core_cache(target_date=None):
     return live_date and (os.environ.get("FX_COLLECTOR") != "1" or os.environ.get("FX_READ_CORE_CACHE") == "1")
 
 
-def compute_currency_details(curr: str, target_date=None) -> dict:
+def compute_currency_details(curr: str, target_date=None, include_context=True) -> dict:
     """Evaluate each CORE factor independently and fail closed on its errors."""
     if use_live_core_cache(target_date):
         return live_data.details(curr)
@@ -5005,6 +5065,10 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         cpi = finite_number(cpi)
         freshness["Inflation"] = status
         observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+        if curr in ("EUR", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
+            official = get_current_official_cpi(curr)
+            if official:
+                observations["Inflation"].update(official)
         if curr in ("NZD", "GBP", "CAD") and observed is not None:
             loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
             release_frame, _, _ = loader()
@@ -5063,7 +5127,7 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         freshness["GDP"] = "UNAVAILABLE"
 
     try:
-        bci = get_bci_value(curr, dt_str)
+        bci = get_bci_value(curr, dt_str) if include_context else None
         scores["BCI"] = finite_number(bci.get("value")) if bci else None
     except Exception:
         scores["BCI"] = None
