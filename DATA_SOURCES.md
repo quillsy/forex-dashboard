@@ -1,3 +1,51 @@
+# Live data release V2.8
+
+Current model: `CORE_V2_8_2026_09`. Pair signals require five qualified factors on both currencies AND an unexpired collector check. Unknown release calendars expire after one hour. Known future release deadlines are represented separately from maximum observation ages. A failed fetch never renews the successful-check timestamp.
+
+## New verified public adapters
+
+- Eurostat EUR unemployment: `une_rt_m:M.SA.TOTAL.PC_ACT.T.EA21`, monthly, seasonally adjusted labour-force percent. Live probe July 2026: 6.4%.
+- Eurostat EUR GDP: `namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21`, quarterly real YoY, seasonal/calendar adjusted. Live probe Q2 2026: 1.2%. Uses period-end dates, not fabricated release dates.
+- Japan Ministry of Finance: `jgbcme.csv`, exact 2Y column and percent unit, coupon-bond constant-maturity yield. Explicitly named, no zero-coupon substitution. Live probe September 4: 1.83%.
+- Existing FRED sources are additionally validated against exact original series metadata. Real GDP YoY series are not transformed twice; GDPC1 is transformed using the same quarter one year earlier. GDP freshness uses actual quarter end, preserving the original label for the YoY lookup.
+
+## Central collection and public state
+
+`run_data_collection.py --live-only` collects normalized CORE observations. The workflow runs at minute 17 and 47; the existing 22:00 UTC daily work remains separate. Requests are deduplicated within each run. Dashboard HTTP reads are blocked by the transport; the live currency/pair views use `live_core_data.json`. Old raw/history/context panels can be incomplete and are labelled as such. Backtesting algorithms and historic snapshots have not been rewritten.
+
+The public cache includes only an explicit projection of market observations and provenance. Raw provider responses, headers, tokens and request URLs are not persisted. Observations are validated again on read. The site checks freshness even when the scheduler stops. Scheduled jobs can be delayed; this is not a one-hour service guarantee.
+
+Provider telemetry counts requests in the last run and UTC day. Actual account limits, reset times and remaining balances are UNKNOWN unless independently established; local counts must never be advertised as provider-confirmed balances. The operator view is password protected. No outbound alert service is configured.
+
+## Intentional live blocks
+
+- PMI: exact survey consistency and public redistribution rights are not established. All live PMI factors are withheld; consequently no pair currently meets 100%.
+- EUR/CHF/AUD/JPY inflation: geography, metric identity or original-unit checks remain open; these factors are withheld pending qualification.
+- Unsupported old FRED unemployment identifiers and unknown GBP GDP mapping are not enabled by guessing replacements.
+- GBP/CHF/AUD/NZD genuine compatible 2Y access remains unresolved. RBNZ automated access requires provider permission; the existing failure is not bypassed.
+- A zero value, proxy, old release or additional free account never fills one of these gaps.
+
+## Credential security
+
+Embedded defaults have been removed from the old `app_zero_overlap.py`. Historical credential exposures still require provider-side revocation/rotation. Known affected provider hosts are blocked for collection until replacement has been performed and the operator explicitly configures `FX_ROTATED_PROVIDER_HOSTS`. This marker is not proof of rotation; set it only after provider confirmation. No secrets have been rotated or newly issued by this release.
+
+GitHub Actions and Streamlit secrets are separate configurations. Existing local credentials were used only in isolated authorized probes; they were not copied into repository files. `DASHBOARD_OPERATOR_PASSWORD` remains optional and unset unless independently configured.
+
+## Verification evidence
+
+See `CORE_SOURCE_AUDIT.md` for all 40 factor source routes and remaining qualifications. Eurostat attribution is displayed in the source table; CORE scores are our calculations, not Eurostat publications.
+
+- https://ec.europa.eu/eurostat/help/copyright-notice
+- https://ec.europa.eu/eurostat/cache/metadata/en/une_rt_m_esms.htm
+- https://ec.europa.eu/eurostat/cache/metadata/en/namq_10_gdp_esms.htm
+- https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/qa.htm
+- https://www.mof.go.jp/english/about_mof/notice/index.html
+- https://fred.stlouisfed.org/docs/api/fred/series.html
+
+---
+
+## Prior V2.7 implementation notes (historical)
+
 # Data access and reliability
 
 Current model: `CORE_V2_7_2026_09`. User-approved change on 7 September 2026: pair signals and new pair snapshots require all five CORE factors (100% coverage) on both sides. Currency research retains the 50% availability gate. Factor formulas and weights (35/20/20/20/5) are unchanged. Existing V2.6 and older snapshots remain untouched. Access keys do not certify data accuracy. Missing, future-dated and stale observations must remain unavailable. Coverage is not a probability of success.

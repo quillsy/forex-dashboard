@@ -39,7 +39,7 @@ def harness():
         "st": SimpleNamespace(session_state={}),
         "check_demo_active": lambda: False,
         "compute_checklist_snapshot": lambda weights: [],
-        "compute_currency_details": lambda *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), 20.0), "_completeness": 100.0, "_missing": []},
+        "compute_currency_details": lambda *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), 20.0), "_live_checked": True, "_completeness": 100.0, "_missing": []},
         "compute_currency_professional_score_and_regime_custom": lambda *args: (20, "Normal", 20, 0, {}),
         "get_pair_signal_and_badge": lambda *args: ("MID BUY", "green", 25, "BUY"),
         "get_vix_value": lambda *args: None,

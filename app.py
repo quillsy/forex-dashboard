@@ -5,7 +5,8 @@ import itertools
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
+from provider_transport import transport as requests
+import live_data
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 # ----------------- Load Environment Variables -----------------
 load_dotenv()
 
-CURRENT_MODEL_VERSION = "CORE_V2_7_2026_09"
+CURRENT_MODEL_VERSION = "CORE_V2_8_2026_09"
 
 # Set up page config
 st.set_page_config(
@@ -1703,6 +1704,10 @@ def get_all_pmi_data_historical(fred_key, eodhd_key, target_date):
     return pmi_results
 
 def get_all_pmi_data(fred_key, eodhd_key, target_date=None):
+    if not check_demo_active() and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        # Survey identity and redistribution permission are not established yet.
+        # Historical research paths are preserved; live CORE stays unavailable.
+        return {}
     is_today_or_yesterday = False
     if target_date is not None:
         try:
@@ -2046,7 +2051,10 @@ def get_statcan_cpi_data():
                 obs_dt = pd.to_datetime(dp["refPer"])
                 val = float(dp["value"])
                 # StatCan releaseTime is e.g. '2026-08-17T08:30'
-                release_dt = pd.to_datetime(dp["releaseTime"]).tz_localize(None)
+                release_dt = pd.to_datetime(dp["releaseTime"])
+                if release_dt.tzinfo is None:
+                    release_dt = release_dt.tz_localize("America/Toronto", ambiguous="raise", nonexistent="raise")
+                release_dt = release_dt.tz_convert("UTC").tz_localize(None)
             except Exception:
                 continue
                 
@@ -3066,6 +3074,11 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             row = official.iloc[-1]
             if observation_freshness(row["date"], target_date, 5, 15) in {"FRESH", "AGING"}:
                 return float(row["value"]), row["date"], official.attrs["source"]
+    if curr == "JPY" and pd.Timestamp(target_date).date() == datetime.now().date():
+        from official_yields import fetch_japan_mof_2y
+        observation = fetch_japan_mof_2y(target_date, client=requests)
+        if observation and observation_freshness(observation["observation_date"], target_date, 5, 15) in {"FRESH", "AGING"}:
+            return observation["value"], observation["observation_date"], observation["source"]
     # USD: FRED DGS2 preferred
     if curr == "USD":
         if fred_key:
@@ -4185,7 +4198,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             if res_ons is not None:
                 df, _, is_live = res_ons
                 if df is not None and not df.empty:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
                     if not df_filtered.empty:
                         obs_row = df_filtered.iloc[-1]
@@ -4228,7 +4241,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             if res_statcan is not None:
                 df, _, is_live = res_statcan
                 if df is not None and not df.empty:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
                     if not df_filtered.empty:
                         obs_row = df_filtered.iloc[-1]
@@ -4265,7 +4278,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                                     return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
 
             # If StatCan failed or is empty, only allow historical fallback if target date is > 90 days ago
-            target_dt = pd.to_datetime(dt_str)
+            target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
             is_historical = (datetime.now() - target_dt).days > 90
             if is_historical:
                 series_id = "CPALTT01CAM657N"
@@ -4283,7 +4296,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             if res_abs is not None:
                 df, _, is_live = res_abs
                 if df is not None and not df.empty:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
                     if not df_filtered.empty:
                         obs_row = df_filtered.iloc[-1]
@@ -4313,7 +4326,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                             else:
                                 return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
             # If ABS failed or is empty, only allow historical fallback if target date is > 90 days ago
-            target_dt = pd.to_datetime(dt_str)
+            target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
             is_historical = (datetime.now() - target_dt).days > 90
             if is_historical:
                 series_id = "AUSCPIALLQINMEI"
@@ -4331,7 +4344,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             if res_estat is not None:
                 df, _, is_live = res_estat
                 if df is not None and not df.empty:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
                     if not df_filtered.empty:
                         obs_row = df_filtered.iloc[-1]
@@ -4362,7 +4375,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                                 return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
 
             # If e-Stat failed or is empty, only allow historical fallback if target date is > 90 days ago
-            target_dt = pd.to_datetime(dt_str)
+            target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
             is_historical = (datetime.now() - target_dt).days > 90
             if is_historical:
                 series_id = "JPNCPIALLMINMEI"
@@ -4380,7 +4393,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             if res_statsnz is not None:
                 df, _, is_live = res_statsnz
                 if df is not None and not df.empty:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[(df["date"] <= target_dt) & (df["release_date"] <= target_dt)].sort_values("date")
                     if not df_filtered.empty:
                         obs_row = df_filtered.iloc[-1]
@@ -4411,7 +4424,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                                 return None, obs_date.strftime("%Y-%m-%d"), metric_type, actual_source, series_id, actual_freshness
 
             # If Stats NZ failed or is empty, only allow historical fallback if target date is > 180 days ago
-            target_dt = pd.to_datetime(dt_str)
+            target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
             is_historical = (datetime.now() - target_dt).days > 180
             if is_historical:
                 series_id = "NZLCPIALLMINMEI"
@@ -4426,7 +4439,7 @@ def get_cpi_yoy_details(curr: str, target_date=None):
                 if not is_live and not check_demo_active():
                     pass
                 else:
-                    target_dt = pd.to_datetime(dt_str)
+                    target_dt = (pd.Timestamp.now(tz="UTC").tz_localize(None) if dt_str == datetime.now().strftime("%Y-%m-%d") else pd.to_datetime(dt_str))
                     df_filtered = df[df["date"] <= target_dt].sort_values("date")
                     
                     if not df_filtered.empty:
@@ -4561,6 +4574,20 @@ def get_macro_observation_details(curr, category, target_date=None):
     stand in for the current monthly labour or quarterly GDP observation.
     """
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
+    if curr == "EUR" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_macro import fetch_eurostat_observation
+        try:
+            result = fetch_eurostat_observation(category, session=requests)
+            if result:
+                result["freshness"] = observation_freshness(result["date"], target_dt, 45 if category == "Arbeitsmarkt" else 120,
+                    90 if category == "Arbeitsmarkt" else 180, monthly=category == "Arbeitsmarkt")
+                if result["freshness"] not in ("FRESH", "AGING"):
+                    result["value"] = None
+                return result
+        except Exception:
+            pass
+        return {"value": None, "date": None, "source": "Eurostat", "series_id": None,
+                "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE"}
     series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
     result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
               "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
@@ -4581,11 +4608,12 @@ def get_macro_observation_details(curr, category, target_date=None):
                     prior = finite_number(previous.iloc[-1]["value"]) if not previous.empty else None
                     value = (float(value) / prior - 1.0) * 100.0 if prior not in (None, 0.0) else None
                 value = finite_number(value)
-                freshness = observation_freshness(observed, target_dt, 45 if category == "Arbeitsmarkt" else 120,
+                age_observed = observed + pd.offsets.QuarterEnd(0) if category == "GDP" else observed
+                freshness = observation_freshness(age_observed, target_dt, 45 if category == "Arbeitsmarkt" else 120,
                                                   90 if category == "Arbeitsmarkt" else 180,
                                                   monthly=category == "Arbeitsmarkt")
                 valid_range = value is not None and (0 <= value <= 25 if category == "Arbeitsmarkt" else abs(value) <= 25)
-                result.update(date=observed.strftime("%Y-%m-%d"), source="FRED" if is_live else "Demo",
+                result.update(date=age_observed.strftime("%Y-%m-%d"), source="FRED" if is_live else "Demo",
                               freshness=freshness if valid_range else "FAILED")
                 if valid_range and freshness in ("FRESH", "AGING"):
                     result["value"] = value
@@ -4941,8 +4969,17 @@ def get_bci_value(curr: str, target_date=None) -> dict:
 CORE_FACTOR_WEIGHTS = {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0}
 
 
+def use_live_core_cache(target_date=None):
+    if check_demo_active():
+        return False
+    live_date = target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()
+    return live_date and (os.environ.get("FX_COLLECTOR") != "1" or os.environ.get("FX_READ_CORE_CACHE") == "1")
+
+
 def compute_currency_details(curr: str, target_date=None) -> dict:
     """Evaluate each CORE factor independently and fail closed on its errors."""
+    if use_live_core_cache(target_date):
+        return live_data.details(curr)
     dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
     scores = {factor: None for factor in CORE_FACTOR_WEIGHTS}
     freshness = {factor: "UNAVAILABLE" for factor in CORE_FACTOR_WEIGHTS}
@@ -4967,6 +5004,17 @@ def compute_currency_details(curr: str, target_date=None) -> dict:
         cpi = finite_number(cpi)
         freshness["Inflation"] = status
         observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+        if curr in ("NZD", "GBP", "CAD") and observed is not None:
+            loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
+            release_frame, _, _ = loader()
+            if release_frame is not None:
+                matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
+                if not matching.empty:
+                    release = matching.iloc[-1]
+                    if not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
+                        published = pd.Timestamp(release["release_date"])
+                        published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")
+                        observations["Inflation"]["published_at"] = published.isoformat()
         if cpi is not None and normalized_freshness(status) in ("FRESH", "AGING"):
             scores["Inflation"] = float(np.clip((cpi - 2.0) * 50.0, -100.0, 100.0))
     except Exception:
@@ -5046,6 +5094,13 @@ def compute_currency_professional_score_and_regime_custom(curr: str, weights: di
               for factor, default in CORE_FACTOR_WEIGHTS.items() if factor not in missing}
     total_weight = sum(weight for value, weight in active.values())
     core_score = sum(value * weight for value, weight in active.values()) / total_weight if total_weight > 0 else None
+
+    if use_live_core_cache(target_date):
+        scores["_context_status"] = "NOT_COLLECTED"
+        scores["_diagnostic_partial_score"] = core_score
+        scores["_core_status"] = "VALID" if total_weight >= .5 else "INSUFFICIENT DATA"
+        core_score = core_score if total_weight >= .5 else None
+        return core_score, "Context nicht geprüft", core_score, 0.0, scores
 
     dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
     series = {"Geldpolitik": YIELD_2Y_SERIES.get(curr), "Inflation": CPI_SERIES.get(curr),
@@ -5721,8 +5776,9 @@ def render_articles_grid(articles_list):
 
 
 def pair_core_is_complete(details):
-    """V2.7 pair eligibility: all five factors, not a rounded coverage badge."""
+    """V2.8: five complete factors AND current collector validation."""
     return (isinstance(details, dict)
+            and details.get("_live_checked") is True
             and finite_number(details.get("_completeness")) == 100.0
             and not details.get("_missing")
             and all(finite_number(details.get(factor)) is not None
@@ -5968,7 +6024,8 @@ if not getattr(st, "_mock_mode", False):
             latest_close = itick_data["close"] if itick_data else 0.0
     
     # ----------------- 5. HEADER SECTION -----------------
-    st.title("⚖️ Forex Fundamental Suite")
+    st.title("FX Fundamental Dashboard")
+    live_data.render_status(st, operator_is_authorized())
     if st.session_state.get("demo_mode_chk", False):
         st.warning("⚠️ **DEMO MODE ACTIVE – DATA IS NOT REAL (using mock data)**")
     

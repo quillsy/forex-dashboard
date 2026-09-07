@@ -1,9 +1,10 @@
-name: G10 Live Data Collection
+name: G8 Live Data Collection
 
 on:
   schedule:
     # Run once daily at 22:00 UTC (after market close)
     - cron: '0 22 * * *'
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     # Enable manual run trigger
 
@@ -42,17 +43,21 @@ jobs:
           STATS_NZ_API_KEY: ${{ secrets.STATS_NZ_API_KEY }}
           OCP_APIM_SUBSCRIPTION_KEY: ${{ secrets.OCP_APIM_SUBSCRIPTION_KEY }}
         run: |
-          python run_data_collection.py
+          if [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+            python run_data_collection.py
+          else
+            python run_data_collection.py --live-only
+          fi
 
       - name: Commit and push changes
         if: ${{ always() }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          for file in live_signals.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json; do
+          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json; do
             if [ -f "$file" ]; then git add -- "$file"; fi
           done
           if ! git diff --cached --quiet; then
-            git commit -m "Auto-update: G10 Live Signal Snapshots & Outcomes [skip ci]"
+            git commit -m "Auto-update: G8 live data [skip ci]"
             git push
           fi
