@@ -4655,8 +4655,19 @@ def get_macro_observation_details(curr, category, target_date=None):
         return {"value": None, "date": None, "source": "Eurostat", "series_id": None,
                 "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE"}
     if category == "Arbeitsmarkt" and curr in ("CHF", "NZD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_quarterly_labour import fetch_quarterly_labour
+        try:
+            result = fetch_quarterly_labour(curr, session=requests)
+            if result:
+                result["freshness"] = observation_freshness(result["date"], target_dt, 120, 180, monthly=False)
+                result["period_label"] = "Saisonbereinigte Quartalsquote"
+                if result["freshness"] not in ("FRESH", "AGING"):
+                    result["value"] = None
+                return result
+        except Exception:
+            pass
         return {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": None,
-                "frequency": "unverified", "freshness": "UNAVAILABLE"}
+                "frequency": "quarterly", "freshness": "UNAVAILABLE"}
     series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
     result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
               "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
@@ -5074,6 +5085,12 @@ def compute_currency_details(curr: str, target_date=None, include_context=True) 
         cpi = finite_number(cpi)
         freshness["Inflation"] = status
         observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+        if pd.Timestamp(dt_str).date() == datetime.now().date():
+            observations["Inflation"].update({"frequency": "quarterly" if curr == "NZD" else "monthly",
+                "unit": "annual percent change", "seasonal_adjustment": "NSA"})
+            if observed is not None:
+                period = pd.Timestamp(observed)
+                observations["Inflation"]["reference_period"] = f"{period.year}-Q{(period.month - 1) // 3 + 1}" if curr == "NZD" else period.strftime("%Y-%m")
         if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
             official = get_current_official_cpi(curr)
             if official:

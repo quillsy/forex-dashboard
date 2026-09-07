@@ -79,6 +79,19 @@ class LiveDataTests(unittest.TestCase):
         self.assertNotIn('private',str(out))
         self.assertEqual(out['value'],2)
 
+    def test_official_attribution_links_exclude_queries_and_other_hosts(self):
+        url='https://www.stats.govt.nz/information-releases/labour-market-statistics-june-2026-quarter/'
+        self.assertEqual(live.public_observation({'source_url':url})['source_url'], url)
+        for bad in (url+'?token=private',url+'#private',url.replace('www.stats.govt.nz','evil.example'),url.replace('https:','http:')):
+            self.assertNotIn('source_url', live.public_observation({'source_url':bad}))
+
+    def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
+        row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
+            'next_due_at':'2026-11-03T11:00:00+00:00'},'FRESH',NOW.isoformat())
+        self.assertEqual(row['expires_at'],'2026-12-27T00:00:00+00:00')
+        self.assertTrue(live.eligible(row,datetime(2026,10,1,tzinfo=timezone.utc))[0])
+        self.assertFalse(live.eligible(row,datetime(2026,11,3,11,tzinfo=timezone.utc))[0])
+
 class TransportTests(unittest.TestCase):
     def response(self,status=200):
         response=requests.Response();response.status_code=status;response._content=b'{"value":2}'

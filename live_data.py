@@ -3,6 +3,7 @@ import copy
 import json
 import math
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate"})
+OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision"})
 
 
 def now_utc():
@@ -123,6 +124,11 @@ def public_observation(observation):
     result = {}
     for key in OBS_FIELDS:
         value = observation.get(key)
+        if key == "source_url":
+            if isinstance(value, str) and len(value) <= 400 and re.fullmatch(
+                r"https://(?:www\.stats\.govt\.nz/information-releases/labour-market-statistics-[a-z]+-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
+                result[key] = value
+            continue
         if value is None or isinstance(value, (bool, int, float)):
             result[key] = value if value is None or isinstance(value, bool) else number(value)
         elif isinstance(value, str) and len(value) <= 180 and not any(x in value.lower() for x in ("http", "token=", "key=", "bearer ")):
@@ -202,7 +208,7 @@ def collect(app, path=PATH):
             validation, reason = "VALID", None
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
-            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP"):
+            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD")):
                 if not fred_contract(observation.get("series_id"), factor):
                     validation, reason = "UNVERIFIED", "Amtliche Serien-Metadaten fehlen oder passen nicht"
             elif factor == "Inflation" and currency == "USD":
@@ -263,14 +269,16 @@ def render_status(st, authorized=False):
                          "Wert": observation.get("value", observation.get("yield_2y")),
                          "Referenzperiode": observation.get("reference_period") or observation.get("date"),
                          "Quelle": observation.get("source"), "Einheit": observation.get("unit"),
+                         "Quellenlink": public_observation(observation).get("source_url"),
                          "Messzeitraum": observation.get("period_label") or observation.get("frequency"),
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
                          "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
-                         "Nächste Fälligkeit": record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn NZ; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") == "date_only_start_of_NZ_day" else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
         st.dataframe(rows, hide_index=True, use_container_width=True)
         st.caption("Eurostat-Daten: Quelle Eurostat, Abrufzeit siehe Tabelle. CORE-Scores sind eigene Berechnungen; Eurostat ist für diese Berechnungen nicht verantwortlich.")
+        st.caption("Quartals-Arbeitsmarkt: Stats NZ, Labour market statistics ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), und Bundesamt für Statistik, Erwerbslosenquote gemäss ILO ([Nutzung mit Quellenangabe](https://opendata.swiss/terms-of-use#terms_by)). Originalquellen stehen in der Tabelle. Scores und Darstellungsänderungen sind eigene Berechnungen.")
     if authorized:
         with st.expander("Anbieter und Anfragebudget", expanded=False):
             try:
