@@ -280,3 +280,166 @@ def fetch_quarterly_labour(currency, *, now=None, session=None):
     if result is not None:
         result['period_label'] = 'Saisonbereinigte Quartalsquote'
     return result
+
+
+JP_LABOUR_FILE = 'https://www.e-stat.go.jp/en/stat-search/file-download?fileKind=0&statInfId=000031831358'
+JP_LABOUR_RESULTS = 'https://www.stat.go.jp/english/data/roudou/result.html'
+JP_LABOUR_CALENDAR = 'https://www.stat.go.jp/english/data/roudou/1543.html'
+JP_LABOUR_RIGHTS = 'https://www.stat.go.jp/english/info/riyou.html'
+
+
+def _jp_space(value):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def parse_japan_labour_release(results_html, calendar_html, *, now=None):
+    """Validate the published monthly period against the independent release calendar.
+
+    Calendar dates are not observed publication times. Conservatively expire at
+    the next release's start of day in Japan, explicitly labelled as date-only.
+    """
+    from bs4 import BeautifulSoup
+    checked = _now(now)
+    local_day = checked.astimezone(ZoneInfo('Asia/Tokyo')).date()
+    releases = []
+    for tr in BeautifulSoup(results_html, 'html.parser').find_all('tr'):
+        cells = [_jp_space(x.get_text(' ', strip=True)) for x in tr.find_all(['td', 'th'], recursive=False)]
+        if cells and cells[0] == 'Monthly':
+            if len(cells) < 2:
+                raise ValueError('JP_LABOUR_RELEASE_INVALID')
+            match = re.fullmatch(r'- ([A-Za-z]+) (\d{4}) - \(Released on ([A-Za-z]+) (\d{1,2}), (\d{4})\) Main results', cells[1])
+            if not match:
+                raise ValueError('JP_LABOUR_RELEASE_INVALID')
+            month, year, release_month, day, release_year = match.groups()
+            period = f'{int(year):04d}-{MONTHS[month]:02d}'
+            released = datetime(int(release_year), MONTHS[release_month], int(day)).date()
+            releases.append((period, released))
+    if len(releases) != 1:
+        raise ValueError('JP_LABOUR_RELEASE_IDENTITY_INVALID')
+    period, released = releases[0]
+    if released > local_day:
+        raise ValueError('JP_LABOUR_FUTURE_RELEASE')
+    schedule = {}
+    year = None
+    for tr in BeautifulSoup(calendar_html, 'html.parser').find_all('tr'):
+        cells = [_jp_space(x.get_text(' ', strip=True)) for x in tr.find_all(['td', 'th'], recursive=False)]
+        if len(cells) != 4 or cells[0] == 'Reference month':
+            continue
+        match = re.match(r'(?:(\d{4}) )?([A-Za-z]+)(?:,|$)', cells[0])
+        due_match = re.fullmatch(r'([A-Za-z]+) (\d{1,2})(?:, (\d{4}))?', cells[1])
+        if not match or not due_match or match[2] not in MONTHS or due_match[1] not in MONTHS:
+            raise ValueError('JP_LABOUR_CALENDAR_INVALID')
+        if match[1]:
+            year = int(match[1])
+        if year is None:
+            raise ValueError('JP_LABOUR_CALENDAR_YEAR_MISSING')
+        month = MONTHS[match[2]]
+        due_year = int(due_match[3]) if due_match[3] else year
+        due = datetime(due_year, MONTHS[due_match[1]], int(due_match[2])).date()
+        end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+        key = f'{year:04d}-{month:02d}'
+        if due <= end or key in schedule:
+            raise ValueError('JP_LABOUR_CALENDAR_CONFLICT')
+        schedule[key] = due
+    if schedule.get(period) != released:
+        raise ValueError('JP_LABOUR_RELEASE_CALENDAR_CONFLICT')
+    newer = [(p, d) for p, d in schedule.items() if p > period]
+    if not newer:
+        raise ValueError('JP_LABOUR_NEXT_RELEASE_UNKNOWN')
+    next_period, next_day = min(newer)
+    y, m = map(int, period.split('-'))
+    serial = y * 12 + m
+    expected_y, expected_m0 = divmod(serial, 12)
+    if next_period != f'{expected_y:04d}-{expected_m0 + 1:02d}':
+        raise ValueError('JP_LABOUR_CALENDAR_GAP')
+    if next_day <= local_day:
+        raise ValueError('JP_LABOUR_NEW_RELEASE_DUE')
+    return {'reference_period': period, 'release_date_known': released.isoformat(),
+            'next_due_at': datetime.combine(next_day, datetime.min.time(), ZoneInfo('Asia/Tokyo')).astimezone(timezone.utc).isoformat()}
+
+
+def parse_japan_labour(content, release, *, now=None):
+    """Read official historical 1-a-1 SA both-sexes rate; reject incomplete periods."""
+    from openpyxl import load_workbook
+    checked = _now(now)
+    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    try:
+        if '季節調整値' not in workbook.sheetnames:
+            raise ValueError('JP_LABOUR_SA_SHEET_MISSING')
+        rows = list(workbook['季節調整値'].iter_rows(values_only=True))
+    finally:
+        workbook.close()
+    if len(rows) < 11 or len(rows[6]) != 22:
+        raise ValueError('JP_LABOUR_SCHEMA_INVALID')
+    if ('Historical data 1 a-1' not in _jp_space(rows[1][4]) or
+            'Whole Japan, Monthly Data' not in _jp_space(rows[1][4]) or
+            'Seasonally adjusted series' not in _jp_space(rows[4][4]) or
+            _jp_space(rows[6][19]) != 'Unemployment rate (percent)' or
+            _jp_space(rows[8][19]) != 'Both sexes'):
+        raise ValueError('JP_LABOUR_SERIES_IDENTITY_INVALID')
+    values = {}
+    year, last_month = None, None
+    for row in rows[10:]:
+        month_match = re.fullmatch(r'(\d{1,2})月', _jp_space(row[1]))
+        if not month_match:
+            continue
+        month = int(month_match[1])
+        if not 1 <= month <= 12:
+            raise ValueError('JP_LABOUR_MONTH_INVALID')
+        label = _jp_space(row[0])
+        if label == '※注_Notes':
+            label = ''  # Official note marker, not a year reset.
+        explicit_year = None
+        if re.fullmatch(r'\d{4}', label):
+            explicit_year = int(label)
+        elif label:
+            era = re.fullmatch(r'(昭和|平成|令和)\s*(\d+|元)年', label)
+            if not era:
+                raise ValueError('JP_LABOUR_YEAR_INVALID')
+            explicit_year = {'昭和': 1925, '平成': 1988, '令和': 2018}[era[1]] + (1 if era[2] == '元' else int(era[2]))
+        if year is None:
+            if explicit_year is None:
+                raise ValueError('JP_LABOUR_YEAR_MISSING')
+            year = explicit_year
+        else:
+            expected_year = year + (1 if last_month == 12 and month == 1 else 0)
+            if month != last_month % 12 + 1 or (explicit_year is not None and explicit_year != expected_year):
+                raise ValueError('JP_LABOUR_PERIOD_SEQUENCE_INVALID')
+            year = expected_year
+        last_month = month
+        if row[19] is None:
+            continue
+        period = f'{year:04d}-{month:02d}'
+        if period > release['reference_period']:
+            raise ValueError('JP_LABOUR_UNCONFIRMED_PERIOD')
+        values[period] = _rate(row[19])
+    if not values or max(values) != release['reference_period']:
+        raise ValueError('JP_LABOUR_LATEST_PERIOD_MISSING')
+    period = max(values)
+    year, month = map(int, period.split('-'))
+    end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+    release_day = datetime.fromisoformat(release['release_date_known']).date()
+    due = _timestamp(release['next_due_at'])
+    if end >= release_day or release_day > checked.astimezone(ZoneInfo('Asia/Tokyo')).date() or due <= checked:
+        raise ValueError('JP_LABOUR_RELEASE_TIME_INVALID')
+    return {'value': values[period], 'date': end.isoformat(), 'reference_period': period,
+            'unit': 'percent of labour force age 15+', 'frequency': 'monthly',
+            'seasonal_adjustment': 'SA', 'source': 'Statistics Bureau of Japan (Labour Force Survey)',
+            'source_url': JP_LABOUR_FILE, 'series_id': 'Historical1-a-1:unemployment_rate:BothSexes:SA:M',
+            'checked_at': checked.isoformat(), 'published_at': None,
+            'release_date_known': release['release_date_known'], 'next_due_at': release['next_due_at'],
+            'next_due_precision': 'date_only_start_of_JP_day', 'reuse_terms': JP_LABOUR_RIGHTS}
+
+
+def fetch_japan_labour(*, now=None, session=None):
+    checked = _now(now)
+    transport = session or requests
+    pages = []
+    for url in (JP_LABOUR_RESULTS, JP_LABOUR_CALENDAR):
+        response = transport.get(url, timeout=20)
+        response.raise_for_status()
+        pages.append(response.text)
+    release = parse_japan_labour_release(*pages, now=checked)
+    response = transport.get(JP_LABOUR_FILE, timeout=20)
+    response.raise_for_status()
+    return parse_japan_labour(response.content, release, now=checked)
