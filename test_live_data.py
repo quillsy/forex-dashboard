@@ -184,6 +184,80 @@ class LiveDataTests(unittest.TestCase):
                     self.assertEqual(result['validation'], 'UNVERIFIED')
                     self.assertFalse(live.eligible(result, NOW)[0])
 
+    def test_runtime_path_is_stable_per_checkout_and_does_not_create_directory(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(live.tempfile, 'gettempdir', return_value=tmp):
+            with patch.object(live.Path, 'cwd', return_value=Path(tmp) / 'one'):
+                first = live.runtime_directory()
+                self.assertEqual(first, live.runtime_directory())
+                self.assertFalse(first.exists())
+            with patch.object(live.Path, 'cwd', return_value=Path(tmp) / 'two'):
+                self.assertNotEqual(first, live.runtime_directory())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_ui_selects_newest_complete_model_without_merging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, runtime = Path(tmp) / 'base', Path(tmp) / 'runtime'
+            base.mkdir(); runtime.mkdir()
+            older = {'model_version': live.MODEL, 'completed_at': (NOW - timedelta(minutes=30)).isoformat(),
+                     'currencies': {'EUR': {'GDP': self.record()}}}
+            newer = {'model_version': live.MODEL, 'completed_at': NOW.isoformat(), 'currencies': {}}
+            live.save(older, base / live.PATH); live.save(newer, runtime / live.PATH)
+            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+                self.assertEqual(live.selected_live_directory(), runtime)
+                self.assertEqual(live.load(), newer)
+                self.assertEqual(live.load(base / live.PATH), older)
+                live.save(newer, base / live.PATH); live.save(older, runtime / live.PATH)
+                self.assertEqual(live.selected_live_directory(), base)
+                self.assertEqual(live.load(), newer)
+
+    def test_runtime_invalid_future_or_other_model_is_never_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, runtime = Path(tmp) / 'base', Path(tmp) / 'runtime'
+            base.mkdir(); runtime.mkdir()
+            good = {'model_version': live.MODEL, 'completed_at': NOW.isoformat()}
+            live.save(good, base / live.PATH)
+            candidates = [None, [], {}, {'model_version': live.MODEL, 'completed_at': 'bad'},
+                          dict(good, completed_at=(NOW + timedelta(seconds=1)).isoformat()),
+                          dict(good, model_version='CORE_OTHER')]
+            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+                for bad in candidates:
+                    import json
+                    (runtime / live.PATH).write_text(json.dumps(bad))
+                    self.assertEqual(live.selected_live_directory(), base)
+                    self.assertEqual(live.load(), good)
+                (runtime / live.PATH).write_text('{broken')
+                self.assertEqual(live.load(), good)
+
+    def test_collector_does_not_select_newer_ui_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, runtime = Path(tmp) / 'base', Path(tmp) / 'runtime'
+            base.mkdir(); runtime.mkdir()
+            live.save({'model_version': live.MODEL, 'completed_at': NOW.isoformat()}, runtime / live.PATH)
+            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+                self.assertEqual(live.selected_live_directory(), base)
+                # An explicit path also remains completely independent of selection.
+                self.assertEqual(live.load(base / live.PATH), {})
+
+    def test_operator_budget_comes_from_selected_dataset_directory(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / 'data_collection_status.json').write_text(json.dumps({'providers': {'runtime.example': {'status': 'SUCCESS'}}}))
+            st = MagicMock()
+            with patch.object(live, 'selected_live_directory', return_value=path), patch.object(live, 'load', return_value={}):
+                live.render_status(st, authorized=True)
+            providers = st.dataframe.call_args_list[-1].args[0]
+            self.assertEqual(providers[0]['Anbieter'], 'runtime.example')
+
+    def test_invalid_previous_record_does_not_hide_current_failure_reason(self):
+        for previous in ({'score': None, 'validation': 'VALID', 'reason': 'Old generic reason'},
+                         {'score': 20, 'validation': 'UNVERIFIED', 'reason': 'Old generic reason'}):
+            row = live.build_record('Geldpolitik', None, {}, 'UNAVAILABLE', NOW.isoformat(),
+                                    previous=previous, reason='No verified 2Y yield')
+            self.assertEqual(row['reason'], 'No verified 2Y yield')
+            self.assertNotIn('last_error', row)
+            self.assertFalse(live.eligible(row, NOW)[0])
+
 class TransportTests(unittest.TestCase):
     def response(self,status=200):
         response=requests.Response();response.status_code=status;response._content=b'{"value":2}'

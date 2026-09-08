@@ -13,7 +13,8 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 # ----------------- Load Environment Variables -----------------
-load_dotenv()
+if os.environ.get("FX_FALLBACK_MODE") != "1":
+    load_dotenv()
 
 CURRENT_MODEL_VERSION = "CORE_V2_8_2026_09"
 
@@ -36,7 +37,7 @@ st.set_page_config(
 # ----------------- AUTOMATED VERIFIED G8 POLICY RATE ENGINE -----------------
 import json
 
-POLICY_RATES_CACHE_FILE = ".policy_rates_cache.json"
+POLICY_RATES_CACHE_FILE = str(live_data.selected_live_directory() / ".policy_rates_cache.json")
 
 def find_current_rate_episode_start(observations, current_rate, default_effective_date=None):
     """Walk only the current uninterrupted episode; require an observed boundary."""
@@ -760,6 +761,10 @@ def load_api_key(name, alt_names=None):
     candidates = [name]
     if alt_names:
         candidates.extend(alt_names)
+    if os.environ.get("FX_FALLBACK_MODE") == "1":
+        from run_data_collection import LIVE_FALLBACK_KEYS
+        return next((os.environ[key].strip() for key in candidates
+                     if key in LIVE_FALLBACK_KEYS and os.environ.get(key, "").strip()), None)
         
     for key_name in candidates:
         val = os.getenv(key_name)
@@ -6147,6 +6152,15 @@ if not getattr(st, "_mock_mode", False):
     
     # ----------------- 5. HEADER SECTION -----------------
     st.title("FX Fundamental Dashboard")
+    if not check_demo_active():
+        from run_data_collection import maybe_start_live_fallback, LIVE_FALLBACK_KEYS
+        fallback_status = maybe_start_live_fallback({key: load_api_key(key) for key in LIVE_FALLBACK_KEYS})
+        if fallback_status in ("started", "running"):
+            st.info("Der zentrale Ausfallersatz prüft die Live-Daten. Gültige Werte bleiben sichtbar; die Ansicht aktualisiert sich automatisch.")
+        elif fallback_status == "cooldown":
+            st.caption("Ausfallersatz: nächster Versuch frühestens 30 Minuten nach dem letzten Start. Datenfreigaben werden nicht verlängert.")
+        elif fallback_status in ("failed", "timeout"):
+            st.warning("Der Ausfallersatz konnte den Lauf nicht abschließen. Nächster Versuch nach 30 Minuten; die Anfragenzählung kann unvollständig sein. Nicht bestätigte Daten bleiben gesperrt.")
     # A full rerun rechecks every badge/table against the current clock and cache.
     # The timestamp belongs to this render, so the initial fragment call cannot
     # create a rerun loop. No provider requests are made by the timer itself.

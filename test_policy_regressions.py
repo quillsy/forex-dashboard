@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import Mock
 
 import pandas as pd
+import live_data
 from bs4 import BeautifulSoup
 
 NOW = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
@@ -25,7 +26,7 @@ def load_policy():
     constants = {'POLICY_RATE_DEFINITIONS', 'POLICY_VERIFICATION_MAX_AGE_DAYS', 'POLICY_OFFICIAL_HOSTS', 'POLICY_RATES_CACHE_FILE'}
     nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and (n.name.startswith('_policy_') or n.name in names))
              or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets))]
-    scope = dict(datetime=datetime, timedelta=timedelta, io=io, json=json, os=os, pd=pd,
+    scope = dict(datetime=datetime, timedelta=timedelta, io=io, json=json, os=os, pd=pd, live_data=live_data,
                  st=SimpleNamespace(session_state={}), requests=SimpleNamespace(get=Mock(side_effect=AssertionError('Network forbidden'))))
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<policy-functions>', 'exec'), scope)
     scope['load_api_key'] = lambda name: None
