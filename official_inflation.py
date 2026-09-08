@@ -26,6 +26,8 @@ def _put(records, period, value, now):
         raise ValueError("CPI_PERIOD_INVALID")
     if period >= now.strftime("%Y-%m"):
         return
+    if isinstance(value, bool):
+        raise ValueError("CPI_VALUE_INVALID")
     numeric = float(value)
     if not math.isfinite(numeric) or not -25 <= numeric <= 25:
         raise ValueError("CPI_VALUE_INVALID")
@@ -49,6 +51,11 @@ def parse_estat_cpi(payload, now=None):
     if str(root["RESULT"]["STATUS"]) != "0":
         raise ValueError("ESTAT_FAILURE")
     data = root["STATISTICAL_DATA"]
+    # A successful HTTP/API status does not establish a complete result.
+    # e-Stat documents NEXT_KEY as the continuation row for truncated data.
+    next_key = data.get("RESULT_INF", {}).get("NEXT_KEY")
+    if next_key not in (None, "", 0, "0"):
+        raise ValueError("ESTAT_INCOMPLETE_RESPONSE")
     table = data["TABLE_INF"]
     if table["@id"] != ESTAT_TABLE or table["STAT_NAME"]["@code"] != "00200573":
         raise ValueError("ESTAT_TABLE_INVALID")
@@ -114,7 +121,7 @@ def parse_abs_cpi(payload, now=None):
 
 
 _DIAGNOSTIC_ERRORS = frozenset({
-    "ESTAT_FAILURE", "ESTAT_TABLE_INVALID", "ESTAT_IDENTITY_INVALID", "ESTAT_UNIT_INVALID",
+    "ESTAT_INCOMPLETE_RESPONSE", "ESTAT_FAILURE", "ESTAT_TABLE_INVALID", "ESTAT_IDENTITY_INVALID", "ESTAT_UNIT_INVALID",
     "ESTAT_OBSERVATION_IDENTITY_INVALID", "ABS_DIMENSIONS_INVALID", "ABS_SERIES_COUNT_INVALID",
     "ABS_SERIES_KEY_INVALID", "ABS_SERIES_IDENTITY_INVALID", "ABS_UNIT_INVALID",
     "ABS_TIME_DIMENSION_INVALID", "CPI_PERIOD_INVALID", "CPI_VALUE_INVALID", "CPI_CONFLICT",
@@ -137,8 +144,19 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
             if not estat_key:
                 diagnostic["code"] = "KEY_MISSING"
                 return None
+            # limit is a first-page size, not "latest N observations". Select
+            # the last 24 completed months explicitly in one provider request.
+            # https://www.e-stat.go.jp/api/api-info/e-stat-manual3-0
+            checked = _now(now)
+            serial = checked.year * 12 + checked.month - 1
+            periods = []
+            for offset in range(1, 25):
+                year, zero_month = divmod(serial - offset, 12)
+                month = zero_month + 1
+                periods.append(f"{year}00{month:02d}{month:02d}")
             response = client.get(ESTAT_URL, params={"appId": estat_key, "statsDataId": ESTAT_TABLE,
-                "cdCat01": "0001", "cdArea": "00000", "cdTab": "3", "limit": 24}, timeout=15)
+                "cdCat01": "0001", "cdArea": "00000", "cdTab": "3",
+                "cdTime": ",".join(periods), "limit": 24}, timeout=15)
             parser = parse_estat_cpi
         elif currency == "AUD":
             response = client.get(ABS_URL, params={"lastNObservations": 24},

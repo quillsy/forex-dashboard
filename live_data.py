@@ -62,14 +62,18 @@ def save(data, path=PATH):
             os.unlink(temporary)
 
 
-def eligible(record, now=None):
+def eligible(record, now=None, factor=None):
     now = now or now_utc()
-    if not isinstance(record, dict) or number(record.get("score")) is None:
+    if not isinstance(record, dict):
         return False, "Daten fehlen oder sind nicht validiert"
     if record.get("validation") != "VALID":
-        return False, record.get("reason", "Quellenprüfung offen")
+        return False, record.get("reason") or "Daten fehlen oder Quellenprüfung offen"
+    if number(record.get("score")) is None:
+        return False, record.get("reason") or "Daten fehlen oder sind nicht validiert"
     observation = record.get("observation")
-    factor = record.get("factor")
+    if factor is not None and record.get("factor") != factor:
+        return False, "Faktor-Zuordnung widersprüchlich"
+    factor = factor if factor is not None else record.get("factor")
     if not isinstance(observation, dict) or factor not in FACTORS:
         return False, "Belegte Faktor-Beobachtung fehlt"
     values = ("policy_rate", "yield_2y") if factor == "Geldpolitik" else ("value",)
@@ -106,14 +110,18 @@ def details(currency, now=None, data=None):
     now = now or now_utc()
     data = load() if data is None else data
     records = data.get("currencies", {}).get(currency, {})
-    result = {"BCI": None, "_observations": {}, "_freshness": {}, "_live_reasons": {}, "_live_checked": True}
+    completed = timestamp(data.get("completed_at"))
+    result = {"BCI": None, "_observations": {}, "_freshness": {}, "_live_reasons": {},
+              "_blocking_reasons": {}, "_live_checked": completed is not None and completed <= now}
     for factor in FACTORS:
         record = records.get(factor, {})
-        valid, reason = eligible(record, now)
+        record = record if isinstance(record, dict) else {}
+        valid, reason = eligible(record, now, factor=factor)
         result[factor] = number(record.get("score")) if valid else None
         result["_freshness"][factor] = record.get("freshness", "FRESH") if valid else "UNAVAILABLE"
         result["_observations"][factor] = copy.deepcopy(record.get("observation", {}))
         result["_live_reasons"][factor] = reason
+        result["_blocking_reasons"][factor] = None if valid else reason
     result["_missing"] = [factor for factor in FACTORS if result[factor] is None]
     result["_completeness"] = sum(weight for factor, weight in FACTORS.items() if result[factor] is not None)
     return result
@@ -143,7 +151,7 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
     valid_score = number(score)
     # An unsuccessful check must not advance the last good check timestamp.
     if valid_score is None or validation != "VALID":
-        if previous and validation == "VALID":
+        if previous and validation in ("VALID", "SOURCE_UNAVAILABLE"):
             record = {key: copy.deepcopy(previous.get(key)) for key in
                       ("factor", "score", "validation", "reason", "freshness", "checked_at", "published_at", "next_due_at", "expires_at")}
             record["observation"] = public_observation(previous.get("observation", {}))
@@ -184,17 +192,20 @@ def collect(app, path=PATH):
     metadata = {}
 
     def fred_contract(series, category):
-        if not series or not app.FRED_KEY:
+        if not series:
             return False
+        if not app.FRED_KEY:
+            return None
         try:
             if series not in metadata:
                 response = app.requests.get("https://api.stlouisfed.org/fred/series",
                     params={"series_id": series, "api_key": app.FRED_KEY, "file_type": "json"}, timeout=12)
                 response.raise_for_status()
                 metadata[series] = response.json()
-            return validate_fred_metadata(metadata[series], series, category)
         except Exception:
-            return False
+            return None
+        # A transport failure cannot prove a definition conflict.
+        return validate_fred_metadata(metadata[series], series, category)
 
     for currency in CURRENCIES:
         raw = app.compute_currency_details(currency, include_context=False)
@@ -208,18 +219,29 @@ def collect(app, path=PATH):
             validation, reason = "VALID", None
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
+                if currency in ("USD", "EUR", "GBP", "JPY", "CAD", "AUD"):
+                    reason = "PMI: Anbieterfreigabe für automatisierten Abruf und öffentliche Nutzung fehlt"
+                else:
+                    reason = "PMI: Nutzungsfreigabe für beide Original-Erhebungen noch nicht nachgewiesen"
             elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD")):
-                if not fred_contract(observation.get("series_id"), factor):
-                    validation, reason = "UNVERIFIED", "Amtliche Serien-Metadaten fehlen oder passen nicht"
+                contract = fred_contract(observation.get("series_id"), factor)
+                if contract is not True:
+                    validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
+                    reason = "Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Amtliche Serien-Metadaten fehlen oder passen nicht"
             elif factor == "Inflation" and currency == "USD":
-                if not fred_contract("CPIAUCNS", factor):
-                    validation, reason = "UNVERIFIED", "CPI-Metadaten nicht bestätigt"
+                contract = fred_contract("CPIAUCNS", factor)
+                if contract is not True:
+                    validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
+                    reason = "CPI-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "CPI-Metadaten nicht bestätigt"
             elif factor == "Geldpolitik":
                 source = observation.get("source") or ""
                 if "EODHD" in source:
                     validation, reason = "UNVERIFIED", "Aktualität der gespeicherten Rendite nicht erneut bestätigt"
-                elif currency == "USD" and not fred_contract("DGS2", factor):
-                    validation, reason = "UNVERIFIED", "Rendite-Metadaten nicht bestätigt"
+                elif currency == "USD":
+                    contract = fred_contract("DGS2", factor)
+                    if contract is not True:
+                        validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
+                        reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Rendite-Metadaten nicht bestätigt"
                 # Policy verification must also have succeeded during this run.
                 policy = app.get_verified_policy_rate(currency)
                 verified = policy.get("verification_timestamp") or policy.get("verified_at")
@@ -228,6 +250,10 @@ def collect(app, path=PATH):
                 verified_at = timestamp(verified)
                 if verified_at is None or now_utc() - verified_at >= timedelta(hours=1):
                     validation, reason = "UNVERIFIED", "Aktuelle Leitzinsprüfung fehlt"
+                if currency == "NZD" and os.environ.get("FX_RBNZ_AUTOMATION_APPROVED") != "1":
+                    validation, reason = "UNVERIFIED", "RBNZ: Freigabe für automatisierten Zugriff fehlt; 2J-Rendite ebenfalls ungeprüft"
+                elif validation == "VALID" and number(observation.get("yield_2y")) is None:
+                    reason = "Keine aktuell geprüfte 2J-Rendite mit passender Definition verfügbar"
             if validation == "VALID":
                 observation.setdefault("unit", "percent per annum" if factor == "Geldpolitik" else "percent YoY" if factor in ("Inflation", "GDP") else "percent of labour force")
                 if factor in ("Arbeitsmarkt", "GDP"):
@@ -250,7 +276,7 @@ def render_status(st, authorized=False):
     data = load()
     checked = timestamp(data.get("completed_at"))
     st.caption("LIVE-ANALYSE · G8 · Fundamentaler Horizont: 1–2 Wochen")
-    if checked is None:
+    if checked is None or checked > now_utc():
         st.error("Noch kein geprüfter Live-Datensatz vorhanden. Paar-Signale sind gesperrt.")
     elif now_utc() - checked >= timedelta(hours=1):
         st.warning("Der letzte abgeschlossene Abruf liegt über eine Stunde zurück. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
@@ -261,7 +287,8 @@ def render_status(st, authorized=False):
     for currency in CURRENCIES:
         for factor in FACTORS:
             record = data.get("currencies", {}).get(currency, {}).get(factor, {})
-            valid, reason = eligible(record)
+            record = record if isinstance(record, dict) else {}
+            valid, reason = eligible(record, factor=factor)
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
@@ -293,6 +320,8 @@ def render_status(st, authorized=False):
             item[label] = f"{value:.2f} · {row['Referenzperiode']}" if row["Status"] == "Verfügbar" and value is not None else "—"
             if item[label] != "—" and row["Veröffentlichungsstatus"] == "Amtlich vorläufig":
                 item[label] += " (vorläufig)"
+            if item[label] != "—" and factor == "Inflation" and currency in ("EUR", "CHF"):
+                item[label] += " · HICP"
         overview.append(item)
     st.dataframe(overview, hide_index=True, use_container_width=True)
     st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
@@ -300,6 +329,17 @@ def render_status(st, authorized=False):
         st.dataframe(rows, hide_index=True, use_container_width=True)
         st.caption("Eurostat-Daten: Quelle Eurostat, Abrufzeit siehe Tabelle. CORE-Scores sind eigene Berechnungen; Eurostat ist für diese Berechnungen nicht verantwortlich.")
         st.caption("Quartals-Arbeitsmarkt: Stats NZ, Labour market statistics ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), und Bundesamt für Statistik, Erwerbslosenquote gemäss ILO ([Nutzung mit Quellenangabe](https://opendata.swiss/terms-of-use#terms_by)). Originalquellen stehen in der Tabelle. Scores und Darstellungsänderungen sind eigene Berechnungen.")
+    with st.expander("Sperrgründe je Währung", expanded=True):
+        blocked = []
+        for currency in CURRENCIES:
+            reasons = [f"{row['Faktor']}: {row['Grund']}" for row in rows
+                       if row['Währung'] == currency and row['Status'] == 'Gesperrt']
+            if reasons:
+                blocked.append({"Währung": currency, "Sperrgründe": "; ".join(reasons)})
+        if blocked:
+            st.dataframe(blocked, hide_index=True, use_container_width=True)
+        else:
+            st.caption("Alle 40 Faktoren sind aktuell freigegeben.")
     if authorized:
         with st.expander("Anbieter und Anfragebudget", expanded=False):
             try:

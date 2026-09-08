@@ -124,7 +124,7 @@ class LiveDataTests(unittest.TestCase):
                 live.render_status(st)
             overview=st.dataframe.call_args_list[0].args[0]
             eur=next(row for row in overview if row['Währung']=='EUR')
-            self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig)')
+            self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig) · HICP')
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
@@ -132,6 +132,57 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(row['expires_at'],'2026-12-27T00:00:00+00:00')
         self.assertTrue(live.eligible(row,datetime(2026,10,1,tzinfo=timezone.utc))[0])
         self.assertFalse(live.eligible(row,datetime(2026,11,3,11,tzinfo=timezone.utc))[0])
+
+    def test_block_reason_survives_missing_score(self):
+        row = {'score': None, 'validation': 'UNVERIFIED', 'reason': 'PMI licence unresolved'}
+        result = live.details('EUR', NOW, {'currencies': {'EUR': {'PMI': row}}})
+        self.assertEqual(result['_blocking_reasons']['PMI'], 'PMI licence unresolved')
+        st = MagicMock()
+        with patch.object(live, 'load', return_value={'currencies': {'EUR': {'PMI': row}}}):
+            live.render_status(st)
+        block_rows = st.dataframe.call_args_list[2].args[0]
+        eur = next(item for item in block_rows if item['Währung'] == 'EUR')
+        self.assertIn('PMI: PMI licence unresolved', eur['Sperrgründe'])
+
+    def test_read_checks_expected_factor_and_completed_run(self):
+        row = self.record()
+        data = {'completed_at': NOW.isoformat(), 'currencies': {'EUR': {'Geldpolitik': row}}}
+        result = live.details('EUR', NOW, data)
+        self.assertIsNone(result['Geldpolitik'])
+        self.assertIn('Zuordnung', result['_blocking_reasons']['Geldpolitik'])
+        self.assertTrue(result['_live_checked'])
+        for timestamp in (None, 'bad', (NOW + timedelta(seconds=1)).isoformat()):
+            data['completed_at'] = timestamp
+            self.assertFalse(live.details('EUR', NOW, data)['_live_checked'])
+
+    def test_collector_metadata_outage_retains_but_conflict_invalidates(self):
+        previous = self.record()
+        previous['observation']['series_id'] = 'TEST_GDP'
+        previous['next_due_at'] = (NOW + timedelta(days=1)).isoformat()
+        app = Mock()
+        app.FRED_KEY = 'test-only'
+        app.compute_currency_details.return_value = {
+            'GDP': 99, '_observations': {'GDP': dict(previous['observation'])},
+            '_freshness': {'GDP': 'FRESH'}}
+        app.get_verified_policy_rate.return_value = {'verification_timestamp': NOW.isoformat()}
+        for outage in (True, False):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'live.json'
+                live.save({'model_version': live.MODEL, 'currencies': {'USD': {'GDP': previous}}}, path)
+                app.requests.get.side_effect = requests.RequestException('unavailable') if outage else None
+                app.requests.get.return_value = Mock()
+                with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), patch('source_contracts.validate_fred_metadata', return_value=False):
+                    live.collect(app, path)
+                result = live.load(path)['currencies']['USD']['GDP']
+                if outage:
+                    self.assertEqual(result['checked_at'], previous['checked_at'])
+                    self.assertEqual(result['score'], previous['score'])
+                    self.assertEqual(result['last_error'], 'SOURCE_UNAVAILABLE')
+                    self.assertTrue(live.eligible(result, NOW + timedelta(hours=2))[0])
+                    self.assertFalse(live.eligible(result, NOW + timedelta(days=1))[0])
+                else:
+                    self.assertEqual(result['validation'], 'UNVERIFIED')
+                    self.assertFalse(live.eligible(result, NOW)[0])
 
 class TransportTests(unittest.TestCase):
     def response(self,status=200):
