@@ -90,7 +90,7 @@ def save(data, path=PATH):
             os.unlink(temporary)
 
 
-def eligible(record, now=None, factor=None):
+def eligible(record, now=None, factor=None, currency=None):
     now = now or now_utc()
     if not isinstance(record, dict):
         return False, "Daten fehlen oder sind nicht validiert"
@@ -111,6 +111,12 @@ def eligible(record, now=None, factor=None):
         reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
+    from source_contracts import KNOWN_RELEASES
+    release = KNOWN_RELEASES.get((currency, factor))
+    if release and now >= timestamp(release.get("published_at") or release["confirmed_at"]):
+        minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if reference < minimum:
+            return False, "Neuere amtliche Referenzperiode veröffentlicht: " + release["label"]
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
     if any(record.get(field) is not None and timestamp(record[field]) is None
@@ -144,7 +150,7 @@ def details(currency, now=None, data=None):
     for factor in FACTORS:
         record = records.get(factor, {})
         record = record if isinstance(record, dict) else {}
-        valid, reason = eligible(record, now, factor=factor)
+        valid, reason = eligible(record, now, factor=factor, currency=currency)
         result[factor] = number(record.get("score")) if valid else None
         result["_freshness"][factor] = record.get("freshness", "FRESH") if valid else "UNAVAILABLE"
         result["_observations"][factor] = copy.deepcopy(record.get("observation", {}))
@@ -294,7 +300,8 @@ def collect(app, path=PATH):
                 raw.get("_freshness", {}).get(factor, "UNAVAILABLE"), checked_at,
                 previous.get("currencies", {}).get(currency, {}).get(factor), validation, reason)
             data["currencies"][currency][factor] = record
-    counts = [eligible(record)[0] for records in data["currencies"].values() for record in records.values()]
+    counts = [eligible(record, factor=factor, currency=currency)[0]
+              for currency, records in data["currencies"].items() for factor, record in records.items()]
     data["eligible_factors"] = sum(counts)
     data["status"] = "SUCCESS" if all(counts) else "PARTIAL" if any(counts) else "FAILED"
     data["completed_at"] = now_utc().isoformat()
@@ -318,7 +325,7 @@ def render_status(st, authorized=False):
         for factor in FACTORS:
             record = data.get("currencies", {}).get(currency, {}).get(factor, {})
             record = record if isinstance(record, dict) else {}
-            valid, reason = eligible(record, factor=factor)
+            valid, reason = eligible(record, factor=factor, currency=currency)
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,

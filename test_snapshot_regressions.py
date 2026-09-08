@@ -18,7 +18,7 @@ SOURCE = Path(__file__).with_name("app.py")
 FUNCTIONS = {
     "finite_number", "pair_core_is_complete", "load_live_signals", "save_live_signals", "_live_snapshot_weights", "_live_run_summary", "_finish_live_summary",
     "_live_positive_price", "_live_price_history", "save_live_signal_snapshot",
-    "save_currency_snapshot", "save_all_g10_live_snapshots", "update_open_outcomes",
+    "save_currency_snapshot", "save_all_g10_live_snapshots", "update_open_outcomes", "get_pair_signal_and_badge",
 }
 
 
@@ -39,7 +39,7 @@ def harness():
         "st": SimpleNamespace(session_state={}),
         "check_demo_active": lambda: False,
         "compute_checklist_snapshot": lambda weights: [],
-        "compute_currency_details": lambda *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), 20.0), "_live_checked": True, "_completeness": 100.0, "_missing": []},
+        "compute_currency_details": lambda curr, *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), -5.0 if curr == "USD" else 20.0), "_live_checked": True, "_completeness": 100.0, "_missing": []},
         "compute_currency_professional_score_and_regime_custom": lambda *args: (20, "Normal", 20, 0, {}),
         "get_pair_signal_and_badge": lambda *args: ("MID BUY", "green", 25, "BUY"),
         "get_vix_value": lambda *args: None,
@@ -54,6 +54,11 @@ def harness():
         "get_gdp_yoy_value": lambda *args: None,
         "get_fcs_history_data": lambda *args: (None, None, False),
     }
+    namespace["compute_currency_professional_score_and_regime_custom"] = lambda curr, *args: (
+        -5.0 if curr == "USD" else 20.0, "Normal", -5.0 if curr == "USD" else 20.0,
+        0, namespace["compute_currency_details"](curr))
+    namespace["live_data"] = SimpleNamespace(load=lambda: {}, now_utc=Clock.now,
+        details=lambda curr, **kwargs: namespace["compute_currency_details"](curr))
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace
 
@@ -160,6 +165,36 @@ class SnapshotRegressions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'PAIR_REQUIRES_COMPLETE_CORE'):
             self.save_pair()
         self.assertFalse(Path('live_signals.json').exists())
+
+    def test_snapshot_rejects_inconsistent_scores_divergence_or_badge(self):
+        for base, quote, divergence, badge in ((21, -5, 26, "MID BUY"), (20, -4, 24, "MID BUY"),
+                                               (20, -5, 199, "STRONG SELL"), (20, -5, 25, "MID SELL")):
+            with self.subTest(values=(base, quote, divergence, badge)):
+                with self.assertRaisesRegex(ValueError, "PAIR_SNAPSHOT_SIGNAL_MISMATCH"):
+                    self.ns["save_live_signal_snapshot"]("EUR/USD", "EUR", "USD", base, quote,
+                        divergence, badge, 100, entry_price_date="2026-09-04")
+                self.assertFalse(Path("live_signals.json").exists())
+
+    def test_snapshot_reads_one_dataset_for_both_currencies(self):
+        dataset = {"run": "first"}
+        loads, reads = [], []
+        details = self.ns["compute_currency_details"]
+        def load():
+            loads.append(True)
+            return dataset if len(loads) == 1 else {"run": "changed"}
+        def read(curr, *, now, data):
+            reads.append((curr, now, data))
+            return details(curr)
+        self.ns["live_data"] = SimpleNamespace(load=load, now_utc=Clock.now, details=read)
+        self.assertTrue(self.save_pair())
+        self.assertEqual(len(loads), 1)
+        self.assertEqual([item[0] for item in reads], ["EUR", "USD"])
+        self.assertTrue(all(item[2] is dataset for item in reads))
+        self.assertEqual(reads[0][1], reads[1][1])
+        saved = next(iter(self.read().values()))
+        self.assertEqual(saved["pair_signal"]["divergence"], 25)
+        self.assertEqual(saved["pair_signal"]["signal"], "MID BUY")
+        self.assertTrue(all(value == -5 for value in saved["quote_currency_details"]["factor_scores"].values()))
 
     def test_invalid_or_undated_entries_never_create_snapshot(self):
         for value in (0, -1, None, float("nan"), float("inf"), True):

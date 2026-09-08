@@ -16,6 +16,55 @@ class LiveDataTests(unittest.TestCase):
     def record(self):
         return live.build_record('GDP', 20, {'value': 1.8, 'date': '2026-06-30', 'source': 'Eurostat', 'frequency': 'quarterly'}, 'FRESH', NOW.isoformat())
 
+    def test_known_release_blocks_successful_but_older_mirror_observation(self):
+        release = datetime(2026, 9, 2, 1, 30, tzinfo=timezone.utc)
+        old = live.build_record('GDP', 20, {'value': 2.5, 'date': '2026-03-31',
+            'source': 'FRED', 'frequency': 'quarterly'}, 'AGING',
+            (release - timedelta(minutes=1)).isoformat())
+        self.assertTrue(live.eligible(old, release-timedelta(seconds=1), currency='AUD')[0])
+        self.assertFalse(live.eligible(old, release, currency='AUD')[0])
+        old['checked_at'] = (release+timedelta(minutes=1)).isoformat()
+        allowed, reason = live.eligible(old, release+timedelta(minutes=2), currency='AUD')
+        self.assertFalse(allowed)
+        self.assertIn('2026-Q2', reason)
+        # The same quarter may be dated at its start or end by a provider.
+        for reference in ('2026-04-01', '2026-06-30'):
+            current = live.build_record('GDP', 20, {'value': 2.1, 'date': reference,
+                'source': 'FRED', 'frequency': 'quarterly'}, 'FRESH', release.isoformat())
+            self.assertTrue(live.eligible(current, release, currency='AUD')[0])
+
+    def test_all_known_release_floors_block_old_periods(self):
+        from source_contracts import KNOWN_RELEASES
+        now = datetime(2026, 9, 8, 9, 40, tzinfo=timezone.utc)
+        for (currency, factor), release in KNOWN_RELEASES.items():
+            with self.subTest(currency=currency, factor=factor):
+                old_date = '2026-03-31' if factor == 'GDP' else '2026-06-01'
+                row = live.build_record(factor, 20, {'value': 2.5, 'date': old_date},
+                                        'AGING', now.isoformat())
+                self.assertFalse(live.eligible(row, now, currency=currency)[0])
+                row['observation']['date'] = release['period_start']
+                self.assertTrue(live.eligible(row, now, currency=currency)[0])
+
+    def test_known_release_is_enforced_on_persisted_data_and_status(self):
+        row = live.build_record('Arbeitsmarkt', 20, {'value': 4.4, 'date': '2026-06-01',
+            'frequency': 'monthly', 'source': 'FRED'}, 'AGING', NOW.isoformat())
+        data = {'model_version': live.MODEL, 'completed_at': NOW.isoformat(),
+                'currencies': {'AUD': {'Arbeitsmarkt': row}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'live.json'
+            live.save(data, path)
+            restored = live.load(path)
+        result = live.details('AUD', NOW, restored)
+        self.assertIsNone(result['Arbeitsmarkt'])
+        self.assertIn('2026-07', result['_blocking_reasons']['Arbeitsmarkt'])
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=restored), patch.object(live, 'now_utc', return_value=NOW):
+            live.render_status(st)
+        rows = st.dataframe.call_args_list[1].args[0]
+        aud = next(r for r in rows if r['Währung']=='AUD' and r['Faktor']=='Arbeitsmarkt')
+        self.assertEqual(aud['Status'], 'Gesperrt')
+        self.assertIn('2026-07', aud['Grund'])
+
     def test_hourly_check_expires_at_boundary(self):
         row = self.record()
         self.assertTrue(live.eligible(row, NOW)[0])
