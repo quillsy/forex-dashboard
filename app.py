@@ -4658,6 +4658,28 @@ def get_macro_observation_details(curr, category, target_date=None):
         observation.setdefault("source", "UNAVAILABLE")
         return observation
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
+    if (curr == "AUD" or (curr == "JPY" and category == "Arbeitsmarkt")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_macro import fetch_abs_observation
+        from official_quarterly_labour import fetch_japan_labour
+        validation = "SOURCE_UNAVAILABLE"
+        try:
+            result = (fetch_abs_observation(category, session=requests) if curr == "AUD"
+                      else fetch_japan_labour(session=requests))
+            if result:
+                result["freshness"] = observation_freshness(result["date"], target_dt,
+                    45 if category == "Arbeitsmarkt" else 120,
+                    90 if category == "Arbeitsmarkt" else 180, monthly=category == "Arbeitsmarkt")
+                if result["freshness"] not in ("FRESH", "AGING"):
+                    result["value"] = None
+                return result
+        except requests.exceptions.RequestException:
+            pass
+        except Exception:
+            validation = "UNVERIFIED"
+        return {"value": None, "date": None, "source": "ABS" if curr == "AUD" else "Statistics Bureau of Japan",
+                "series_id": None, "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly",
+                "freshness": "UNAVAILABLE", "_validation": validation,
+                "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
     if curr == "GBP" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_ons import fetch_ons_gdp, fetch_ons_labour
         try:

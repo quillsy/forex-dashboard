@@ -16,7 +16,7 @@ CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision"})
+OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation"})
 
 
 def now_utc():
@@ -135,7 +135,7 @@ def eligible(record, now=None, factor=None, currency=None):
     if due is not None:
         if now >= due:
             return False, "Neue Veröffentlichung oder Prüfung fällig"
-    elif now - checked >= timedelta(hours=1):
+    if (due is None or observation.get("needs_hourly_check") is True) and now - checked >= timedelta(hours=1):
         return False, "Aktualität seit über einer Stunde unbestätigt"
     return True, "Geprüft" if not record.get("last_error") else "Gespeicherte Daten gültig; Quelle gestört"
 
@@ -167,6 +167,14 @@ def public_observation(observation):
     for key in OBS_FIELDS:
         value = observation.get(key)
         if key == "source_url":
+            official_links = {
+                "https://data.api.abs.gov.au/rest/data/LF/M13.3.1599.20.AUS.M",
+                "https://data.api.abs.gov.au/rest/data/ANA_AGG/M1.GPM.20.AUS.Q",
+                "https://www.e-stat.go.jp/en/stat-search/file-download?fileKind=0&statInfId=000031831358",
+            }
+            if isinstance(value, str) and value in official_links:
+                result[key] = value
+                continue
             if isinstance(value, str) and len(value) <= 400 and re.fullmatch(
                 r"https://(?:www\.stats\.govt\.nz/information-releases/labour-market-statistics-[a-z]+-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
                 result[key] = value
@@ -252,14 +260,15 @@ def collect(app, path=PATH):
                 observation["date"] = str(observation["date"])[:10]
             observation.setdefault("published_at", None)
             observation.setdefault("frequency", "daily" if factor == "Geldpolitik" else "quarterly" if factor == "GDP" or (factor == "Inflation" and currency == "NZD") else "monthly")
-            validation, reason = "VALID", None
+            validation = observation.pop("_validation", "VALID")
+            reason = observation.pop("_reason", None)
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
                 if currency in ("USD", "EUR", "GBP", "JPY", "CAD", "AUD"):
                     reason = "PMI: Anbieterfreigabe für automatisierten Abruf und öffentliche Nutzung fehlt"
                 else:
                     reason = "PMI: Nutzungsfreigabe für beide Original-Erhebungen noch nicht nachgewiesen"
-            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD")):
+            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY")) and currency != "AUD":
                 contract = fred_contract(observation.get("series_id"), factor)
                 if contract is not True:
                     validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
@@ -339,7 +348,7 @@ def render_status(st, authorized=False):
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
                          "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
-                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn NZ; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") == "date_only_start_of_NZ_day" else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
     available = sum(row["Status"] == "Verfügbar" for row in rows)
     retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")

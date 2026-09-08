@@ -140,4 +140,72 @@ class QuarterlyLabourTests(unittest.TestCase):
         with self.assertRaises(ValueError): fetch_ch_labour(now=NOW, session=session)
 
 
+
+
+class JapanLabourTests(unittest.TestCase):
+    def release_pages(self):
+        return ('<table><tr><td>Monthly</td><td>- July 2026 - (Released on August 28, 2026) Main results</td><td>-</td></tr></table>',
+                '<table><tr><td>2026 July</td><td>August 28</td><td></td><td></td></tr>'
+                '<tr><td>August</td><td>October 2</td><td></td><td></td></tr></table>')
+
+    def book(self, mutate=None):
+        from openpyxl import Workbook
+        w = Workbook(); s = w.active; s.title = '季節調整値'
+        s.cell(2, 5, 'Historical data 1 a-1 Major items - Whole Japan, Monthly Data')
+        s.cell(5, 5, 'Seasonally adjusted series')
+        s.cell(7, 20, 'Unemployment rate  (percent)'); s.cell(7, 22, '')
+        s.cell(9, 20, 'Both sexes')
+        for month in range(1, 13):
+            row = month + 10
+            if month == 1: s.cell(row, 1, '令和 8年')
+            if month == 2: s.cell(row, 1, 2026)
+            s.cell(row, 2, f'{month}月')
+            if month <= 7: s.cell(row, 20, 2.4 if month == 7 else 2.5)
+        if mutate: mutate(s)
+        out = io.BytesIO(); w.save(out); return out.getvalue()
+
+    def test_actual_layout_july_and_blank_future_months(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_release
+        release = parse_japan_labour_release(*self.release_pages(), now=NOW)
+        result = parse_japan_labour(self.book(), release, now=NOW)
+        self.assertEqual((result['value'], result['reference_period']), (2.4, '2026-07'))
+        self.assertIsNone(result['published_at'])
+        self.assertEqual(result['release_date_known'], '2026-08-28')
+        self.assertEqual(result['next_due_at'], '2026-10-01T15:00:00+00:00')
+
+    def test_wrong_sex_adjustment_year_and_missing_latest_rejected(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_release
+        release = parse_japan_labour_release(*self.release_pages(), now=NOW)
+        mutations = [lambda s: setattr(s.cell(9,20), 'value', 'Male'),
+                     lambda s: setattr(s.cell(5,5), 'value', 'Original series'),
+                     lambda s: setattr(s.cell(12,1), 'value', 2025),
+                     lambda s: setattr(s.cell(17,20), 'value', None),
+                     lambda s: setattr(s.cell(18,20), 'value', 2.3),
+                     lambda s: setattr(s.cell(17,20), 'value', True)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                parse_japan_labour(self.book(mutation), release, now=NOW)
+
+    def test_release_calendar_mismatch_and_due_release_fail(self):
+        from official_quarterly_labour import parse_japan_labour_release
+        results, schedule = self.release_pages()
+        with self.assertRaisesRegex(ValueError, 'CONFLICT'):
+            parse_japan_labour_release(results, schedule.replace('August 28', 'August 29'), now=NOW)
+        with self.assertRaisesRegex(ValueError, 'NEW_RELEASE_DUE'):
+            parse_japan_labour_release(results, schedule, now=datetime(2026,10,1,15,tzinfo=timezone.utc))
+        with self.assertRaisesRegex(ValueError, 'FUTURE_RELEASE'):
+            parse_japan_labour_release(results, schedule, now=datetime(2026,8,27,tzinfo=timezone.utc))
+
+    def test_fetch_rejects_failed_calendar_before_downloading_workbook(self):
+        from official_quarterly_labour import fetch_japan_labour
+        from unittest.mock import Mock
+        import requests
+        session = Mock(); results, calendar_page = self.release_pages()
+        first = Mock(text=results); second = Mock(text=calendar_page)
+        second.raise_for_status.side_effect = requests.HTTPError()
+        session.get.side_effect = [first, second]
+        with self.assertRaises(requests.HTTPError): fetch_japan_labour(now=NOW, session=session)
+        self.assertEqual(session.get.call_count, 2)
+
+
 if __name__ == '__main__': unittest.main()

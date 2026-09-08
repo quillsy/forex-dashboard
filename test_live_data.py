@@ -65,6 +65,15 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(aud['Status'], 'Gesperrt')
         self.assertIn('2026-07', aud['Grund'])
 
+    def test_release_calendar_does_not_override_required_hourly_check(self):
+        row = self.record()
+        row['next_due_at'] = (NOW + timedelta(days=30)).isoformat()
+        row['observation']['needs_hourly_check'] = True
+        self.assertTrue(live.eligible(row, NOW+timedelta(minutes=59))[0])
+        self.assertFalse(live.eligible(row, NOW+timedelta(hours=1))[0])
+        projected = live.public_observation(row['observation'])
+        self.assertIs(projected['needs_hourly_check'], True)
+
     def test_hourly_check_expires_at_boundary(self):
         row = self.record()
         self.assertTrue(live.eligible(row, NOW)[0])
@@ -306,6 +315,91 @@ class LiveDataTests(unittest.TestCase):
             self.assertEqual(row['reason'], 'No verified 2Y yield')
             self.assertNotIn('last_error', row)
             self.assertFalse(live.eligible(row, NOW)[0])
+
+
+class DirectMacroCollectorIntegrationTests(unittest.TestCase):
+    """Actual app routing/scoring -> collector -> persisted read, offline adapters."""
+    def setUp(self):
+        import ast
+        from test_core_regressions import load_core
+        from types import SimpleNamespace
+        self.now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        now = self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        self.core = load_core()
+        # load_core stubs this function for score unit tests; restore the real
+        # route so these tests exercise error metadata passing end to end.
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name == 'get_macro_observation_details')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<macro-route>', 'exec'), self.core)
+        self.transport = Mock(exceptions=requests.exceptions)
+        self.transport.get.side_effect = AssertionError('Direct macro route must not request FRED metadata')
+        self.core.update(datetime=Clock, requests=self.transport)
+        self.app = SimpleNamespace(FRED_KEY='test-only', requests=self.transport,
+            compute_currency_details=self.core['compute_currency_details'])
+
+    def collect_case(self, currency, factor, failure=None):
+        previous_observation = {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-07-31',
+            'frequency': 'quarterly' if factor == 'GDP' else 'monthly',
+            'source': 'ABS' if currency == 'AUD' else 'Statistics Bureau of Japan',
+            'series_id': 'official-direct', 'next_due_at': (self.now + timedelta(days=1)).isoformat(),
+            'needs_hourly_check': currency == 'AUD'}
+        previous = live.build_record(factor, 10, previous_observation, 'FRESH',
+                                     (self.now - timedelta(minutes=30)).isoformat())
+        def response(*args, **kwargs):
+            if failure:
+                raise failure
+            observation = dict(previous_observation)
+            observation['checked_at'] = self.now.isoformat()
+            return observation
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL, 'currencies': {currency: {factor: previous}}}, path)
+            with patch('official_macro.fetch_abs_observation', side_effect=response), \
+                 patch('official_quarterly_labour.fetch_japan_labour', side_effect=response), \
+                 patch.object(live, 'now_utc', return_value=self.now), \
+                 patch.object(live, 'CURRENCIES', (currency,)), \
+                 patch.object(live, 'FACTORS', {factor: live.FACTORS[factor]}):
+                live.collect(self.app, path)
+            result = live.load(path)['currencies'][currency][factor]
+        self.transport.get.assert_not_called()
+        return previous, result
+
+    def test_parser_conflict_revokes_previous_valid_direct_observation(self):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+            with self.subTest(currency=currency, factor=factor):
+                previous, row = self.collect_case(currency, factor, ValueError('source contract conflict'))
+                self.assertEqual(row['validation'], 'UNVERIFIED')
+                self.assertIsNone(row['score'])
+                self.assertNotIn('last_error', row)
+                self.assertFalse(live.eligible(row, self.now, factor=factor, currency=currency)[0])
+                self.assertNotIn('_validation', row['observation'])
+
+    def test_transport_outage_preserves_only_original_release_and_age_limits(self):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+            with self.subTest(currency=currency, factor=factor):
+                previous, row = self.collect_case(currency, factor, requests.RequestException('offline'))
+                for field in ('score', 'checked_at', 'expires_at', 'next_due_at'):
+                    self.assertEqual(row[field], previous[field])
+                self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+                self.assertTrue(live.eligible(row, self.now, factor=factor, currency=currency)[0])
+                expiry = self.now + (timedelta(minutes=30) if currency == 'AUD' else timedelta(days=1))
+                self.assertFalse(live.eligible(row, expiry, factor=factor, currency=currency)[0])
+
+    def test_successful_direct_observation_is_validated_without_fred_metadata(self):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+            with self.subTest(currency=currency, factor=factor):
+                previous, row = self.collect_case(currency, factor)
+                self.assertEqual(row['validation'], 'VALID')
+                self.assertEqual(row['checked_at'], self.now.isoformat())
+                self.assertNotEqual(row['score'], previous['score'])
+                self.assertTrue(live.eligible(row, self.now, factor=factor, currency=currency)[0])
+                self.assertNotIn('last_error', row)
+
 
 class TransportTests(unittest.TestCase):
     def response(self,status=200):
