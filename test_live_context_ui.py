@@ -58,5 +58,16 @@ class LiveContextTests(unittest.TestCase):
         self.assertEqual(len(values),1)
         self.assertIsNone(ast.literal_eval(values[0]))
 
+    def test_checklist_never_turns_divergence_into_probability(self):
+        function = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'compute_checklist_snapshot')
+        for divergence in (None, 20.0, 50.0, -100.0):
+            ns = {'get_pair_signal_and_badge': Mock(return_value=('STRONG BUY', '', divergence, 'SB')),
+                  'compute_currency_professional_score_and_regime_custom': Mock(return_value=(0, 'Unknown', 0, 0, {}))}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), '<checklist>', 'exec'), ns)
+            rows = ns['compute_checklist_snapshot']({})
+            self.assertEqual(len(rows), 10)
+            self.assertTrue(all(row['confidence'] is None for row in rows))
+            self.assertTrue(all(row['data_quality'] == 0 for row in rows))
+
 
 if __name__=='__main__':unittest.main()

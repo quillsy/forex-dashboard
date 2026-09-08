@@ -17,6 +17,14 @@ load_dotenv()
 
 CURRENT_MODEL_VERSION = "CORE_V2_8_2026_09"
 
+
+def refresh_live_view_if_due(rendered_at, now=None):
+    """Revalidate the whole displayed view; never fetch or alter CORE data here."""
+    now = time.monotonic() if now is None else now
+    if now - rendered_at >= 30:
+        st.rerun()
+
+
 # Set up page config
 st.set_page_config(
     page_title="Institutional Forex Fundamental Dashboard",
@@ -6139,6 +6147,14 @@ if not getattr(st, "_mock_mode", False):
     
     # ----------------- 5. HEADER SECTION -----------------
     st.title("FX Fundamental Dashboard")
+    # A full rerun rechecks every badge/table against the current clock and cache.
+    # The timestamp belongs to this render, so the initial fragment call cannot
+    # create a rerun loop. No provider requests are made by the timer itself.
+    @st.fragment(run_every=30)
+    def revalidate_open_live_view(rendered_at):
+        refresh_live_view_if_due(rendered_at)
+
+    revalidate_open_live_view(time.monotonic())
     live_data.render_status(st, operator_is_authorized())
     if st.session_state.get("demo_mode_chk", False):
         st.warning("⚠️ **DEMO MODE ACTIVE – DATA IS NOT REAL (using mock data)**")
@@ -6722,20 +6738,20 @@ def compute_checklist_snapshot(model_weights):
             _, b_reg, _, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
             _, _, _, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
             
-            b_comp = b_details.get("_completeness", 100.0) if b_details else 100.0
-            q_comp = q_details.get("_completeness", 100.0) if q_details else 100.0
+            b_comp = b_details.get("_completeness", 0.0) if b_details else 0.0
+            q_comp = q_details.get("_completeness", 0.0) if q_details else 0.0
             dq = (b_comp + q_comp) / 2.0
             
             if divergence is None:
                 sig_text = "INSUFFICIENT DATA"
                 sig_strength = "N/A"
                 diff_val = None
-                conf = 0
+                conf = None
             else:
                 sig_text = badge
                 sig_strength = "STARK" if abs(divergence) >= 50.0 else "MITTEL" if abs(divergence) >= 20.0 else "SCHWACH"
                 diff_val = round(divergence, 1)
-                conf = min(int(abs(divergence) / 50.0 * 100.0), 100)
+                conf = None  # Magnitude is not a calibrated success probability.
                 
             checklist.append({
                 "pair": pair,

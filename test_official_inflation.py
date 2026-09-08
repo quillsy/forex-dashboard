@@ -112,6 +112,38 @@ class OfficialInflationTests(unittest.TestCase):
         self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
         self.assertEqual(diagnostics, {"code": "HTTP_ERROR"})
 
+    def test_estat_request_selects_completed_months_instead_of_first_page(self):
+        client = Mock(); client.get.return_value.json.return_value = estat()
+        fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)
+        params = client.get.call_args.kwargs["params"]
+        periods = params["cdTime"].split(",")
+        self.assertEqual(len(periods), 24)
+        self.assertEqual(len(set(periods)), 24)
+        self.assertEqual(periods[0], "2026000808")
+        self.assertEqual(periods[-1], "2024000909")
+        self.assertEqual(client.get.call_count, 1)
+
+    def test_estat_truncated_success_cannot_confirm_freshness(self):
+        payload = estat()
+        payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"] = {"NEXT_KEY": 25}
+        with self.assertRaisesRegex(ValueError, "ESTAT_INCOMPLETE_RESPONSE"):
+            parse_estat_cpi(payload, NOW)
+        client = Mock(); client.get.return_value.json.return_value = payload
+        diagnostic = {}
+        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only",
+                                             now=NOW, diagnostics=diagnostic))
+        self.assertEqual(diagnostic["code"], "ESTAT_INCOMPLETE_RESPONSE")
+
+    def test_boolean_is_not_a_cpi_rate(self):
+        payload = estat()
+        payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"][0]["$"] = True
+        with self.assertRaisesRegex(ValueError, "CPI_VALUE_INVALID"):
+            parse_estat_cpi(payload, NOW)
+        payload = abs_data()
+        payload["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]["0"] = [False]
+        with self.assertRaisesRegex(ValueError, "CPI_VALUE_INVALID"):
+            parse_abs_cpi(payload, NOW)
+
     def test_diagnostics_missing_key_and_empty_observations(self):
         diagnostics = {}
         self.assertIsNone(fetch_official_cpi("JPY", diagnostics=diagnostics))
