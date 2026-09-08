@@ -5,6 +5,142 @@ import sys
 from datetime import datetime, timezone
 
 
+LIVE_FALLBACK_KEYS = frozenset({"FRED_API_KEY", "ESTAT_APP_ID", "STATS_NZ_API_KEY",
+                              "OCP_APIM_SUBSCRIPTION_KEY"})
+
+
+def _fallback_state(path, state):
+    """Persist only operational fields, never subprocess output or credentials."""
+    import tempfile
+    descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _seed_fallback_status(source, destination):
+    """Preserve instance counters and the longer of known provider cooldowns."""
+    import re
+    import live_data
+    def read(path):
+        try:
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
+    local, remote = read(destination), read(source)
+    providers = local.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    incoming = remote.get("providers", {})
+    for host, info in (incoming.items() if isinstance(incoming, dict) else []):
+        if not isinstance(info, dict) or not re.fullmatch(r"[a-z0-9.-]+", host):
+            continue
+        deadline = live_data.timestamp(info.get("retry_after_at"))
+        old = providers.get(host, {})
+        if not isinstance(old, dict):
+            old = {}
+        previous = live_data.timestamp(old.get("retry_after_at"))
+        if deadline and (previous is None or deadline > previous):
+            providers[host] = dict(old, retry_after_at=deadline.isoformat())
+    local["providers"] = providers
+    _fallback_state(destination, local)
+
+
+def maybe_start_live_fallback(keys):
+    """One throttled collector per active app instance, outside its checkout.
+
+    GitHub remains the scheduled collector. This only starts on an active UI
+    render when its available dataset is older than 30 minutes. Local locks
+    cannot coordinate usage with GitHub; counters remain instance estimates.
+    """
+    import fcntl
+    import shutil
+    import subprocess
+    import threading
+    from pathlib import Path
+    import live_data
+
+    if os.environ.get("FX_COLLECTOR") == "1":
+        return "disabled"
+    now = datetime.now(timezone.utc)
+    completed = live_data.timestamp(live_data.load().get("completed_at"))
+    if completed and 0 <= (now - completed).total_seconds() < 1800:
+        return "fresh"
+    # An instance without its live credentials cannot repair missing data.
+    if not keys.get("FRED_API_KEY"):
+        return "unavailable"
+    directory = live_data.runtime_directory()
+    lock = None
+    try:
+        if directory.is_symlink():
+            return "unavailable"
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock = (directory / ".launch.lock").open("a")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return "running"
+        state_path = directory / ".launch-state.json"
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        attempted = live_data.timestamp(state.get("attempted_at"))
+        if attempted and (now - attempted).total_seconds() < 1800:
+            lock.close()
+            return state.get("state") if state.get("state") in ("failed", "timeout") else "cooldown"
+        state = {"attempted_at": now.isoformat(), "state": "running"}
+        # Seed only admissible live/public cache files; never .env or secrets.
+        source = live_data.selected_live_directory()
+        if source.resolve() != directory.resolve():
+            for name in ("live_core_data.json", ".policy_rates_cache.json"):
+                candidate = source / name
+                if candidate.is_file():
+                    shutil.copy2(candidate, directory / name)
+            _seed_fallback_status(source / "data_collection_status.json", directory / "data_collection_status.json")
+        _fallback_state(state_path, state)
+        # A minimal child environment also prevents unrelated inherited keys.
+        environment = {name: os.environ[name] for name in
+                       ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR")
+                       if name in os.environ}
+        environment.update({name: value for name, value in keys.items()
+                            if name in LIVE_FALLBACK_KEYS and isinstance(value, str) and value})
+        environment.update(FX_COLLECTOR="1", FX_FALLBACK_MODE="1")
+        command = [sys.executable, "-B", str(Path(__file__).resolve()), "--live-only"]
+
+        def worker():
+            try:
+                result = subprocess.run(command, cwd=str(directory), env=environment,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, timeout=600, check=False)
+                state["state"] = "completed" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                state.update(state="timeout", usage_complete=False)
+            except Exception:
+                state.update(state="failed", usage_complete=False)
+            finally:
+                state["finished_at"] = datetime.now(timezone.utc).isoformat()
+                try:
+                    _fallback_state(state_path, state)
+                finally:
+                    lock.close()
+
+        threading.Thread(target=worker, name="fx-live-fallback", daemon=True).start()
+        return "started"
+    except (OSError, ValueError, RuntimeError):
+        if lock is not None:
+            lock.close()
+        return "unavailable"
+
+
 def load_status():
     defaults = {
         "last_run_timestamp": "N/A", "last_run_status": "N/A",

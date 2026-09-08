@@ -1,5 +1,6 @@
 """Public, normalized live observations. No credentials or raw responses on disk."""
 import copy
+import hashlib
 import json
 import math
 import os
@@ -40,12 +41,39 @@ def number(value):
         return None
 
 
-def load(path=PATH):
+def runtime_directory():
+    """Instance-local cache location; computing the path creates no files."""
+    identity = hashlib.sha256(str(Path.cwd().resolve()).encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / ("fx-dashboard-live-" + identity)
+
+
+def _load_file(path):
     try:
         data = json.loads(Path(path).read_text())
         return data if isinstance(data, dict) and data.get("model_version") == MODEL else {}
     except (OSError, ValueError):
         return {}
+
+
+def selected_live_directory():
+    """Choose one completed dataset, never blend observations from two runs."""
+    directory = Path.cwd()
+    if os.environ.get("FX_COLLECTOR") == "1":
+        return directory
+    now = now_utc()
+    latest = None
+    for candidate in (directory, runtime_directory()):
+        completed = timestamp(_load_file(candidate / PATH).get("completed_at"))
+        if completed is not None and completed <= now and (latest is None or completed > latest):
+            directory, latest = candidate, completed
+    return directory
+
+
+def load(path=PATH):
+    path = Path(path)
+    if path == PATH and os.environ.get("FX_COLLECTOR") != "1":
+        path = selected_live_directory() / PATH
+    return _load_file(path)
 
 
 def save(data, path=PATH):
@@ -151,7 +179,9 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
     valid_score = number(score)
     # An unsuccessful check must not advance the last good check timestamp.
     if valid_score is None or validation != "VALID":
-        if previous and validation in ("VALID", "SOURCE_UNAVAILABLE"):
+        if (isinstance(previous, dict) and previous.get("validation") == "VALID"
+                and number(previous.get("score")) is not None
+                and validation in ("VALID", "SOURCE_UNAVAILABLE")):
             record = {key: copy.deepcopy(previous.get(key)) for key in
                       ("factor", "score", "validation", "reason", "freshness", "checked_at", "published_at", "next_due_at", "expires_at")}
             record["observation"] = public_observation(previous.get("observation", {}))
@@ -343,7 +373,7 @@ def render_status(st, authorized=False):
     if authorized:
         with st.expander("Anbieter und Anfragebudget", expanded=False):
             try:
-                status = json.loads(Path("data_collection_status.json").read_text())
+                status = json.loads((selected_live_directory() / "data_collection_status.json").read_text())
             except (OSError, ValueError):
                 status = {}
             providers = status.get("providers", {})
