@@ -58,3 +58,42 @@ def validate_fred_metadata(payload, series_id, category):
         "seasonal_adjustment_short": {"Seasonally Adjusted": "SA", "Not Seasonally Adjusted": "NSA", "Seasonally Adjusted Annual Rate": "SAAR"}[contract["seasonal_adjustment"]],
     }
     return all(field not in row or row[field] == expected for field, expected in expected_short.items())
+
+
+# Confirmed official releases: a successful mirror fetch cannot make an older
+# reference period current again. These are minimum known periods, NOT a
+# complete release calendar and never a substitute for ongoing source checks.
+KNOWN_RELEASES = {
+    ("AUD", "GDP"): {
+        "period_start": "2026-04-01", "published_at": "2026-09-02T01:30:00+00:00",
+        "label": "2026-Q2",
+        "source": "https://www.abs.gov.au/statistics/economy/national-accounts/australian-national-accounts-national-income-expenditure-and-product/jun-2026",
+    },
+    ("AUD", "Arbeitsmarkt"): {
+        "period_start": "2026-07-01", "published_at": "2026-08-20T01:30:00+00:00",
+        "label": "2026-07",
+        "source": "https://www.abs.gov.au/statistics/labour/employment-and-unemployment/labour-force-australia/jul-2026",
+    },
+}
+
+# Only the publication date is evidenced for these releases. The guard becomes
+# effective at this audit's observation time; do not invent publication times
+# or use this audit as historical intraday knowledge.
+KNOWN_RELEASES.update({
+    ("JPY", "GDP"): {"period_start": "2026-04-01", "label": "2026-Q2",
+        "release_date_known": "2026-08-17", "confirmed_at": "2026-09-08T09:39:42+00:00",
+        "source": "https://www.esri.cao.go.jp/en/news/index.html"},
+    ("JPY", "Arbeitsmarkt"): {"period_start": "2026-07-01", "label": "2026-07",
+        "release_date_known": "2026-08-28", "confirmed_at": "2026-09-08T09:39:42+00:00",
+        "source": "https://www.stat.go.jp/english/data/roudou/result.html"},
+    ("CHF", "GDP"): {"period_start": "2026-04-01", "label": "2026-Q2",
+        "release_date_known": "2026-09-03", "confirmed_at": "2026-09-08T09:39:42+00:00",
+        "source": "https://www.seco.admin.ch/en/gross-domestic-product"},
+})
+
+KNOWN_RELEASES[("CAD", "Arbeitsmarkt")] = {
+    "period_start": "2026-08-01", "label": "2026-08",
+    "published_at": "2026-09-04T12:30:00+00:00",
+    "source": "https://www150.statcan.gc.ca/n1/daily-quotidien/260904/dq260904a-eng.htm",
+    "time_basis": "08:30 Eastern official rule; https://www.statcan.gc.ca/en/bcp/daily-key-data-tables",
+}

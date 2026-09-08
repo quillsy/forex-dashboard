@@ -6803,15 +6803,32 @@ def save_live_signal_snapshot(selected_pair, base_curr, quote_curr, base_score, 
         raise ValueError("INVALID_ENTRY_PRICE")
     if entry_price_date != today_str:
         raise ValueError("ENTRY_PRICE_DATE_MISMATCH")
-    if any(v is None or not np.isfinite(float(v)) for v in [base_score, quote_score, signal_value]):
+    if any(finite_number(v) is None for v in [base_score, quote_score, signal_value]):
         raise ValueError("INSUFFICIENT_CORE_DATA")
 
-    checklist_copy = compute_checklist_snapshot(model_weights)
-    
-    base_details_raw = compute_currency_details(base_curr, None)
-    quote_details_raw = compute_currency_details(quote_curr, None)
+    # Both currencies and their scores must describe one checked collector run.
+    dataset = live_data.load()
+    checked_now = live_data.now_utc()
+    base_details_raw = live_data.details(base_curr, now=checked_now, data=dataset)
+    quote_details_raw = live_data.details(quote_curr, now=checked_now, data=dataset)
     if not pair_core_is_complete(base_details_raw) or not pair_core_is_complete(quote_details_raw):
         raise ValueError("PAIR_REQUIRES_COMPLETE_CORE")
+    factors = ("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP")
+    total_weight = sum(model_weights[factor] / 100.0 for factor in factors)
+    checked_scores = [sum(details[factor] * (model_weights[factor] / 100.0) for factor in factors) / total_weight
+                      for details in (base_details_raw, quote_details_raw)]
+    checked_divergence = checked_scores[0] - checked_scores[1]
+    checked_badge = ("STRONG BUY" if checked_divergence >= 50.0 else
+                     "MID BUY" if checked_divergence >= 20.0 else
+                     "NEUTRAL" if checked_divergence > -20.0 else
+                     "MID SELL" if checked_divergence > -50.0 else "STRONG SELL")
+    if (any(not np.isclose(float(given), actual, rtol=0.0, atol=1e-9)
+            for given, actual in zip((base_score, quote_score, signal_value), (*checked_scores, checked_divergence)))
+            or badge != checked_badge):
+        raise ValueError("PAIR_SNAPSHOT_SIGNAL_MISMATCH")
+    base_score, quote_score = checked_scores
+    signal_value, badge = checked_divergence, checked_badge
+    checklist_copy = compute_checklist_snapshot(model_weights)
     
     def get_effective_weights(details, w):
         av_factors = {}
