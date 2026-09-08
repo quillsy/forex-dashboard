@@ -97,3 +97,31 @@ KNOWN_RELEASES[("CAD", "Arbeitsmarkt")] = {
     "source": "https://www150.statcan.gc.ca/n1/daily-quotidien/260904/dq260904a-eng.htm",
     "time_basis": "08:30 Eastern official rule; https://www.statcan.gc.ca/en/bcp/daily-key-data-tables",
 }
+
+KNOWN_RELEASES[("USD", "Geldpolitik")] = {
+    "period_start": "2026-09-04", "label": "2026-09-04",
+    "confirmed_at": "2026-09-08T10:00:12+00:00",
+    "source": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value_month=202609",
+}
+
+# Same definition/period but unresolved disagreement between official API and
+# official publication. Never select whichever number produces a desired score.
+KNOWN_SOURCE_CONFLICTS = {
+    ("EUR", "Inflation", "2026-08"): {
+        "confirmed_at": "2026-09-08T10:00:12+00:00",
+        "reason": "Amtlicher Quellenkonflikt: Eurostat-API 3,2 %; Veröffentlichung 3,3 % (August 2026)",
+        "sources": ["https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_minr",
+                    "https://ec.europa.eu/eurostat/web/products-euro-indicators/w/2-01092026-ap"],
+    },
+}
+
+KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-07")] = {
+    **KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-08")],
+    "reason": "Amtlicher Quellenkonflikt: Eurostat-API 3,0 %; Veröffentlichung 2,9 % (Juli 2026)",
+}
+
+KNOWN_RELEASES[("CHF", "Inflation")] = {
+    "period_start": "2026-08-01", "label": "2026-08 (HICP/HVPI)",
+    "published_at": "2026-09-03T06:30:00+00:00",
+    "source": "https://dam-api.bfs.admin.ch/hub/api/dam/assets/36835032/master",
+}

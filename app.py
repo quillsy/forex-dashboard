@@ -321,10 +321,20 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
 
         elif currency == "EUR":
             url = "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV"
-            payload = _policy_request(currency, url, {"startPeriod": "1999-01-01", "format": "jsondata"}).json()
-            series = next(iter(payload["dataSets"][0]["series"].values()))["observations"]
-            dates = payload["structure"]["dimensions"]["observation"][0]["values"]
-            evidence.append(_policy_history_evidence(currency, url, [(dates[int(k)]["id"], v[0]) for k, v in series.items()]))
+            from requests.exceptions import RequestException, HTTPError
+            try:
+                api_response = _policy_request(currency, url, {"startPeriod": "1999-01-01", "format": "jsondata"})
+            except HTTPError:
+                raise
+            except RequestException:
+                # A transport outage may use the two existing official documents.
+                # Parse outside this handler: malformed/conflicting API data must fail.
+                api_response = None
+            if api_response is not None:
+                payload = api_response.json()
+                series = next(iter(payload["dataSets"][0]["series"].values()))["observations"]
+                dates = payload["structure"]["dimensions"]["observation"][0]["values"]
+                evidence.append(_policy_history_evidence(currency, url, [(dates[int(k)]["id"], v[0]) for k, v in series.items()]))
             url2 = "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html"
             secondary, _ = _policy_table_history(currency, url2, _policy_html(currency, url2), ecb=True)
             # The decision index explicitly advertises its public year snippets.
@@ -342,7 +352,11 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 raise ValueError("ECB_DECISION_TABLE_CONFLICT")
             secondary["last_policy_decision_date"] = decision
             secondary["decision_source"] = statement
-            evidence.append(secondary)
+            if api_response is None:
+                evidence.append(secondary)
+                evidence.append(_policy_evidence(currency, statement, value, last_policy_decision_date=decision))
+            else:
+                evidence.append(secondary)
 
         elif currency == "GBP":
             primary_url = "https://www.bankofengland.co.uk/boeapps/database/Bank-Rate.asp"
@@ -3097,7 +3111,18 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
         observation = fetch_japan_mof_2y(target_date, client=requests)
         if observation and observation_freshness(observation["observation_date"], target_date, 5, 15) in {"FRESH", "AGING"}:
             return observation["value"], observation["observation_date"], observation["source"]
-    # USD: FRED DGS2 preferred
+    if curr == "USD" and pd.Timestamp(target_date).date() == datetime.now().date():
+        from official_yields import fetch_treasury_2y
+        try:
+            observation = fetch_treasury_2y(target_date, client=requests)
+            if observation and observation_freshness(observation["observation_date"], target_date, 5, 15) in {"FRESH", "AGING"}:
+                return observation["value"], observation["observation_date"], observation["source"]
+        except requests.exceptions.RequestException:
+            return None, None, "US Treasury: SOURCE_UNAVAILABLE"
+        except Exception:
+            return None, None, "US Treasury: SOURCE_CONFLICT"
+        return None, None, "US Treasury: SOURCE_UNAVAILABLE"
+    # Historical USD paths retain FRED DGS2.
     if curr == "USD":
         if fred_key:
             val, dt, is_live = get_fred_data_historical("DGS2", target_date, fred_key)
@@ -4212,9 +4237,12 @@ def explain_currency_score_bullets(curr: str, target_date=None) -> list:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_current_official_cpi(curr):
     try:
-        if curr in ("EUR", "CHF"):
+        if curr == "CHF":
+            from official_hicp import fetch_swiss_hicp
+            return fetch_swiss_hicp(session=requests)
+        if curr == "EUR":
             from official_hicp import fetch_hicp
-            return fetch_hicp(session=requests, geo="EA21" if curr == "EUR" else "CH")
+            return fetch_hicp(session=requests, geo="EA21")
         if curr in ("JPY", "AUD"):
             from official_inflation import fetch_official_cpi
             diagnostics = {}
@@ -4227,9 +4255,18 @@ def get_current_official_cpi(curr):
                 item["data_status"] = diagnostics.get("code", "UNKNOWN")
                 item["provider_response_status"] = diagnostics.get("provider_status")
             return result
+    except requests.exceptions.JSONDecodeError:
+        validation = "UNVERIFIED"
+    except requests.exceptions.RequestException:
+        validation = "SOURCE_UNAVAILABLE"
     except Exception:
+        validation = "UNVERIFIED"
+    else:
         return None
-    return None
+    return {"value": None, "date": None,
+            "source": {"CHF": "BFS", "EUR": "Eurostat", "JPY": "Statistics Japan e-Stat", "AUD": "ABS"}.get(curr, "Amtliche Quelle"),
+            "series_id": None, "_validation": validation,
+            "_reason": "Amtlicher Inflations-Datenvertrag nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Inflationsquelle vorübergehend nicht erreichbar"}
 
 
 def get_cpi_yoy_details(curr: str, target_date=None):
@@ -4658,12 +4695,14 @@ def get_macro_observation_details(curr, category, target_date=None):
         observation.setdefault("source", "UNAVAILABLE")
         return observation
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
-    if (curr == "AUD" or (curr == "JPY" and category == "Arbeitsmarkt")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
-        from official_macro import fetch_abs_observation
+    if (curr in ("AUD", "JPY") or (curr == "CAD" and category == "Arbeitsmarkt")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_japan_gdp
         from official_quarterly_labour import fetch_japan_labour
         validation = "SOURCE_UNAVAILABLE"
         try:
             result = (fetch_abs_observation(category, session=requests) if curr == "AUD"
+                      else fetch_statcan_labour(session=requests) if curr == "CAD"
+                      else fetch_japan_gdp(session=requests) if category == "GDP"
                       else fetch_japan_labour(session=requests))
             if result:
                 result["freshness"] = observation_freshness(result["date"], target_dt,
@@ -4672,11 +4711,13 @@ def get_macro_observation_details(curr, category, target_date=None):
                 if result["freshness"] not in ("FRESH", "AGING"):
                     result["value"] = None
                 return result
+        except requests.exceptions.JSONDecodeError:
+            validation = "UNVERIFIED"
         except requests.exceptions.RequestException:
             pass
         except Exception:
             validation = "UNVERIFIED"
-        return {"value": None, "date": None, "source": "ABS" if curr == "AUD" else "Statistics Bureau of Japan",
+        return {"value": None, "date": None, "source": {"AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
                 "series_id": None, "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly",
                 "freshness": "UNAVAILABLE", "_validation": validation,
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
@@ -4696,20 +4737,26 @@ def get_macro_observation_details(curr, category, target_date=None):
             pass
         return {"value": None, "date": None, "source": "ONS", "series_id": None,
                 "frequency": "quarterly" if category == "GDP" else "rolling_three_month_monthly_release", "freshness": "UNAVAILABLE"}
-    if curr == "EUR" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+    if (curr == "EUR" or (curr == "CHF" and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_macro import fetch_eurostat_observation
+        validation = "SOURCE_UNAVAILABLE"
         try:
-            result = fetch_eurostat_observation(category, session=requests)
+            result = fetch_eurostat_observation(category, geo="CH" if curr == "CHF" else "EA21", session=requests)
             if result:
                 result["freshness"] = observation_freshness(result["date"], target_dt, 45 if category == "Arbeitsmarkt" else 120,
                     90 if category == "Arbeitsmarkt" else 180, monthly=category == "Arbeitsmarkt")
                 if result["freshness"] not in ("FRESH", "AGING"):
                     result["value"] = None
                 return result
-        except Exception:
+        except requests.exceptions.JSONDecodeError:
+            validation = "UNVERIFIED"
+        except requests.exceptions.RequestException:
             pass
+        except Exception:
+            validation = "UNVERIFIED"
         return {"value": None, "date": None, "source": "Eurostat", "series_id": None,
-                "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE"}
+                "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE", "_validation": validation,
+                "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
     if category == "Arbeitsmarkt" and curr in ("CHF", "NZD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_quarterly_labour import fetch_quarterly_labour
         try:
@@ -5131,6 +5178,9 @@ def compute_currency_details(curr: str, target_date=None, include_context=True) 
         yield_2y = finite_number(yield_2y)
         freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
         observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
+        if source == "US Treasury nominal 2Y constant maturity":
+            observations["Geldpolitik"].update(series_id="BC_2YEAR (FRED equivalent DGS2)",
+                source_url="https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve")
         if freshness["Geldpolitik"] in ("FRESH", "AGING"):
             gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
             gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
@@ -7644,7 +7694,7 @@ if not getattr(st, "_mock_mode", False):
             oecd_val = inf_data.get("oecd_expectation")
             
             # Display label for Swiss HICP
-            metric_label = "Eurostat HICP YoY" if curr == "CHF" else "CPI YoY"
+            metric_label = "HICP YoY" if curr in ("CHF", "EUR") else "CPI YoY"
             inflation_yoy_str = f"{c_val:.2f}% ({metric_label})" if c_val is not None else "N/A"
             
             cpi_change_str = f"{c_trend:+.2f} pp" if c_trend is not None else "N/A"

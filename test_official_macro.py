@@ -22,6 +22,32 @@ class EurostatTests(unittest.TestCase):
             self.assertIsNone(result["published_at"])
             self.assertEqual(result["geography"], "EA21")
 
+    def test_swiss_gdp_contract_and_unknown_publication(self):
+        data = fixture("GDP")
+        data["dimension"]["geo"]["category"]["index"] = {"CH": 0}
+        data["extension"]["annotation"] = [{"type": "SOURCE_INSTITUTIONS", "text": "Eurostat"}]
+        data["value"]["1"] = 2.6
+        result = parse_eurostat_observation(data, "GDP", now=NOW, geo="CH")
+        self.assertEqual((result["value"], result["reference_period"], result["geography"]), (2.6, "2026-Q2", "CH"))
+        self.assertIsNone(result["published_at"])
+        self.assertTrue(result["series_id"].endswith(".CH"))
+        session = Mock(); session.get.return_value.json.return_value = data
+        self.assertEqual(fetch_eurostat_observation("GDP", now=NOW, session=session, geo="CH")["value"], 2.6)
+        self.assertEqual(session.get.call_args.kwargs["params"]["geo"], "CH")
+
+    def test_swiss_wrong_geography_factor_and_third_party_rejected(self):
+        data = fixture("GDP")
+        data["extension"]["annotation"] = [{"type": "SOURCE_INSTITUTIONS", "text": "Eurostat"}]
+        with self.assertRaises(ValueError): parse_eurostat_observation(data, "GDP", now=NOW, geo="CH")
+        data["dimension"]["geo"]["category"]["index"] = {"CH": 0}
+        for text in ("SECO", "Other", None):
+            data["extension"]["annotation"][0]["text"] = text
+            with self.assertRaises(ValueError): parse_eurostat_observation(data, "GDP", now=NOW, geo="CH")
+        for category, geo in (("Arbeitsmarkt", "CH"), ("GDP", "JP")):
+            session = Mock()
+            with self.assertRaises(ValueError): fetch_eurostat_observation(category, session=session, geo=geo)
+            session.get.assert_not_called()
+
     def test_dimensions_are_exact(self):
         for dimension, wrong in [("unit", "CLV_PCH_PRE"), ("geo", "EA20"), ("s_adj", "NSA"), ("na_item", "P3")]:
             data = fixture("GDP")
@@ -172,6 +198,79 @@ class AbsTests(unittest.TestCase):
         session.get.return_value.raise_for_status.side_effect = RuntimeError('HTTP unavailable')
         with self.assertRaises(RuntimeError): fetch_abs_observation('GDP', now=NOW, session=session)
         session.get.assert_called_once()
+
+
+
+
+from official_macro import STATCAN_LABOUR_COORD, STATCAN_LABOUR_TITLE, parse_statcan_labour, fetch_statcan_labour
+
+
+def statcan_fixture():
+    identity = {'responseStatusCode': 0, 'productId': 14100287, 'coordinate': STATCAN_LABOUR_COORD, 'vectorId': 2062815}
+    series = dict(identity, SeriesTitleEn=STATCAN_LABOUR_TITLE, memberUomCode=239, frequencyCode=6, scalarFactorCode=0, decimals=1, terminated=0)
+    points = [dict(refPer=period, value=value, decimals=1, scalarFactorCode=0, symbolCode=0, statusCode=0,
+                   securityLevelCode=0, releaseTime='2026-09-04T08:30', frequencyCode=6)
+              for period,value in [('2026-08-01',6.4),('2026-07-01',6.4),('2026-06-01',6.5)]]
+    members = [('Geography',1,'Canada'),('Labour force characteristics',7,'Unemployment rate'),('Gender',1,'Total - Gender'),
+               ('Age group',1,'15 years and over'),('Statistics',1,'Estimate'),('Data type',1,'Seasonally adjusted')]
+    dims = [{'dimensionPositionId': i+1, 'dimensionNameEn': name,
+             'member': [{'memberId': code, 'memberNameEn': label, 'terminated': 0, 'memberUomCode': 239 if i==1 else None}]}
+            for i,(name,code,label) in enumerate(members)]
+    cube = {'responseStatusCode':0,'productId':'14100287','frequencyCode':6,'archiveStatusCode':'2',
+            'cubeTitleEn':'Labour force characteristics, monthly, seasonally adjusted and trend-cycle',
+            'cubeEndDate':'2026-08-01','releaseTime':'2026-09-04T08:30','dimension':dims}
+    return [[{'status':'SUCCESS','object':obj}] for obj in (series, dict(identity,vectorDataPoint=points),cube)]
+
+
+class StatcanLabourTests(unittest.TestCase):
+    def test_exact_current_observation_and_eastern_time(self):
+        result=parse_statcan_labour(*statcan_fixture(),now=NOW)
+        self.assertEqual((result['value'],result['reference_period']), (6.4,'2026-08'))
+        self.assertEqual(result['published_at'],'2026-09-04T12:30:00+00:00')
+        self.assertTrue(result['needs_hourly_check'])
+        self.assertIsNone(result['next_due_at'])
+        self.assertEqual(result['frequency'],'monthly')
+
+    def test_wrong_series_units_and_dimension_are_rejected(self):
+        for key,value in [('vectorId',1),('coordinate','1.7.1.1.1.3.0.0.0.0'),('memberUomCode',428),('scalarFactorCode',3),('frequencyCode',9),('SeriesTitleEn','Other'),('terminated',1)]:
+            data=statcan_fixture();data[0][0]['object'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+        data=statcan_fixture();data[2][0]['object']['dimension'][5]['member'][0]['memberNameEn']='Trend-cycle'
+        with self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+
+    def test_invalid_latest_never_falls_back(self):
+        for value in [None,float('nan'),float('inf'),True,'6.4',-1,101]:
+            data=statcan_fixture();data[1][0]['object']['vectorDataPoint'][0]['value']=value
+            with self.subTest(value=value),self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+        for key in ('statusCode','symbolCode','securityLevelCode','scalarFactorCode'):
+            data=statcan_fixture();data[1][0]['object']['vectorDataPoint'][0][key]=1
+            with self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+
+    def test_latest_cube_mismatch_and_duplicate_future_periods(self):
+        data=statcan_fixture();data[1][0]['object']['vectorDataPoint'].pop(0)
+        with self.assertRaisesRegex(ValueError,'lags latest'):parse_statcan_labour(*data,now=NOW)
+        for change in ('duplicate','future','release'):
+            data=statcan_fixture();points=data[1][0]['object']['vectorDataPoint']
+            if change=='duplicate':points.append(dict(points[0]))
+            elif change=='future':points[0]['refPer']='2026-09-01'
+            else:points[0]['releaseTime']='2026-09-08T08:30'
+            with self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+
+    def test_ambiguous_and_error_responses(self):
+        for payload in [[], [{'status':'FAILED'}], statcan_fixture()[0]*2]:
+            data=statcan_fixture();data[0]=payload
+            with self.assertRaises(ValueError):parse_statcan_labour(*data,now=NOW)
+
+    def test_three_keyless_bounded_requests_and_failed_fetch(self):
+        session=Mock();session.post.side_effect=[Mock(json=Mock(return_value=p)) for p in statcan_fixture()]
+        self.assertEqual(fetch_statcan_labour(now=NOW,session=session)['value'],6.4)
+        self.assertEqual(session.post.call_count,3)
+        for call in session.post.call_args_list:self.assertEqual(call.kwargs['timeout'],20)
+        self.assertNotIn('latestN',session.post.call_args_list[0].kwargs['json'][0])
+        self.assertEqual(session.post.call_args_list[1].kwargs['json'][0]['latestN'],3)
+        session=Mock();session.post.return_value.raise_for_status.side_effect=RuntimeError('409')
+        with self.assertRaises(RuntimeError):fetch_statcan_labour(now=NOW,session=session)
+        session.post.assert_called_once()
 
 
 if __name__ == '__main__': unittest.main()

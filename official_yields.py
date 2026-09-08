@@ -88,3 +88,85 @@ def fetch_japan_mof_2y(target_date, client=None, now=None, timeout=15):
         return parse_japan_mof_2y(response.text, target_date, now=now)
     except (requests.RequestException, ValueError, TypeError, AttributeError):
         return None
+
+
+TREASURY_XML_URL = 'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml'
+
+
+def parse_treasury_2y(xml_text, target_date, now=None):
+    """Direct nominal Treasury CMT, the underlying definition of FRED DGS2.
+
+    FRED DGS2 links H.15 note 9 and Treasury methodology; H.15 note 9 identifies
+    these yields as Treasury-interpolated nominal CMTs. Unit: percent per annum.
+    Evidence: https://fred.stlouisfed.org/series/DGS2 and
+    https://www.federalreserve.gov/releases/h15/ (nominal CMT footnote 9).
+    Feed updated is NOT an observation publication time and is never used as one.
+    """
+    import xml.etree.ElementTree as ET
+    if '<!DOCTYPE' in xml_text.upper() or '<!ENTITY' in xml_text.upper():
+        raise ValueError('TREASURY_UNSAFE_XML')
+    root = ET.fromstring(xml_text)
+    ns = {'a': 'http://www.w3.org/2005/Atom', 'd': 'http://schemas.microsoft.com/ado/2007/08/dataservices',
+          'm': 'http://schemas.microsoft.com/ado/2007/08/dataservices/metadata'}
+    if root.tag != '{'+ns['a']+'}feed' or root.findtext('a:title', namespaces=ns) != 'DailyTreasuryYieldCurveRateData':
+        raise ValueError('TREASURY_NOMINAL_FEED_REQUIRED')
+    if root.findall('a:link[@rel="next"]', ns):
+        raise ValueError('TREASURY_INCOMPLETE_PAGINATED_FEED')
+    today, target = _date(now or datetime.now(timezone.utc)), _date(target_date)
+    observations = {}
+    for entry in root.findall('a:entry', ns):
+        categories = entry.findall('a:category', ns)
+        if len(categories) != 1 or categories[0].get('term') != 'TreasuryDataWarehouseModel.DailyTreasuryYieldCurveRateDatum':
+            raise ValueError('TREASURY_SERIES_INVALID')
+        properties = entry.findall('a:content/m:properties', ns)
+        if len(properties) != 1:
+            raise ValueError('TREASURY_PROPERTIES_INVALID')
+        dates, values = properties[0].findall('d:NEW_DATE', ns), properties[0].findall('d:BC_2YEAR', ns)
+        if len(dates) != 1 or len(values) != 1:
+            raise ValueError('TREASURY_2YEAR_REQUIRED')
+        stamp, node = dates[0], values[0]
+        if stamp.get('{'+ns['m']+'}type') != 'Edm.DateTime' or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T00:00:00', stamp.text or ''):
+            raise ValueError('TREASURY_DATE_INVALID')
+        observed = date.fromisoformat(stamp.text[:10])
+        if observed > today or observed in observations:
+            raise ValueError('TREASURY_FUTURE_OR_DUPLICATE_DATE')
+        if node.get('{'+ns['m']+'}null') in ('true', '1') or node.get('{'+ns['m']+'}type') != 'Edm.Double':
+            raise ValueError('TREASURY_OBSERVATION_UNAVAILABLE')
+        try:
+            value = float(node.text)
+        except (ValueError, TypeError):
+            raise ValueError('TREASURY_OBSERVATION_INVALID') from None
+        if not math.isfinite(value) or not 0 <= value <= 30:
+            raise ValueError('TREASURY_OBSERVATION_INVALID')
+        observations[observed] = value
+    eligible = {day: value for day,value in observations.items() if day <= target}
+    if not eligible:
+        return None
+    observed = max(eligible)
+    return {'value': eligible[observed], 'observation_date': observed.isoformat(),
+            'source': 'US Treasury nominal 2Y constant maturity', 'series_id': 'BC_2YEAR',
+            'equivalent_series_id': 'DGS2', 'unit': 'percent_per_annum',
+            'source_url': TREASURY_XML_URL + '?data=daily_treasury_yield_curve',
+            'published_at': None}
+
+
+def fetch_treasury_2y(target_date, client=None, now=None, timeout=20):
+    """One current/target month request; preceding month only if feed is empty.
+
+    At month boundaries weekends/holidays may precede the first observation.
+    Invalid or null observations raise, never trigger older-month fallback.
+    """
+    from datetime import timedelta
+    target = min(_date(target_date), _date(now or datetime.now(timezone.utc)))
+    month = target.replace(day=1)
+    for attempt in range(2):
+        response = (client or requests).get(TREASURY_XML_URL,
+            params={'data': 'daily_treasury_yield_curve', 'field_tdr_date_value_month': month.strftime('%Y%m')}, timeout=timeout)
+        response.raise_for_status()
+        result = parse_treasury_2y(response.text, target, now=now)
+        if result is not None:
+            if result['observation_date'][:7] != month.strftime('%Y-%m'):
+                raise ValueError('TREASURY_WRONG_REQUESTED_MONTH')
+            return result
+        month = (month - timedelta(days=1)).replace(day=1)
+    return None
