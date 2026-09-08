@@ -150,6 +150,41 @@ class PolicyRegressions(unittest.TestCase):
         self.assertTrue(self.p['policy_rate_is_usable'](obj))
         self.assertIsNone(obj['verified_at'])
 
+    def test_ecb_transport_fallback_requires_distinct_matching_official_documents(self):
+        import requests
+        self.p['_policy_request'] = Mock(side_effect=requests.RequestException('PROVIDER_REQUEST_FAILED'))
+        def html(currency, url):
+            if 'key_ecb_interest_rates' in url:
+                text = '<table><tr><td>2026</td><td>17 Jun.</td><td>2.25</td><td>2.40</td><td>-</td><td>2.65</td></tr><tr><td>2025</td><td>11 Jun.</td><td>2</td><td>2.15</td><td>-</td><td>2.40</td></tr></table>'
+            elif url.endswith('index.en.html'):
+                text = '<a href="/ecb.mp260723~a.en.html">Decision</a>'
+            else:
+                text = 'The deposit facility will remain unchanged at 2.25%'
+            return BeautifulSoup(text, 'html.parser')
+        self.p['_policy_html'] = html
+        result = self.p['fetch_official_policy_rate_live']('EUR')
+        self.assertNotIn('error', result)
+        first, second = result['evidence']
+        self.assertEqual(first['rate'], 2.25)
+        self.assertEqual(second['rate'], 2.25)
+        self.assertEqual(first['rate_effective_date'], '2026-06-17')
+        self.assertEqual(second['last_policy_decision_date'], '2026-07-23')
+        self.assertNotEqual(first['source_url'], second['source_url'])
+        self.p['_policy_html'] = lambda currency, url: (BeautifulSoup('The deposit facility remains at 2.0%', 'html.parser')
+            if url.endswith('~a.en.html') else html(currency, url))
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('EUR'))
+
+    def test_ecb_api_invalid_json_schema_or_http_error_cannot_use_fallback(self):
+        import requests
+        for failure in (requests.exceptions.JSONDecodeError('bad JSON', 'x', 0), KeyError('dataSets')):
+            self.p['_policy_request'] = Mock(return_value=SimpleNamespace(json=Mock(side_effect=failure)))
+            self.p['_policy_html'] = Mock(side_effect=AssertionError('No fallback for invalid data'))
+            self.assertIn('error', self.p['fetch_official_policy_rate_live']('EUR'))
+            self.p['_policy_html'].assert_not_called()
+        self.p['_policy_request'] = Mock(side_effect=requests.HTTPError('HTTP 403'))
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('EUR'))
+        self.p['_policy_html'].assert_not_called()
+
     def test_all_eight_parsers_with_official_document_formats(self):
         # Synthetic fixtures deliberately include hold rows, competing instruments,
         # a non-English ECB link and BOJ PDF word splitting seen in real responses.

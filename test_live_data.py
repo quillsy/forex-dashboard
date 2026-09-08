@@ -35,11 +35,11 @@ class LiveDataTests(unittest.TestCase):
 
     def test_all_known_release_floors_block_old_periods(self):
         from source_contracts import KNOWN_RELEASES
-        now = datetime(2026, 9, 8, 9, 40, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
         for (currency, factor), release in KNOWN_RELEASES.items():
             with self.subTest(currency=currency, factor=factor):
-                old_date = '2026-03-31' if factor == 'GDP' else '2026-06-01'
-                row = live.build_record(factor, 20, {'value': 2.5, 'date': old_date},
+                old_date = '2026-09-03' if factor == 'Geldpolitik' else '2026-03-31' if factor == 'GDP' else '2026-06-01'
+                row = live.build_record(factor, 20, {'value': 2.5, 'date': old_date, 'policy_rate': 4.0, 'yield_2y': 4.34},
                                         'AGING', now.isoformat())
                 self.assertFalse(live.eligible(row, now, currency=currency)[0])
                 row['observation']['date'] = release['period_start']
@@ -64,6 +64,15 @@ class LiveDataTests(unittest.TestCase):
         aud = next(r for r in rows if r['Währung']=='AUD' and r['Faktor']=='Arbeitsmarkt')
         self.assertEqual(aud['Status'], 'Gesperrt')
         self.assertIn('2026-07', aud['Grund'])
+
+    def test_official_same_period_conflict_blocks_either_selected_value(self):
+        now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
+        for value in (3.2, 3.3):
+            row = live.build_record('Inflation', 60, {'value': value, 'date': '2026-08-31'}, 'FRESH', now.isoformat())
+            allowed, reason = live.eligible(row, now, currency='EUR')
+            self.assertFalse(allowed)
+            self.assertIn('Quellenkonflikt', reason)
+            self.assertTrue(live.eligible(row, now, currency='GBP')[0])
 
     def test_release_calendar_does_not_override_required_hourly_check(self):
         row = self.record()
@@ -183,6 +192,20 @@ class LiveDataTests(unittest.TestCase):
             overview=st.dataframe.call_args_list[0].args[0]
             eur=next(row for row in overview if row['Währung']=='EUR')
             self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig) · HICP')
+
+    def test_bfs_provisional_flag_and_dataset_attribution_are_visible(self):
+        record=live.build_record('Inflation',20,{'value':0.9,'date':'2026-08-31',
+            'reference_period':'2026-08','is_estimate':True,'source':'BFS',
+            'source_title':'HVPI Schweiz (2025=100): Detailresultate seit 2005',
+            'source_url':'https://dam-api.bfs.admin.ch/hub/api/dam/assets/36835033/master'},
+            'FRESH',NOW.isoformat())
+        st=MagicMock()
+        with patch.object(live,'load',return_value={'currencies':{'CHF':{'Inflation':record}}}), patch.object(live,'now_utc',return_value=NOW):
+            live.render_status(st)
+        row=next(r for r in st.dataframe.call_args_list[1].args[0] if r['Währung']=='CHF' and r['Faktor']=='Inflation')
+        self.assertEqual(row['Veröffentlichungsstatus'],'Amtlich vorläufig')
+        self.assertEqual(row['Datensatz'],record['observation']['source_title'])
+        self.assertIn('dam-api.bfs.admin.ch',row['Quellenlink'])
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
@@ -336,6 +359,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
         route = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                      and n.name == 'get_macro_observation_details')
         exec(compile(ast.Module(body=[route], type_ignores=[]), '<macro-route>', 'exec'), self.core)
+        self.macro_route = self.core['get_macro_observation_details']
         self.transport = Mock(exceptions=requests.exceptions)
         self.transport.get.side_effect = AssertionError('Direct macro route must not request FRED metadata')
         self.core.update(datetime=Clock, requests=self.transport)
@@ -343,11 +367,19 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
             compute_currency_details=self.core['compute_currency_details'])
 
     def collect_case(self, currency, factor, failure=None):
-        previous_observation = {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-07-31',
+        # Exercise only the requested macro factor; compute_currency_details
+        # also visits other factors, whose independent adapters are out of scope.
+        self.core['get_macro_observation_details'] = lambda curr, category, target_date=None: (
+            self.macro_route(curr, category, target_date) if category == factor
+            else {'value': None, 'date': None, 'source': 'UNAVAILABLE', 'freshness': 'UNAVAILABLE'})
+        fred = Mock(side_effect=AssertionError('Direct route must not fall back to FRED'))
+        self.core['get_fred_data'] = fred
+        previous_observation = {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-08-31' if currency == 'CAD' else '2026-07-31',
             'frequency': 'quarterly' if factor == 'GDP' else 'monthly',
-            'source': 'ABS' if currency == 'AUD' else 'Statistics Bureau of Japan',
+            'source': {'AUD': 'ABS', 'JPY': 'Cabinet Office ESRI' if factor == 'GDP' else 'Statistics Bureau of Japan',
+                       'CAD': 'Statistics Canada', 'CHF': 'Eurostat'}[currency],
             'series_id': 'official-direct', 'next_due_at': (self.now + timedelta(days=1)).isoformat(),
-            'needs_hourly_check': currency == 'AUD'}
+            'needs_hourly_check': currency == 'AUD' or (currency == 'JPY' and factor == 'GDP')}
         previous = live.build_record(factor, 10, previous_observation, 'FRESH',
                                      (self.now - timedelta(minutes=30)).isoformat())
         def response(*args, **kwargs):
@@ -360,17 +392,35 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
             path = Path(tmp) / 'live.json'
             live.save({'model_version': live.MODEL, 'currencies': {currency: {factor: previous}}}, path)
             with patch('official_macro.fetch_abs_observation', side_effect=response), \
-                 patch('official_quarterly_labour.fetch_japan_labour', side_effect=response), \
+                 patch('official_quarterly_labour.fetch_japan_labour', side_effect=response) as japan_labour, \
+                 patch('official_macro.fetch_japan_gdp', side_effect=response) as japan_gdp, \
+                 patch('official_macro.fetch_statcan_labour', side_effect=response) as statcan, \
+                 patch('official_macro.fetch_eurostat_observation', side_effect=response) as eurostat, \
                  patch.object(live, 'now_utc', return_value=self.now), \
                  patch.object(live, 'CURRENCIES', (currency,)), \
                  patch.object(live, 'FACTORS', {factor: live.FACTORS[factor]}):
                 live.collect(self.app, path)
+                if currency == 'JPY':
+                    if factor == 'GDP':
+                        japan_gdp.assert_called_once_with(session=self.transport)
+                        japan_labour.assert_not_called()
+                    else:
+                        japan_labour.assert_called_once_with(session=self.transport)
+                        japan_gdp.assert_not_called()
+                elif currency == 'CAD':
+                    statcan.assert_called_once_with(session=self.transport)
+                    eurostat.assert_not_called()
+                elif currency == 'CHF':
+                    eurostat.assert_called_once_with('GDP', geo='CH', session=self.transport)
+                    statcan.assert_not_called()
             result = live.load(path)['currencies'][currency][factor]
         self.transport.get.assert_not_called()
+        fred.assert_not_called()
         return previous, result
 
     def test_parser_conflict_revokes_previous_valid_direct_observation(self):
-        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
+                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, ValueError('source contract conflict'))
                 self.assertEqual(row['validation'], 'UNVERIFIED')
@@ -380,18 +430,20 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                 self.assertNotIn('_validation', row['observation'])
 
     def test_transport_outage_preserves_only_original_release_and_age_limits(self):
-        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
+                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, requests.RequestException('offline'))
                 for field in ('score', 'checked_at', 'expires_at', 'next_due_at'):
                     self.assertEqual(row[field], previous[field])
                 self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
                 self.assertTrue(live.eligible(row, self.now, factor=factor, currency=currency)[0])
-                expiry = self.now + (timedelta(minutes=30) if currency == 'AUD' else timedelta(days=1))
+                expiry = self.now + (timedelta(minutes=30) if currency == 'AUD' or (currency == 'JPY' and factor == 'GDP') else timedelta(days=1))
                 self.assertFalse(live.eligible(row, expiry, factor=factor, currency=currency)[0])
 
     def test_successful_direct_observation_is_validated_without_fred_metadata(self):
-        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt')):
+        for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
+                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor)
                 self.assertEqual(row['validation'], 'VALID')
@@ -399,6 +451,169 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                 self.assertNotEqual(row['score'], previous['score'])
                 self.assertTrue(live.eligible(row, self.now, factor=factor, currency=currency)[0])
                 self.assertNotIn('last_error', row)
+
+
+class SwissHicpCollectorIntegrationTests(unittest.TestCase):
+    """Real CHF inflation route and record persistence, with isolated adapters."""
+    def setUp(self):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        self.now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        now = self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        self.core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        routes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name in {'get_current_official_cpi', 'get_cpi_yoy_details'}]
+        for route in routes:
+            route.decorator_list = []
+        exec(compile(ast.Module(body=routes, type_ignores=[]), '<swiss-hicp-route>', 'exec'), self.core)
+        self.transport = Mock(exceptions=requests.exceptions)
+        self.transport.get.side_effect = AssertionError('Direct HICP must not request fallback metadata')
+        self.core.update(datetime=Clock, requests=self.transport)
+        self.app = SimpleNamespace(FRED_KEY='test-only', requests=self.transport,
+            compute_currency_details=self.core['compute_currency_details'])
+
+    def collect_case(self, failure=None):
+        observation = {'value': 0.9, 'date': '2026-08-31', 'source': 'BFS',
+            'series_id': 'HICP CP00', 'frequency': 'monthly', 'unit': 'annual percent change',
+            'seasonal_adjustment': 'NSA', 'reference_period': '2026-08',
+            'needs_hourly_check': True}
+        previous = live.build_record('Inflation', -55.0, observation, 'FRESH',
+            (self.now - timedelta(minutes=30)).isoformat())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'CHF': {'Inflation': previous}}}, path)
+            with patch('official_hicp.fetch_swiss_hicp', return_value=observation,
+                       side_effect=failure) as swiss, \
+                 patch('official_hicp.fetch_hicp', side_effect=AssertionError('No Eurostat fallback')) as eurostat, \
+                 patch.object(live, 'now_utc', return_value=self.now), \
+                 patch.object(live, 'CURRENCIES', ('CHF',)), \
+                 patch.object(live, 'FACTORS', {'Inflation': live.FACTORS['Inflation']}):
+                live.collect(self.app, path)
+                row = live.load(path)['currencies']['CHF']['Inflation']
+                self.assertTrue(swiss.called)
+                for call in swiss.call_args_list:
+                    self.assertEqual(call.kwargs, {'session': self.transport})
+                eurostat.assert_not_called()
+        self.transport.get.assert_not_called()
+        return previous, row
+
+    def test_current_swiss_hicp_routes_to_bfs_without_eurostat_fallback(self):
+        previous, row = self.collect_case()
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['value'], 0.9)
+        self.assertEqual(row['observation']['reference_period'], '2026-08')
+        self.assertAlmostEqual(row['score'], -55.0)
+        self.assertEqual(row['checked_at'], self.now.isoformat())
+        self.assertTrue(live.eligible(row, self.now, factor='Inflation', currency='CHF')[0])
+
+    def test_swiss_hicp_parser_conflict_revokes_previous_valid_record(self):
+        previous, row = self.collect_case(ValueError('HICP_SCHEMA_CONFLICT'))
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertNotIn('last_error', row)
+        self.assertFalse(live.eligible(row, self.now, factor='Inflation', currency='CHF')[0])
+
+    def test_swiss_hicp_transport_failure_keeps_original_freshness_deadlines(self):
+        previous, row = self.collect_case(requests.RequestException('offline'))
+        for field in ('score', 'observation', 'checked_at', 'next_due_at', 'expires_at'):
+            self.assertEqual(row[field], previous[field])
+        self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+        self.assertTrue(live.eligible(row, self.now, factor='Inflation', currency='CHF')[0])
+        self.assertFalse(live.eligible(row, self.now + timedelta(minutes=30),
+                                     factor='Inflation', currency='CHF')[0])
+
+
+class TreasuryCollectorIntegrationTests(unittest.TestCase):
+    """Real current-date routing and scoring through the persisted live gate."""
+    def setUp(self):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        self.now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        now = self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        self.core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == 'get_genuine_2y_yield_historical')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<treasury-route>', 'exec'), self.core)
+        self.transport = Mock(exceptions=requests.exceptions)
+        self.transport.get.side_effect = AssertionError('Treasury must not need FRED metadata')
+        self.fred = Mock(side_effect=AssertionError('Current Treasury must not fall back to FRED'))
+        policy = lambda curr: {'rate': 4.0, 'verification_status': 'VERIFIED',
+                               'verification_timestamp': now.isoformat()}
+        self.core.update(datetime=Clock, requests=self.transport,
+                         get_verified_policy_rate=policy, get_fred_data_historical=self.fred)
+        self.app = SimpleNamespace(FRED_KEY='test-only', requests=self.transport,
+            get_verified_policy_rate=policy, compute_currency_details=self.core['compute_currency_details'])
+
+    def collect_case(self, failure=None):
+        previous = live.build_record('Geldpolitik', 10,
+            {'policy_rate': 4.0, 'yield_2y': 4.0, 'date': '2026-09-04',
+             'source': 'US Treasury nominal 2Y constant maturity'}, 'FRESH',
+            (self.now - timedelta(minutes=30)).isoformat())
+        observation = {'value': 4.37, 'observation_date': '2026-09-04',
+                       'source': 'US Treasury nominal 2Y constant maturity'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'USD': {'Geldpolitik': previous}}}, path)
+            with patch('official_yields.fetch_treasury_2y', return_value=observation,
+                       side_effect=failure) as treasury, \
+                 patch.object(live, 'now_utc', return_value=self.now), \
+                 patch.object(live, 'CURRENCIES', ('USD',)), \
+                 patch.object(live, 'FACTORS', {'Geldpolitik': live.FACTORS['Geldpolitik']}):
+                live.collect(self.app, path)
+                row = live.load(path)['currencies']['USD']['Geldpolitik']
+                treasury.assert_called_once_with('2026-09-08', client=self.transport)
+        self.fred.assert_not_called()
+        self.transport.get.assert_not_called()
+        return previous, row
+
+    def test_current_treasury_value_routes_scores_and_validates_without_fred(self):
+        previous, row = self.collect_case()
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['yield_2y'], 4.37)
+        self.assertAlmostEqual(row['score'], ((4.0 - 3) / 3 * 100 + (4.37 - 3) / 3 * 100) / 2)
+        self.assertEqual(row['observation']['series_id'], 'BC_2YEAR (FRED equivalent DGS2)')
+        self.assertIn('home.treasury.gov', row['observation']['source_url'])
+        self.assertEqual(row['checked_at'], self.now.isoformat())
+        self.assertTrue(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
+
+    def test_treasury_transport_failure_preserves_only_original_deadlines(self):
+        previous, row = self.collect_case(requests.RequestException('offline'))
+        for field in ('score', 'checked_at', 'expires_at', 'next_due_at', 'observation'):
+            self.assertEqual(row[field], previous[field])
+        self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+        self.assertTrue(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
+        self.assertFalse(live.eligible(row, self.now + timedelta(minutes=30),
+                                     factor='Geldpolitik', currency='USD')[0])
+
+    def test_treasury_parser_conflict_revokes_previous_valid_value(self):
+        previous, row = self.collect_case(ValueError('TREASURY_SERIES_INVALID'))
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertNotIn('last_error', row)
+        self.assertFalse(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
+
+    def test_historical_usd_keeps_existing_fred_route(self):
+        self.fred.side_effect = None
+        self.fred.return_value = (3.5, '2026-08-31', False)
+        with patch('official_yields.fetch_treasury_2y') as treasury:
+            result = self.core['get_genuine_2y_yield_historical']('USD', '2026-08-31', 'test-only')
+        self.assertEqual(result, (3.5, '2026-08-31', 'FRED'))
+        self.fred.assert_called_once_with('DGS2', '2026-08-31', 'test-only')
+        treasury.assert_not_called()
 
 
 class TransportTests(unittest.TestCase):
