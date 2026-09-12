@@ -1,0 +1,156 @@
+{
+  "schema": "bis-nz-policy-research-v1",
+  "mode": "research_only",
+  "core_eligible": false,
+  "core_block_reason": "Weekly BIS dissemination does not establish hourly RBNZ freshness or current decision/effective-date verification",
+  "currency": "NZD",
+  "series": "BIS:WS_CBPOL(1.0):D.NZ",
+  "instrument": "Official Cash Rate",
+  "unit": "percent_per_year",
+  "seasonal_adjustment": "not_seasonally_adjusted",
+  "observation_frequency": "daily",
+  "dissemination_cadence": "weekly, around mid-week",
+  "value": 2.75,
+  "observation_date": "2026-09-04",
+  "retrieved_at": "2026-09-12T11:13:09.537276+00:00",
+  "published_at": null,
+  "next_publication_at": null,
+  "rate_effective_date": null,
+  "observation_age_days": 8,
+  "research_status": "weekly_backup_observation",
+  "research_stale_threshold_days": 14,
+  "status_note": "14-day threshold is a research display warning, not a provider SLA or CORE age limit",
+  "source": "Bank for International Settlements; underlying national source: Reserve Bank of New Zealand",
+  "source_url": "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/D.NZ",
+  "methodology_url": "https://www.bis.org/statistics/cbpol/cbpol_doc.pdf",
+  "terms_url": "https://data.bis.org/help/legal",
+  "attribution": "Source: BIS, Central bank policy rates; Reserve Bank of New Zealand.",
+  "translation_notice": "German descriptions, if displayed, are not an official BIS translation.",
+  "payload_sha256": "e0ffdb1640a27a240d3a4eecdeb495bfeafad875b2f4fdedc1e2e28958df90b4",
+  "missing_observation_dates": [
+    "2026-08-01",
+    "2026-08-02",
+    "2026-08-08",
+    "2026-08-09",
+    "2026-08-15",
+    "2026-08-16",
+    "2026-08-22",
+    "2026-08-23",
+    "2026-08-29",
+    "2026-08-30"
+  ],
+  "observations": [
+    {
+      "observation_date": "2026-07-29",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-07-30",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-07-31",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-03",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-04",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-05",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-06",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-07",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-10",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-11",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-12",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-13",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-14",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-17",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-18",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-19",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-20",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-21",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-24",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-25",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-26",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-27",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-28",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-08-31",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-09-01",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-09-02",
+      "value": 2.5
+    },
+    {
+      "observation_date": "2026-09-03",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-09-04",
+      "value": 2.75
+    }
+  ]
+}

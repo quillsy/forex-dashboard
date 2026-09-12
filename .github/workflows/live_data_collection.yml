@@ -15,6 +15,8 @@ on:
       - 'official_yields.py'
       - 'source_contracts.py'
       - 'run_data_collection.py'
+      - 'bis_research.py'
+      - 'collect_research.py'
       - '.github/workflows/live_data_collection.yml'
   schedule:
     # Run once daily at 22:00 UTC (after market close)
@@ -65,12 +67,17 @@ jobs:
             python run_data_collection.py --live-only
           fi
 
+      - name: Collect separate BIS research observation when due
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python collect_research.py
+
       - name: Commit and push changes
         if: ${{ always() }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json; do
+          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json research_data/bis_nz_policy.json research_data/status.json; do
             if [ -f "$file" ]; then git add -- "$file"; fi
           done
           if ! git diff --cached --quiet; then

@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 from provider_transport import transport as requests
 import live_data
+from pathlib import Path
+from research_panel import render_research_panel
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -8094,7 +8096,7 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- TAB 13: BACKTESTING & MODEL LAB -----------------
     with tab13:
         st.header("📊 Backtesting, Model Lab & Quant Research")
-        st.caption("CORE-Baseline und Datenstatus. Die angekündigten Research-Funktionen sind noch nicht implementiert.")
+        st.caption("CORE-Baseline, Datenstatus und getrennte Quellenforschung. Backtests und eigene Handelsmodelle sind noch nicht verfügbar.")
 
         lab1, lab2, lab3, lab4, lab5, lab6 = st.tabs([
             "📊 Fundamental Backtest",
@@ -8119,6 +8121,7 @@ if not getattr(st, "_mock_mode", False):
 
         with lab3:
             st.subheader("🔬 Historical & Quant Research")
+            render_research_panel(st, Path(__file__).resolve().parent / "research_data" / "bis_nz_policy.json")
             st.info("Nicht verfügbar: Historische Score-Rekonstruktion und eine Prüfung der zum damaligen Zeitpunkt verfügbaren Daten sind noch nicht implementiert.")
 
         with lab4:
