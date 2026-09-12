@@ -188,11 +188,10 @@ class CoreRegressionTests(unittest.TestCase):
     def test_no_current_annual_fallback_when_fred_unavailable(self):
         loader = self.actual_macro_loader()
         self.core['get_worldbank_data_historical'] = fail
-        for factor in ('Arbeitsmarkt', 'GDP'):
-            result = loader('USD', factor)
-            self.assertIsNone(result['value'])
-            self.assertEqual(result['source'], 'UNAVAILABLE')
-            self.assertEqual(result['freshness'], 'UNAVAILABLE')
+        result = loader('USD', 'Arbeitsmarkt')
+        self.assertIsNone(result['value'])
+        self.assertEqual(result['source'], 'UNAVAILABLE')
+        self.assertEqual(result['freshness'], 'UNAVAILABLE')
 
     def test_macro_date_and_value_come_from_same_observation(self):
         loader = self.actual_macro_loader()
@@ -213,6 +212,14 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result['freshness'], 'AGING')
         data.drop(data[data['date'] == pd.Timestamp('2025-04-01')].index, inplace=True)
         self.assertIsNone(loader('USD', 'GDP', '2026-09-06')['value'])
+
+    def test_nzd_historical_gdp_keeps_fred_yoy_route(self):
+        loader = self.actual_macro_loader()
+        self.core['get_fred_data'] = lambda *args: (pd.DataFrame({'date': pd.to_datetime(['2026-04-01']), 'value': [2.1]}), None, True)
+        result = loader('NZD', 'GDP', '2026-09-06')
+        self.assertEqual(result['source'], 'FRED')
+        self.assertAlmostEqual(result['value'], 2.1)
+        self.assertEqual(result['date'], '2026-04-01')
 
     def test_no_fabricated_backtest_or_stale_version_ui(self):
         text = Path(__file__).with_name('app.py').read_text()

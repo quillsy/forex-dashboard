@@ -150,6 +150,75 @@ class PolicyRegressions(unittest.TestCase):
         self.assertTrue(self.p['policy_rate_is_usable'](obj))
         self.assertIsNone(obj['verified_at'])
 
+    def ecb_pending_fixture(self):
+        self.p['_policy_now'] = lambda: datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+        table = ('<table><tr><td>2026</td><td>16 Sep.</td><td>2.50</td><td>2.65</td><td>-</td><td>2.90</td></tr>'
+                 '<tr><td>17 Jun.</td><td>2.25</td><td>2.40</td><td>-</td><td>2.65</td></tr>'
+                 '<tr><td>2025</td><td>11 Jun.</td><td>2.00</td><td>2.15</td><td>-</td><td>2.40</td></tr></table>')
+        text = 'The deposit facility will be 2.50%, with effect from 16 September 2026.'
+        payload = {'dataSets': [{'series': {'0': {'observations': {'0': [2.0], '1': [2.25], '2': [2.50]}}}}],
+                   'structure': {'dimensions': {'observation': [{'values': [
+                       {'id': '2025-06-11'}, {'id': '2026-06-17'}, {'id': '2026-09-16'}]}]}}}
+        self.p['_policy_request'] = lambda *a, **k: SimpleNamespace(json=lambda: payload)
+        def html(currency, url):
+            return BeautifulSoup(table if 'key_ecb_interest_rates' in url else
+                '<a href="/ecb.mp260910~a.en.html">Decision</a>' if url.endswith('index.en.html') else text, 'html.parser')
+        self.p['_policy_html'] = html
+        return text, BeautifulSoup(table, 'html.parser')
+
+    def test_ecb_future_announcement_does_not_activate_early(self):
+        self.ecb_pending_fixture()
+        result = self.p['fetch_official_policy_rate_live']('EUR')
+        self.assertNotIn('error', result)
+        self.assertEqual([p['rate'] for p in result['evidence']], [2.25, 2.25])
+        proof = result['evidence'][1]
+        self.assertEqual(proof['rate_effective_date'], '2026-06-17')
+        self.assertEqual(proof['announced_rate'], 2.50)
+        self.assertEqual(proof['valid_until'], '2026-09-15T22:00:00+00:00')
+        # Both API and table contain the future value, but it is not current.
+        self.p['_policy_now'] = lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
+        result = self.p['fetch_official_policy_rate_live']('EUR')
+        self.assertNotIn('error', result)
+        self.assertEqual([p['rate'] for p in result['evidence']], [2.50, 2.50])
+
+    def test_ecb_pending_requires_exact_future_row_and_available_api(self):
+        text, table = self.ecb_pending_fixture()
+        for altered, decision, api in [(text, '2026-09-10', False),
+                (text.replace('16 September', '17 September'), '2026-09-10', True),
+                (text.replace('2.50%', '2.75%'), '2026-09-10', True),
+                (text.replace('with effect from', 'around'), '2026-09-10', True),
+                (text, '2026-09-17', True)]:
+            with self.subTest(altered=altered, decision=decision, api=api):
+                with self.assertRaises(ValueError):
+                    self.p['_policy_ecb_pending'](altered, decision, table, 2.25, api)
+        duplicate = BeautifulSoup(str(table).replace('</table>', str(table.tr) + '</table>'), 'html.parser')
+        with self.assertRaises(ValueError):
+            self.p['_policy_ecb_pending'](text, '2026-09-10', duplicate, 2.25, True)
+        import requests
+        self.p['_policy_request'] = Mock(side_effect=requests.RequestException('offline'))
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('EUR'))
+
+    def test_ecb_deadline_blocks_proofs_and_failure_fallback_at_boundary(self):
+        self.ecb_pending_fixture()
+        evidence = self.p['fetch_official_policy_rate_live']('EUR')['evidence']
+        obj = self.valid('EUR', 2.25)
+        obj.update(verification_evidence=evidence, rate_effective_date='2026-06-17',
+                   last_policy_decision_date='2026-09-10', verified_at='2026-09-12T12:00:00+00:00')
+        for stamp, expected in [('2026-09-15T21:59:59+00:00', True),
+                                ('2026-09-15T22:00:00+00:00', False)]:
+            self.p['_policy_now'] = lambda: datetime.fromisoformat(stamp)
+            self.assertEqual(self.p['policy_rate_is_usable'](obj), expected)
+            self.assertEqual(self.p['_policy_proofs_valid'](obj, check_age=False), expected)
+        self.p['POLICY_RATE_DEFINITIONS'] = {'EUR': self.p['POLICY_RATE_DEFINITIONS']['EUR']}
+        self.p['save_policy_rates_cache']({'EUR': obj})
+        self.p['fetch_official_policy_rate_live'] = lambda *a: {'error': 'Timeout', 'evidence': []}
+        refreshed = self.p['refresh_all_verified_policy_rates']()['EUR']
+        self.assertFalse(self.p['policy_rate_is_usable'](refreshed))
+        for invalid in (None, 'NaT', 'not a date'):
+            broken = deepcopy(obj)
+            broken['verification_evidence'][1]['valid_until'] = invalid
+            self.assertFalse(self.p['_policy_proofs_valid'](broken, check_age=False))
+
     def test_ecb_transport_fallback_requires_distinct_matching_official_documents(self):
         import requests
         self.p['_policy_request'] = Mock(side_effect=requests.RequestException('PROVIDER_REQUEST_FAILED'))

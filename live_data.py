@@ -16,7 +16,7 @@ CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title"})
+OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title"})
 
 
 def now_utc():
@@ -169,15 +169,24 @@ def public_observation(observation):
     result = {}
     for key in OBS_FIELDS:
         value = observation.get(key)
+        if key == "publication_basis" and isinstance(value, str) and re.fullmatch(
+                r"https://www\.bea\.gov/news/\d{4}/[a-z0-9-]*gdp[a-z0-9-]*", value):
+            result[key] = value
+            continue
         if key == "source_url":
             official_links = {
                 "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/namq_10_gdp",
+                "https://apps.bea.gov/national/Release/XLS/Survey/Section1All_xls.xlsx",
                 "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve",
                 "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028701",
+                "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3610010401",
                 "https://data.api.abs.gov.au/rest/data/LF/M13.3.1599.20.AUS.M",
                 "https://data.api.abs.gov.au/rest/data/ANA_AGG/M1.GPM.20.AUS.Q",
                 "https://www.e-stat.go.jp/en/stat-search/file-download?fileKind=0&statInfId=000031831358",
             }
+            if isinstance(value, str) and re.fullmatch(r"https://www\.bea\.gov/news/\d{4}/[a-z0-9-]*gdp[a-z0-9-]*", value):
+                result[key] = value
+                continue
             if isinstance(value, str) and re.fullmatch(r"https://dam-api\.bfs\.admin\.ch/hub/api/dam/assets/[1-9]\d*/master", value):
                 result[key] = value
                 continue
@@ -189,7 +198,7 @@ def public_observation(observation):
                 result[key] = value
                 continue
             if isinstance(value, str) and len(value) <= 400 and re.fullmatch(
-                r"https://(?:www\.stats\.govt\.nz/information-releases/labour-market-statistics-[a-z]+-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
+                r"https://(?:www\.stats\.govt\.nz/information-releases/(?:labour-market-statistics-[a-z]+|gross-domestic-product-(?:march|june|september|december))-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
                 result[key] = value
             continue
         if value is None or isinstance(value, (bool, int, float)):
@@ -240,6 +249,17 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
             "observation": public_observation(observation)}
 
 
+def record_not_due(record, currency, factor, now):
+    """Reuse only qualified observations with a known future release deadline."""
+    if not isinstance(record, dict):
+        return False
+    observation = record.get("observation")
+    if not isinstance(observation, dict) or observation.get("needs_hourly_check") is True:
+        return False
+    due = timestamp(record.get("next_due_at"))
+    return due is not None and due > now and eligible(record, now, factor=factor, currency=currency)[0]
+
+
 def collect(app, path=PATH):
     """One cold collector run; only individually qualified observations publish."""
     from source_contracts import validate_fred_metadata
@@ -259,15 +279,28 @@ def collect(app, path=PATH):
                     params={"series_id": series, "api_key": app.FRED_KEY, "file_type": "json"}, timeout=12)
                 response.raise_for_status()
                 metadata[series] = response.json()
+        except (ValueError, TypeError):
+            # Invalid JSON is a contract failure, not a confirmed transport outage.
+            return False
         except Exception:
             return None
         # A transport failure cannot prove a definition conflict.
         return validate_fred_metadata(metadata[series], series, category)
 
     for currency in CURRENCIES:
-        raw = app.compute_currency_details(currency, include_context=False)
+        prior_records = previous.get("currencies", {}).get(currency, {})
+        prior_records = prior_records if isinstance(prior_records, dict) else {}
+        retained = {factor: copy.deepcopy(prior_records[factor]) for factor in FACTORS
+                    if record_not_due(prior_records.get(factor), currency, factor, now_utc())}
+        requested = tuple(factor for factor in FACTORS if factor not in retained)
+        raw = app.compute_currency_details(currency, include_context=False,
+                                          factors_to_refresh=requested) if requested else {}
         data["currencies"][currency] = {}
         for factor in FACTORS:
+            if factor in retained:
+                # Keep every timestamp and status exactly as last verified.
+                data["currencies"][currency][factor] = retained[factor]
+                continue
             observation = dict(raw.get("_observations", {}).get(factor, {}))
             if observation.get("date") is not None:
                 observation["date"] = str(observation["date"])[:10]
@@ -281,7 +314,7 @@ def collect(app, path=PATH):
                     reason = "PMI: Anbieterfreigabe für automatisierten Abruf und öffentliche Nutzung fehlt"
                 else:
                     reason = "PMI: Nutzungsfreigabe für beide Original-Erhebungen noch nicht nachgewiesen"
-            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY", "CAD")) and currency not in ("AUD", "JPY") and not (factor == "GDP" and currency == "CHF"):
+            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY", "CAD")) and currency not in ("AUD", "JPY", "CAD") and not (factor == "GDP" and currency in ("CHF", "USD", "NZD")):
                 contract = fred_contract(observation.get("series_id"), factor)
                 if contract is not True:
                     validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
@@ -307,6 +340,20 @@ def collect(app, path=PATH):
                         reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Rendite-Metadaten nicht bestätigt"
                 # Policy verification must also have succeeded during this run.
                 policy = app.get_verified_policy_rate(currency)
+                proofs = policy.get("verification_evidence", [])
+                deadlines = [timestamp(p.get("valid_until")) for p in proofs
+                             if isinstance(p, dict) and "valid_until" in p] if isinstance(proofs, list) else []
+                if deadlines:
+                    if any(d is None for d in deadlines):
+                        validation, reason = "UNVERIFIED", "Ungültige Leitzins-Ablaufgrenze"
+                    else:
+                        existing_due = timestamp(observation.get("next_due_at"))
+                        deadline = min(deadlines + ([existing_due] if existing_due else []))
+                        observation["next_due_at"] = deadline.isoformat()
+                        # The yield still needs its regular hourly verification.
+                        observation["needs_hourly_check"] = True
+                if not app.policy_rate_is_usable(policy):
+                    validation, reason = "UNVERIFIED", "Leitzins-Belege ungültig oder angekündigter Zinswechsel fällig"
                 verified = policy.get("verification_timestamp") or policy.get("verified_at")
                 if verified is None:
                     verified = policy.get("last_verified_at")
@@ -366,7 +413,7 @@ def render_status(st, authorized=False):
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if observation.get("is_estimate") is True or any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
                          "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
-                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
     available = sum(row["Status"] == "Verfügbar" for row in rows)
     retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")
