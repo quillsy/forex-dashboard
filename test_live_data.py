@@ -244,26 +244,27 @@ class LiveDataTests(unittest.TestCase):
 
     def test_collector_metadata_outage_retains_but_conflict_invalidates(self):
         previous = self.record()
+        previous['factor'] = 'Arbeitsmarkt'
         previous['observation']['series_id'] = 'TEST_GDP'
         previous['observation']['needs_hourly_check'] = True
         previous['next_due_at'] = (NOW + timedelta(days=1)).isoformat()
         app = Mock()
         app.FRED_KEY = 'test-only'
         app.compute_currency_details.return_value = {
-            'GDP': 99, '_observations': {'GDP': dict(previous['observation'])},
-            '_freshness': {'GDP': 'FRESH'}}
+            'Arbeitsmarkt': 99, '_observations': {'Arbeitsmarkt': dict(previous['observation'])},
+            '_freshness': {'Arbeitsmarkt': 'FRESH'}}
         app.get_verified_policy_rate.return_value = {'verification_timestamp': NOW.isoformat()}
         for outage in (True, False, "invalid_json"):
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / 'live.json'
-                live.save({'model_version': live.MODEL, 'currencies': {'NZD': {'GDP': previous}}}, path)
+                live.save({'model_version': live.MODEL, 'currencies': {'USD': {'Arbeitsmarkt': previous}}}, path)
                 app.requests.get.side_effect = requests.RequestException('unavailable') if outage is True else None
                 app.requests.get.return_value = Mock()
                 if outage == "invalid_json":
                     app.requests.get.return_value.json.side_effect = requests.exceptions.JSONDecodeError("bad", "invalid", 0)
                 with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), patch('source_contracts.validate_fred_metadata', return_value=False):
                     live.collect(app, path)
-                result = live.load(path)['currencies']['NZD']['GDP']
+                result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
                 if outage is True:
                     self.assertEqual(result['checked_at'], previous['checked_at'])
                     self.assertEqual(result['score'], previous['score'])
@@ -483,7 +484,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
         previous_observation = {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-08-31' if currency == 'CAD' else '2026-07-31',
             'frequency': 'quarterly' if factor == 'GDP' else 'monthly',
             'source': {'AUD': 'ABS', 'JPY': 'Cabinet Office ESRI' if factor == 'GDP' else 'Statistics Bureau of Japan',
-                       'CAD': 'Statistics Canada', 'CHF': 'Eurostat', 'USD': 'BEA'}[currency],
+                       'NZD': 'Stats NZ GDP expenditure', 'CAD': 'Statistics Canada', 'CHF': 'Eurostat', 'USD': 'BEA'}[currency],
             'series_id': 'official-direct', 'next_due_at': (self.now + timedelta(days=1)).isoformat(),
             # This test exercises an attempted refresh, independently of scheduling.
             'needs_hourly_check': True}
@@ -504,6 +505,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                  patch('official_macro.fetch_statcan_labour', side_effect=response) as statcan, \
                  patch('official_macro.fetch_statcan_gdp', side_effect=response) as statcan_gdp, \
                  patch('official_macro.fetch_bea_gdp', side_effect=response) as bea, \
+                 patch('official_macro.fetch_nz_gdp', side_effect=response) as nz_gdp, \
                  patch('official_macro.fetch_eurostat_observation', side_effect=response) as eurostat, \
                  patch.object(live, 'now_utc', return_value=self.now), \
                  patch.object(live, 'CURRENCIES', (currency,)), \
@@ -520,6 +522,9 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                     (statcan_gdp if factor == 'GDP' else statcan).assert_called_once_with(session=self.transport)
                     (statcan if factor == 'GDP' else statcan_gdp).assert_not_called()
                     eurostat.assert_not_called()
+                elif currency == 'NZD':
+                    nz_gdp.assert_called_once_with(session=self.transport)
+                    eurostat.assert_not_called()
                 elif currency == 'USD':
                     bea.assert_called_once_with(session=self.transport)
                     eurostat.assert_not_called()
@@ -533,7 +538,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
 
     def test_parser_conflict_revokes_previous_valid_direct_observation(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('NZD', 'GDP'), ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, ValueError('source contract conflict'))
                 self.assertEqual(row['validation'], 'UNVERIFIED')
@@ -544,7 +549,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
 
     def test_transport_outage_preserves_only_original_release_and_age_limits(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('NZD', 'GDP'), ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, requests.RequestException('offline'))
                 for field in ('score', 'checked_at', 'expires_at', 'next_due_at'):
@@ -556,7 +561,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
 
     def test_successful_direct_observation_is_validated_without_fred_metadata(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('NZD', 'GDP'), ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor)
                 self.assertEqual(row['validation'], 'VALID')

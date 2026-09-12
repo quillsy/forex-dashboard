@@ -4737,14 +4737,15 @@ def get_macro_observation_details(curr, category, target_date=None):
         observation.setdefault("source", "UNAVAILABLE")
         return observation
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
-    if (curr in ("AUD", "JPY", "CAD") or (curr == "USD" and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
-        from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_statcan_gdp, fetch_japan_gdp, fetch_bea_gdp
+    if (curr in ("AUD", "JPY", "CAD") or (curr in ("USD", "NZD") and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_statcan_gdp, fetch_japan_gdp, fetch_bea_gdp, fetch_nz_gdp
         from official_quarterly_labour import fetch_japan_labour
         validation = "SOURCE_UNAVAILABLE"
         try:
             result = (fetch_abs_observation(category, session=requests) if curr == "AUD"
                       else (fetch_statcan_labour if category == "Arbeitsmarkt" else fetch_statcan_gdp)(session=requests) if curr == "CAD"
                       else fetch_bea_gdp(session=requests) if curr == "USD"
+                      else fetch_nz_gdp(session=requests) if curr == "NZD"
                       else fetch_japan_gdp(session=requests) if category == "GDP"
                       else fetch_japan_labour(session=requests))
             if result:
@@ -4760,7 +4761,7 @@ def get_macro_observation_details(curr, category, target_date=None):
             pass
         except Exception:
             validation = "UNVERIFIED"
-        return {"value": None, "date": None, "source": {"USD": "BEA", "AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
+        return {"value": None, "date": None, "source": {"NZD": "Stats NZ GDP expenditure", "USD": "BEA", "AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
                 "series_id": None, "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly",
                 "freshness": "UNAVAILABLE", "_validation": validation,
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}

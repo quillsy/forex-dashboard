@@ -16,7 +16,7 @@ CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title"})
+OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title"})
 
 
 def now_utc():
@@ -198,7 +198,7 @@ def public_observation(observation):
                 result[key] = value
                 continue
             if isinstance(value, str) and len(value) <= 400 and re.fullmatch(
-                r"https://(?:www\.stats\.govt\.nz/information-releases/labour-market-statistics-[a-z]+-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
+                r"https://(?:www\.stats\.govt\.nz/information-releases/(?:labour-market-statistics-[a-z]+|gross-domestic-product-(?:march|june|september|december))-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
                 result[key] = value
             continue
         if value is None or isinstance(value, (bool, int, float)):
@@ -314,7 +314,7 @@ def collect(app, path=PATH):
                     reason = "PMI: Anbieterfreigabe für automatisierten Abruf und öffentliche Nutzung fehlt"
                 else:
                     reason = "PMI: Nutzungsfreigabe für beide Original-Erhebungen noch nicht nachgewiesen"
-            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY", "CAD")) and currency not in ("AUD", "JPY", "CAD") and not (factor == "GDP" and currency in ("CHF", "USD")):
+            elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY", "CAD")) and currency not in ("AUD", "JPY", "CAD") and not (factor == "GDP" and currency in ("CHF", "USD", "NZD")):
                 contract = fred_contract(observation.get("series_id"), factor)
                 if contract is not True:
                     validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"

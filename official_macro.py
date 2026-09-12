@@ -946,3 +946,133 @@ def fetch_bea_gdp(*, now=None, session=None):
     result = parse_bea_gdp(get(BEA_GDP_WORKBOOK).content, release, now=checked)
     result['publication_basis'] = release_url
     return result
+
+
+# Stats NZ: exact GDP(E), real SA levels → same-vintage YoY.
+# CC BY 4.0: https://www.stats.govt.nz/about-us/copyright/
+# Due-aware central collector retains this observation until announced release/age
+# expiry. Unscheduled revisions between checks are not guaranteed to be detected.
+from official_quarterly_labour import _PageData, _text
+
+NZ_GDP_BASE = 'https://www.stats.govt.nz'
+NZ_GDP_TOPIC = NZ_GDP_BASE + '/topics/gross-domestic-product/'
+NZ_GDP_SERIES = 'SNEQ.SG02RSC00B15'
+NZ_GDP_TITLE = re.compile(r'Gross domestic product: (March|June|September|December) (\d{4}) quarter')
+NZ_GDP_MONTHS = {calendar.month_name[i]: i for i in (3, 6, 9, 12)}
+NZ_GDP_HEADER = 'Series_reference,Period,Data_value,STATUS,UNITS,MAGNITUDE,Subject,Group,Series_title_1,Series_title_2,Series_title_3,Series_title_4,Series_title_5'.split(',')
+
+def _nz_gdp_walk(x):
+    if isinstance(x, dict):
+        yield x
+        for value in x.values(): yield from _nz_gdp_walk(value)
+    elif isinstance(x, list):
+        for value in x: yield from _nz_gdp_walk(value)
+
+def _nz_gdp_documents(text):
+    p = _PageData(); p.feed(text)
+    return p.documents
+
+def _nz_gdp_utc(now):
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None: raise ValueError('NZ_GDP_TIMEZONE_REQUIRED')
+    return now.astimezone(timezone.utc)
+
+def _nz_gdp_identity(title):
+    match = NZ_GDP_TITLE.fullmatch(title)
+    if not match: raise ValueError('NZ_GDP_RELEASE_IDENTITY')
+    month, year = NZ_GDP_MONTHS[match[1]], int(match[2])
+    return year, month
+
+def _nz_gdp_path(year, month):
+    return f'/information-releases/gross-domestic-product-{calendar.month_name[month].lower()}-{year}-quarter/'
+
+def discover_nz_gdp_release(topic):
+    candidates = set()
+    for document in _nz_gdp_documents(topic):
+        for item in _nz_gdp_walk(document):
+            if not NZ_GDP_TITLE.fullmatch(str(item.get('Title', ''))): continue
+            year, month = _nz_gdp_identity(item['Title'])
+            path = item.get('PageLink', item.get('Link'))
+            if path != _nz_gdp_path(year, month): raise ValueError('NZ_GDP_RELEASE_LINK_CONFLICT')
+            candidates.add((year, month, NZ_GDP_BASE + path))
+    if not candidates: raise ValueError('NZ_GDP_RELEASE_MISSING')
+    return max(candidates)
+
+def _nz_gdp_release_metadata(page, year, month, now):
+    expected = f'Gross domestic product: {calendar.month_name[month]} {year} quarter'
+    releases = [x for x in _nz_gdp_documents(page) if x.get('Title') == expected]
+    if len(releases) != 1: raise ValueError('NZ_GDP_RELEASE_IDENTITY')
+    release = releases[0]
+    pub = datetime.strptime(release['DateTaxonomyTerm']['PublicationDate'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('Pacific/Auckland'))
+    end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+    if pub.astimezone(timezone.utc) > now or pub.date() < end: raise ValueError('NZ_GDP_PUBLICATION_INVALID')
+    filename = f'gross-domestic-product-{calendar.month_name[month].lower()}-{year}-quarter.csv'
+    expected_path = f'/assets/Uploads/Gross-domestic-product/Gross-domestic-product-{calendar.month_name[month]}-{year}-quarter/Download-data/{filename}'
+    urls = set()
+    for item in _nz_gdp_walk(release):
+        if item.get('FileName') == filename:
+            if item.get('DocumentExtension') != 'csv' or item.get('DocumentLink') != expected_path:
+                raise ValueError('NZ_GDP_CSV_LINK_CONFLICT')
+            urls.add(NZ_GDP_BASE + expected_path)
+    if len(urls) != 1: raise ValueError('NZ_GDP_CSV_MISSING')
+    body = re.sub(r'\s+', ' ', _text(release))
+    pattern = r'Gross domestic product: (March|June|September|December) (\d{4}) quarter\s+will be released on\s+(\d{1,2}) ([A-Za-z]+) (\d{4})'
+    dues = set()
+    for m, y, d, dm, dy in re.findall(pattern, body):
+        next_serial = int(y) * 4 + NZ_GDP_MONTHS[m] // 3 - 1
+        if next_serial != year * 4 + month // 3: raise ValueError('NZ_GDP_NEXT_PERIOD_CONFLICT')
+        due_month = list(calendar.month_name).index(dm)
+        due = datetime(int(dy), due_month, int(d), tzinfo=ZoneInfo('Pacific/Auckland'))
+        next_end = datetime(int(y), NZ_GDP_MONTHS[m], calendar.monthrange(int(y), NZ_GDP_MONTHS[m])[1]).date()
+        if due.date() < next_end or due <= pub: raise ValueError('NZ_GDP_NEXT_RELEASE_INVALID')
+        dues.add(due.astimezone(timezone.utc))
+    if len(dues) > 1: raise ValueError('NZ_GDP_NEXT_RELEASE_CONFLICT')
+    due = next(iter(dues)) if dues else None
+    if due is not None and now >= due: raise ValueError('NZ_GDP_NEW_RELEASE_DUE')
+    return pub.astimezone(timezone.utc), due, next(iter(urls)), end
+
+def parse_nz_gdp(content, page, *, year, month, now=None):
+    checked = _nz_gdp_utc(now)
+    pub, due, csv_url, end = _nz_gdp_release_metadata(page, year, month, checked)
+    if isinstance(content, bytes): content = content.decode('utf-8-sig')
+    reader = csv.DictReader(io.StringIO(content.lstrip('\ufeff')))
+    if reader.fieldnames != NZ_GDP_HEADER: raise ValueError('NZ_GDP_SCHEMA_INVALID')
+    levels = {}
+    statuses = {}
+    serial = year * 4 + month // 3 - 1
+    for row in reader:
+        if row['Series_reference'] != NZ_GDP_SERIES: continue
+        if (row['Group'] != 'Series, GDP(E), Chain volume, Seasonally adjusted, Total'
+            or row['Series_title_1'] != 'Gross Domestic Product - expenditure measure'
+            or row['UNITS'] != 'Dollars' or row['MAGNITUDE'] != '6'
+            or row['Subject'] != 'National Accounts - SNA 2008 - SNE'
+            or any(row[x] for x in NZ_GDP_HEADER[-4:])): raise ValueError('NZ_GDP_DEFINITION_INVALID')
+        m = re.fullmatch(r'(\d{4})\.(03|06|09|12)', row['Period'])
+        if not m: raise ValueError('NZ_GDP_PERIOD_INVALID')
+        period = int(m[1]) * 4 + int(m[2]) // 3 - 1
+        if period in levels or period > serial: raise ValueError('NZ_GDP_PERIOD_CONFLICT')
+        if row['STATUS'] not in ('FINAL', 'REVISED'): raise ValueError('NZ_GDP_STATUS_UNSUPPORTED')
+        value = float(row['Data_value'])
+        if not math.isfinite(value) or value <= 0: raise ValueError('NZ_GDP_LEVEL_INVALID')
+        levels[period] = value
+        statuses[period] = row['STATUS']
+    if not all(p in levels for p in range(serial - 4, serial + 1)): raise ValueError('NZ_GDP_QUARTER_MISSING')
+    return {'value': (levels[serial] / levels[serial - 4] - 1) * 100,
+            'date': end.isoformat(), 'reference_period': f'{year}-Q{month // 3}',
+            'source': 'Stats NZ GDP expenditure', 'source_url': NZ_GDP_BASE + _nz_gdp_path(year, month),
+            'series_id': NZ_GDP_SERIES, 'unit': 'percent year-on-year', 'frequency': 'quarterly',
+            'seasonal_adjustment': 'SA', 'checked_at': checked.isoformat(),
+            'published_at': pub.isoformat(), 'next_due_at': due.isoformat() if due else None,
+            'next_due_precision': 'date_only_start_of_NZ_day' if due else None,
+            'transformation': '100 * (same-vintage real SA expenditure GDP level / year-earlier level - 1)',
+            'provider_status': statuses[serial], 'comparison_period_status': statuses[serial - 4], 'license': 'CC BY 4.0; Stats NZ', 'redistribution_status': 'Public numeric data; attribution required',
+            'source_title': 'Real GDP, expenditure measure, seasonally adjusted; same-release YoY', 'needs_hourly_check': due is None}
+
+def fetch_nz_gdp(*, now=None, session=None):
+    checked = _nz_gdp_utc(now); transport = session or requests
+    def get(url):
+        r = transport.get(url, timeout=30); r.raise_for_status(); return r.text
+    year, month, url = discover_nz_gdp_release(get(NZ_GDP_TOPIC))
+    page = get(url)
+    _, _, csv_url, _ = _nz_gdp_release_metadata(page, year, month, checked)
+    return parse_nz_gdp(get(csv_url), page, year=year, month=month, now=checked)
