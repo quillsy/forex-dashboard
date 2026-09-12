@@ -1,0 +1,201 @@
+{
+  "schema": "ec-industry-ea21-research-v1",
+  "mode": "research_only",
+  "core_eligible": false,
+  "qualification_status": "research_source_reviewed_2026_09_12",
+  "signal": null,
+  "source": "European Commission DG ECFIN via Eurostat",
+  "source_url": "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/ei_bsin_m_r2",
+  "source_parameters": {
+    "freq": "M",
+    "indic": "BS-ICI",
+    "s_adj": "SA",
+    "unit": "BAL",
+    "geo": "EA21",
+    "lastTimePeriod": 13,
+    "lang": "EN"
+  },
+  "series": "EI_BSIN_M_R2:M.BS-ICI.SA.BAL.EA21",
+  "instrument": "Industry confidence indicator (not PMI)",
+  "unit": "balance_points",
+  "seasonal_adjustment": "seasonally_adjusted_not_calendar_adjusted",
+  "geography": "EA21",
+  "frequency": "monthly",
+  "retrieved_at": "2026-09-12T11:23:03.920969+00:00",
+  "dataset_updated_at": "2026-08-28T09:00:00+00:00",
+  "published_at": null,
+  "reference_period": "2026-08",
+  "value": -5.3,
+  "latest_indexed_period": "2026-08",
+  "latest_indexed_period_missing": false,
+  "missing_periods": [],
+  "absent_calendar_periods": [],
+  "reference_period_age_days": 12,
+  "age_basis": "days since reference month end; current incomplete month is zero; not publication age",
+  "observations": [
+    {
+      "reference_period": "2025-08",
+      "value": -10.0,
+      "status": null
+    },
+    {
+      "reference_period": "2025-09",
+      "value": -10.0,
+      "status": null
+    },
+    {
+      "reference_period": "2025-10",
+      "value": -8.2,
+      "status": null
+    },
+    {
+      "reference_period": "2025-11",
+      "value": -9.1,
+      "status": null
+    },
+    {
+      "reference_period": "2025-12",
+      "value": -8.7,
+      "status": null
+    },
+    {
+      "reference_period": "2026-01",
+      "value": -6.9,
+      "status": null
+    },
+    {
+      "reference_period": "2026-02",
+      "value": -7.3,
+      "status": null
+    },
+    {
+      "reference_period": "2026-03",
+      "value": -6.9,
+      "status": null
+    },
+    {
+      "reference_period": "2026-04",
+      "value": -7.5,
+      "status": null
+    },
+    {
+      "reference_period": "2026-05",
+      "value": -7.7,
+      "status": null
+    },
+    {
+      "reference_period": "2026-06",
+      "value": -7.5,
+      "status": null
+    },
+    {
+      "reference_period": "2026-07",
+      "value": -6.1,
+      "status": null
+    },
+    {
+      "reference_period": "2026-08",
+      "value": -5.3,
+      "status": null
+    }
+  ],
+  "payload_sha256": "63a43ad0351e2cd259d1c58985723590c26ddf79f31f0fae0cb057976908e446",
+  "source_snapshot": {
+    "version": "2.0",
+    "class": "dataset",
+    "source": "ESTAT",
+    "id": [
+      "freq",
+      "indic",
+      "s_adj",
+      "unit",
+      "geo",
+      "time"
+    ],
+    "size": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      13
+    ],
+    "value": {
+      "0": -10.0,
+      "1": -10.0,
+      "2": -8.2,
+      "3": -9.1,
+      "4": -8.7,
+      "5": -6.9,
+      "6": -7.3,
+      "7": -6.9,
+      "8": -7.5,
+      "9": -7.7,
+      "10": -7.5,
+      "11": -6.1,
+      "12": -5.3
+    },
+    "updated": "2026-08-28T11:00:00+0200",
+    "status": {},
+    "extension": {
+      "id": "EI_BSIN_M_R2",
+      "agencyId": "ESTAT"
+    },
+    "dimension": {
+      "freq": {
+        "category": {
+          "index": {
+            "M": 0
+          }
+        }
+      },
+      "indic": {
+        "category": {
+          "index": {
+            "BS-ICI": 0
+          }
+        }
+      },
+      "s_adj": {
+        "category": {
+          "index": {
+            "SA": 0
+          }
+        }
+      },
+      "unit": {
+        "category": {
+          "index": {
+            "BAL": 0
+          }
+        }
+      },
+      "geo": {
+        "category": {
+          "index": {
+            "EA21": 0
+          }
+        }
+      },
+      "time": {
+        "category": {
+          "index": {
+            "2025-08": 0,
+            "2025-09": 1,
+            "2025-10": 2,
+            "2025-11": 3,
+            "2025-12": 4,
+            "2026-01": 5,
+            "2026-02": 6,
+            "2026-03": 7,
+            "2026-04": 8,
+            "2026-05": 9,
+            "2026-06": 10,
+            "2026-07": 11,
+            "2026-08": 12
+          }
+        }
+      }
+    }
+  }
+}
