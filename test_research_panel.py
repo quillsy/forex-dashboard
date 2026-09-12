@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
-from research_panel import SOURCE_URL, render_research_panel, validate_research_artifact
+from research_panel import SOURCE_URL, render_research_panel, validate_research_artifact, render_archive_summary
 
 
 def artifact():
@@ -31,6 +31,31 @@ class FakeStreamlit:
 
 
 class ResearchPanelTests(unittest.TestCase):
+    def test_archive_summary_rejects_missing_anchor_and_duplicate_status_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for content in ('{"archive_event_count":2,"archive_head":null}',
+                            '{"archive_event_count":2,"archive_event_count":0}'):
+                Path(tmp, 'status.json').write_text(content)
+                st = FakeStreamlit()
+                render_archive_summary(st, tmp, 'bis_nz_policy')
+                self.assertTrue(any(name == 'warning' for name, _ in st.messages))
+                self.assertNotIn('noch kein tatsächlich', str(st.messages))
+
+    def test_archive_summary_reports_actual_history_and_sanitizes_corruption(self):
+        from research_vintages import append_vintage
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'bis_nz_policy_vintages.json'
+            sample = dict(artifact(), missing_observation_dates=[])
+            append_vintage(path, 'bis_nz_policy', sample, datetime.now(timezone.utc))
+            st = FakeStreamlit()
+            render_archive_summary(st, tmp, 'bis_nz_policy')
+            self.assertIn('1 erfasste Datenstände', str(st.messages))
+            path.write_text('INVALID_PRIVATE_EXCEPTION_TEXT')
+            st = FakeStreamlit()
+            render_archive_summary(st, tmp, 'bis_nz_policy')
+            self.assertNotIn('INVALID_PRIVATE_EXCEPTION_TEXT', str(st.messages))
+            self.assertTrue(any(name == 'warning' for name, _ in st.messages))
+
     def setUp(self):
         self.now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
 

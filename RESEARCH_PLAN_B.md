@@ -111,3 +111,39 @@ This research panel does not close missing production factors. Each CORE gap
 still requires its own source, rights, metadata and freshness evidence. Overall
 completion additionally requires regression results, successful production
 collection and direct verification of the deployed display.
+
+## Prospective research states
+
+The two separate files `research_data/bis_nz_policy_vintages.json` and
+`research_data/ec_industry_vintages.json` retain the states actually observed
+by the research collectors. These are prospective records, not reconstructions
+of earlier publication vintages. Initial historical observations all become
+known to this archive together at the actual collection time.
+
+`first_observed_at` is captured after response validation; `retrieved_at`
+retains the source request-start timestamp. Neither is an original publication
+time. No success rate, trade execution or backtest is produced by the archive.
+
+The semantic snapshot preserves series definition, observations and missing
+periods. Retrieval age, formatting and provider-wide update time do not create
+new economic states. Compare only with the immediately preceding state:
+A -> B -> A is three events. A rolling-window change is a state change, not
+necessarily an economic revision. Current windows do not prove values outside
+those windows.
+
+Each source's existing collector lock protects journal, latest artifact and
+status writes. Validate history before appending; write journal first, latest
+artifact second and anchored status last. Corrupt or unexpectedly missing
+history must not silently become a new empty archive. Fixed error codes avoid
+publishing exception content. Due-aware restart behavior remains in force.
+
+Hash links and a status anchor detect accidental edits/truncation relative to
+that anchor. They are not signatures or proof against an attacker rewriting
+both history and anchor. Earlier trusted Git commits provide a separate audit
+reference. If publication fails, a runner-local capture is not guaranteed to
+survive; no claim of externally durable storage is made until publication.
+
+Only the two exact journal paths are added to the workflow's publication
+allowlist. Source rights and attribution are the same as for their validated
+research observations. Private notes, credentials and arbitrary source text
+are excluded. This does not alter existing CORE snapshots or backtesting.
