@@ -29,6 +29,10 @@ def _unique_object(pairs):
 def _timestamp(value):
     if not isinstance(value, str):
         raise ValueError('Timestamp must be text')
+    # Eurostat uses +0200; Python 3.10 requires +02:00. Preserve the offset.
+    if value.endswith('Z'):
+        value = value[:-1] + '+00:00'
+    value = re.sub(r'([+-][0-9]{2})([0-9]{2})$', r'\1:\2', value)
     result = datetime.fromisoformat(value)
     if result.tzinfo is None or result.utcoffset() is None:
         raise ValueError('Timestamp must have a timezone')

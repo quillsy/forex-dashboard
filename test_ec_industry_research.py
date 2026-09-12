@@ -26,6 +26,13 @@ def parse(data):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_provider_offset_forms_preserve_the_same_utc_instant(self):
+        for updated in ('2026-08-28T11:00:00+0200',
+                        '2026-08-28T11:00:00+02:00', '2026-08-28T09:00:00Z'):
+            data = fixture()
+            data['updated'] = updated
+            self.assertEqual(parse(data)['dataset_updated_at'], '2026-08-28T09:00:00+00:00')
+
     def test_exact_identity_and_metadata(self):
         result = parse(fixture())
         self.assertEqual(result['value'], -2)
