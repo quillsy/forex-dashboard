@@ -9,6 +9,33 @@ SOURCE_URL = 'https://stats.bis.org/api/v2/data/dataflow/BIS/WS_CBPOL/1.0/D.NZ'
 RESEARCH_WARNING_DAYS = 14
 
 
+def render_archive_summary(st, directory, source_id):
+    """Show verified archive metadata only; never display unvalidated events."""
+    from research_vintages import inspect_vintage
+    from collect_research import read_archive_status
+    directory = Path(directory)
+    if source_id not in ('bis_nz_policy', 'ec_industry'):
+        raise ValueError('Unknown research source')
+    status_name = 'status.json' if source_id == 'bis_nz_policy' else 'ec_industry_status.json'
+    try:
+        status_path = directory / status_name
+        status = read_archive_status(status_path)
+        if status.get('archive_event_count', 0) and status.get('archive_head') is None:
+            raise ValueError('Recorded history is missing its anchor')
+        if status.get('error_code') == 'RESEARCH_ARCHIVE_INVALID':
+            st.warning('Research-Historie: Integritäts- oder Schreibfehler. Der letzte Abruf wurde nicht als neuer verlässlicher Datenstand übernommen.')
+        result = inspect_vintage(directory / (source_id + '_vintages.json'),
+                                 source_id, anchor=status.get('archive_head'))
+    except (OSError, ValueError, TypeError, KeyError, OverflowError):
+        st.warning('Research-Historie nicht verlässlich lesbar. Frühere Informationsstände können derzeit nicht bestätigt werden.')
+        return
+    if result['event_count'] == 0:
+        st.caption('Research-Historie: noch kein tatsächlich erfasster Datenstand archiviert.')
+    else:
+        st.caption(f"Research-Historie: {result['event_count']} erfasste Datenstände · letzter neuer Stand erkannt: {result['first_observed_at']}")
+        st.caption('Erfasst seit Beginn dieser Historie, keine rekonstruierte Erstveröffentlichung. Unveränderte Folgeabrufe erzeugen keinen neuen Eintrag; Revisionen bleiben nachvollziehbar.')
+
+
 def _date(value):
     if not isinstance(value, str):
         raise ValueError('Invalid observation date')

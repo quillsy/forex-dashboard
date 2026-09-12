@@ -19,6 +19,7 @@ on:
       - 'collect_research.py'
       - 'ec_industry_research.py'
       - 'collect_ec_industry.py'
+      - 'research_vintages.py'
       - '.github/workflows/live_data_collection.yml'
   schedule:
     # Run once daily at 22:00 UTC (after market close)
@@ -84,7 +85,7 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json research_data/bis_nz_policy.json research_data/status.json research_data/ec_industry.json research_data/ec_industry_status.json; do
+          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json research_data/bis_nz_policy.json research_data/status.json research_data/ec_industry.json research_data/ec_industry_status.json research_data/bis_nz_policy_vintages.json research_data/ec_industry_vintages.json; do
             if [ -f "$file" ]; then git add -- "$file"; fi
           done
           if ! git diff --cached --quiet; then
