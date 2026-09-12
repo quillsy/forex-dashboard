@@ -646,3 +646,303 @@ def fetch_japan_gdp(*, now=None, session=None):
     metadata = parse_japan_gdp_menu(get(menu_url), menu_url)
     metadata.update(parse_japan_gdp_release(get(metadata['archive_url']), metadata, now=checked))
     return parse_japan_gdp_csv(get(metadata['source_url']), metadata, now=checked)
+
+
+STATCAN_GDP_COORD = '1.1.1.30.0.0.0.0.0.0'
+STATCAN_GDP_TITLE = 'Canada;Chained (2017) dollars;Seasonally adjusted at annual rates;Gross domestic product at market prices'
+
+
+def parse_statcan_gdp(series_payload, data_payload, cube_payload, *, now=None):
+    """Real expenditure GDP YoY from five contiguous current-vintage SAAR levels.
+
+    Same definition as CANGDPRQPSMEI (real expenditure GDP, SA, YoY), sourced
+    directly from StatCan. Annual-rate scaling cancels in the YoY ratio.
+    releaseTime records the current publication/revision, not original vintage.
+    """
+    from zoneinfo import ZoneInfo
+    checked = _utc_now(now)
+    series, data, cube = map(_statcan_object, (series_payload, data_payload, cube_payload))
+    for item in (series, data):
+        if (type(item.get('productId')) is not int or item['productId'] != 36100104
+                or type(item.get('vectorId')) is not int or item['vectorId'] != 62305752
+                or item.get('coordinate') != STATCAN_GDP_COORD):
+            raise ValueError('Wrong StatCan GDP series')
+    expected = {'SeriesTitleEn': STATCAN_GDP_TITLE, 'memberUomCode': 81,
+                'frequencyCode': 9, 'scalarFactorCode': 6, 'decimals': 0, 'terminated': 0}
+    if any(type(series.get(k)) is not type(v) or series[k] != v for k, v in expected.items()):
+        raise ValueError('Wrong StatCan GDP metadata')
+    if (str(cube.get('productId')) != '36100104' or cube.get('frequencyCode') != 9
+            or cube.get('archiveStatusCode') != '2'
+            or cube.get('cubeTitleEn') != 'Gross domestic product, expenditure-based, Canada, quarterly'):
+        raise ValueError('Wrong or inactive StatCan GDP cube')
+    # Validate the actual dimension members, not merely a title string.
+    members = [(1, 'Geography', 1, 'Canada'), (2, 'Prices', 1, 'Chained (2017) dollars'),
+               (3, 'Seasonal adjustment', 1, 'Seasonally adjusted at annual rates'),
+               (4, 'Estimates', 30, 'Gross domestic product at market prices')]
+    dimensions = cube.get('dimension', [])
+    if not isinstance(dimensions, list) or len(dimensions) != 4:
+        raise ValueError('Invalid StatCan cube dimensions')
+    for position, title, code, label in members:
+        dims = [d for d in dimensions if isinstance(d, dict) and d.get('dimensionPositionId') == position]
+        if len(dims) != 1 or dims[0].get('dimensionNameEn') != title:
+            raise ValueError('Conflicting StatCan dimension')
+        selected = [m for m in dims[0].get('member', []) if isinstance(m, dict) and m.get('memberId') == code]
+        if len(selected) != 1 or selected[0].get('memberNameEn') != label or selected[0].get('terminated') != 0:
+            raise ValueError('Wrong StatCan dimension member')
+        if position == 2 and selected[0].get('memberUomCode') != 81:
+            raise ValueError('Wrong StatCan GDP unit')
+
+    def publication(raw):
+        if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
+            raise ValueError('Invalid StatCan release time')
+        value = datetime.strptime(raw, '%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        if value > checked:
+            raise ValueError('Future StatCan publication')
+        return value
+
+    cube_release = publication(cube.get('releaseTime'))
+    points = data.get('vectorDataPoint')
+    if not isinstance(points, list) or len(points) != 5:
+        raise ValueError('Empty StatCan GDP observations')
+    observations = {}
+    for point in points:
+        if not isinstance(point, dict):
+            raise ValueError('Malformed StatCan observation')
+        period = point.get('refPer')
+        if not isinstance(period, str) or not re.fullmatch(r'\d{4}-(?:01|04|07|10)-01', period):
+            raise ValueError('Invalid StatCan monthly period')
+        quarter = (int(period[5:7]) + 2) // 3
+        end = _period_end(f'{period[:4]}-Q{quarter}', 'Q')
+        if period in observations or end > checked.date():
+            raise ValueError('Duplicate or future StatCan period')
+        for key, expected_value in {'frequencyCode': 9, 'scalarFactorCode': 6, 'decimals': 0,
+                                    'symbolCode': 0, 'statusCode': 0, 'securityLevelCode': 0}.items():
+            if type(point.get(key)) is not int or point[key] != expected_value:
+                raise ValueError('Invalid or unavailable StatCan observation')
+        if point.get('refPer2', '') or point.get('refPerRaw2', '') or point.get('refPerRaw') != f'{period[:4]}-{quarter * 3:02d}-01':
+            raise ValueError('Conflicting StatCan reference period')
+        value = point.get('value')
+        if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+            raise ValueError('Missing or invalid StatCan GDP rate')
+        published = publication(point.get('releaseTime'))
+        if published.date() < end or published > cube_release:
+            raise ValueError('Inconsistent StatCan release chronology')
+        observations[period] = (float(value), end, published)
+    period = max(observations)
+    level, end, published = observations[period]
+    if period != cube.get('cubeEndDate') or published != cube_release:
+        raise ValueError('StatCan vector lags latest cube publication')
+    ordered = sorted(observations)
+    serial = [int(p[:4]) * 4 + (int(p[5:7]) - 1) // 3 for p in ordered]
+    if any(b != a + 1 for a, b in zip(serial, serial[1:])) or serial[-1] - serial[0] != 4:
+        raise ValueError('Missing matching prior-year quarter or noncontiguous GDP series')
+    baseline = observations[ordered[0]][0]
+    value = 100 * (level / baseline - 1)
+    if not math.isfinite(value) or not -100 < value <= 200:
+        raise ValueError('Invalid StatCan GDP growth')
+    quarter = (int(period[5:7]) + 2) // 3
+    # Official 2026-2027 release calendar, verified 2026-09-08, pp.1-2:
+    # https://www150.statcan.gc.ca/n1/en/release-diffusion/2026-eng.pdf
+    # Date-only evidence: conservatively block at start of the Eastern day.
+    release_days = {'2026-04-01': '2026-11-30', '2026-07-01': '2027-03-01'}
+    next_day = release_days.get(period)
+    due = (datetime.strptime(next_day, '%Y-%m-%d').replace(tzinfo=ZoneInfo('America/Toronto'))
+           .astimezone(timezone.utc) if next_day else None)
+    if due is not None and checked >= due:
+        raise ValueError('Scheduled StatCan GDP release not confirmed')
+    return {'value': value, 'date': end.isoformat(), 'reference_period': f'{period[:4]}-Q{quarter}',
+            'source': 'Statistics Canada', 'source_title': 'Gross domestic product, expenditure-based, Canada, quarterly',
+            'source_url': 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3610010401',
+            'series_id': 'v62305752', 'frequency': 'quarterly', 'unit': 'percent YoY',
+            'seasonal_adjustment': 'SA', 'geography': 'Canada',
+            'published_at': published.isoformat(), 'publication_basis': 'current WDS publication/revision time',
+            'release_date_known': published.astimezone(ZoneInfo('America/Toronto')).date().isoformat(),
+            'checked_at': checked.isoformat(), 'next_due_at': due.isoformat() if due else None,
+            'next_due_precision': 'date_only_start_of_CA_Eastern_day' if due else None,
+            'needs_hourly_check': True,
+            'transformation': '100 * (current / matching prior-year quarter - 1); same-vintage real SAAR levels',
+            'reuse_terms': 'https://www.statcan.gc.ca/en/terms-conditions/open-licence'}
+
+
+def fetch_statcan_gdp(*, now=None, session=None):
+    """Three keyless requests: exact series, latest values, latest cube metadata.
+
+    No cache/retry. HTTP errors (including locked-for-update 409) propagate and
+    never refresh previous observations. WDS read requests use POST JSON bodies.
+    """
+    checked, client = _utc_now(now), session or requests
+    identity = {'productId': 36100104, 'coordinate': STATCAN_GDP_COORD}
+    payloads = []
+    for method, body in [('getSeriesInfoFromCubePidCoord', [identity]),
+                         ('getDataFromCubePidCoordAndLatestNPeriods', [dict(identity, latestN=5)]),
+                         ('getCubeMetadata', [{'productId': 36100104}])]:
+        response = client.post(STATCAN_BASE + method, json=body, timeout=20)
+        response.raise_for_status()
+        try:
+            payloads.append(response.json())
+        except ValueError as exc:
+            raise ValueError('STATCAN_GDP_JSON_INVALID') from exc
+    return parse_statcan_gdp(*payloads, now=checked)
+
+
+"""Proposal for official_macro.py: BEA real GDP YoY with release-vintage checks."""
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+from io import BytesIO
+from urllib.parse import urljoin, urlparse
+from zoneinfo import ZoneInfo
+import calendar
+import math
+import re
+import openpyxl
+import requests
+
+BEA_GDP_PAGE = 'https://www.bea.gov/data/gdp/gross-domestic-product'
+BEA_GDP_WORKBOOK = 'https://apps.bea.gov/national/Release/XLS/Survey/Section1All_xls.xlsx'
+
+
+class _BeaHTML(HTMLParser):
+    def __init__(self, html):
+        super().__init__()
+        self.parts, self.links, self.active = [], [], None
+        self.feed(html)
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            self.active = [dict(attrs).get('href', ''), []]
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.active is not None:
+            self.links.append((self.active[0], ' '.join(self.active[1]).strip()))
+            self.active = None
+    def handle_data(self, data):
+        self.parts.append(data)
+        if self.active is not None:
+            self.active[1].append(data.strip())
+    @property
+    def text(self):
+        return re.sub(r'\s+', ' ', ' '.join(self.parts)).strip()
+
+
+def discover_bea_gdp_release(html):
+    candidates = {urljoin(BEA_GDP_PAGE, href) for href, text in _BeaHTML(html).links
+                  if text == 'Current Release' and not href.startswith('#')}
+    if len(candidates) != 1:
+        raise ValueError('BEA_RELEASE_DISCOVERY_INVALID')
+    url = candidates.pop()
+    parsed = urlparse(url)
+    if parsed.scheme != 'https' or parsed.netloc != 'www.bea.gov' or not re.fullmatch(r'/news/\d{4}/[a-z0-9-]*gdp[a-z0-9-]*', parsed.path) or parsed.query or parsed.fragment:
+        raise ValueError('BEA_RELEASE_URL_INVALID')
+    return url
+
+
+def _bea_now(now):
+    if isinstance(now, str):
+        now = datetime.fromisoformat(now.replace('Z', '+00:00'))
+    now = now or datetime.now(timezone.utc)
+    return now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+
+
+def _bea_release_time(date_text, clock, meridiem, abbreviation):
+    parsed = datetime.strptime(date_text + ' ' + clock + ' ' + meridiem.replace('.', '').upper(), '%B %d, %Y %I:%M %p')
+    local = parsed.replace(tzinfo=ZoneInfo('America/New_York'))
+    if local.tzname() != abbreviation:
+        raise ValueError('BEA_RELEASE_TIMEZONE_CONFLICT')
+    return local.astimezone(timezone.utc)
+
+
+def parse_bea_gdp_release(html, *, now=None):
+    checked = _bea_now(now)
+    text = _BeaHTML(html).text
+    pub = re.findall(r'EMBARGOED UNTIL RELEASE AT (\d{1,2}:\d{2}) (a\.m\.|p\.m\.) (EDT|EST), [A-Za-z]+, ([A-Za-z]+ \d{1,2}, \d{4})', text)
+    due = re.findall(r'Next release: ([A-Za-z]+ \d{1,2}, \d{4}), at (\d{1,2}:\d{2}) (a\.m\.|p\.m\.) (EDT|EST)', text)
+    headline = re.findall(r'Real gross domestic product \(GDP\) (increased|decreased) at an annual rate of ([0-9]+(?:\.[0-9]+)?) percent in the (first|second|third|fourth) quarter of (\d{4})', text)
+    if len(pub) != 1 or len(due) != 1 or len(headline) != 1:
+        raise ValueError('BEA_RELEASE_SCHEMA_INVALID')
+    clock, meridiem, abbreviation, day = pub[0]
+    published = _bea_release_time(day, clock, meridiem, abbreviation)
+    day, clock, meridiem, abbreviation = due[0]
+    next_due = _bea_release_time(day, clock, meridiem, abbreviation)
+    if published > checked or not published < next_due or checked >= next_due:
+        raise ValueError('BEA_RELEASE_NOT_CURRENT')
+    direction, rate, ordinal, year = headline[0]
+    quarter = ['first', 'second', 'third', 'fourth'].index(ordinal) + 1
+    if datetime(int(year), quarter * 3, calendar.monthrange(int(year), quarter * 3)[1], tzinfo=timezone.utc) > published:
+        raise ValueError('BEA_RELEASE_FUTURE_QUARTER')
+    stages = set(re.findall(r'according to the (advance|second|third) estimate', text, re.IGNORECASE))
+    if len(stages) > 1:
+        raise ValueError('BEA_RELEASE_STAGE_CONFLICT')
+    stage = next(iter(stages)).lower() if stages else None
+    return {'release_stage': stage, 'period': f'{year}Q{quarter}', 'published_at': published.isoformat(),
+            'next_due_at': next_due.isoformat(), 'annualized_qoq': float(rate) * (-1 if direction == 'decreased' else 1)}
+
+
+def parse_bea_gdp(content, release, *, now=None):
+    checked = _bea_now(now)
+    try:
+        book = openpyxl.load_workbook(BytesIO(content), read_only=True, data_only=True)
+        try:
+            sheet = book['T10106-Q']
+            rows = list(sheet.iter_rows(values_only=True))
+        finally:
+            book.close()
+        if (rows[0][0] != 'Table 1.1.6. Real Gross Domestic Product, Chained Dollars'
+                or rows[1][0] != '[Millions of chained (2017) dollars] Seasonally adjusted at annual rates'
+                or rows[3][0] != 'Bureau of Economic Analysis'):
+            raise ValueError('BEA_GDP_UNIT_OR_TABLE_INVALID')
+        pubdate = datetime.strptime(rows[4][0], 'Data published %B %d, %Y').date()
+        published = datetime.fromisoformat(release['published_at'])
+        due = datetime.fromisoformat(release['next_due_at'])
+        if pubdate != published.astimezone(ZoneInfo('America/New_York')).date():
+            raise ValueError('BEA_GDP_VINTAGE_CONFLICT')
+        if published > checked or checked >= due:
+            raise ValueError('BEA_RELEASE_NOT_CURRENT')
+        headers = list(rows[7][3:])
+        while headers and headers[-1] is None:
+            headers.pop()
+        if not headers or any(not isinstance(x, str) or not re.fullmatch(r'\d{4}Q[1-4]', x) for x in headers):
+            raise ValueError('BEA_GDP_QUARTERS_INVALID')
+        serial = [int(x[:4]) * 4 + int(x[-1]) for x in headers]
+        if any(b != a + 1 for a, b in zip(serial, serial[1:])) or headers[-1] != release['period']:
+            raise ValueError('BEA_GDP_QUARTERS_INVALID')
+        matches = [row for row in rows[8:] if len(row) > 2 and row[2] == 'A191RX']
+        if len(matches) != 1 or str(matches[0][1]).strip() != 'Gross domestic product':
+            raise ValueError('BEA_GDP_SERIES_INVALID')
+        row = matches[0]
+        values = dict(zip(headers, row[3:3 + len(headers)]))
+        current = headers[-1]
+        year, q = int(current[:4]), int(current[-1])
+        required = [current, f'{year - 1}Q{q}', f'{year}Q{q-1}' if q > 1 else f'{year-1}Q4']
+        nums = [values.get(period) for period in required]
+        if any(type(x) not in (int, float) or not math.isfinite(x) or x <= 0 for x in nums):
+            raise ValueError('BEA_GDP_LEVEL_INVALID')
+        value = (nums[0] / nums[1] - 1) * 100
+        headline = ((nums[0] / nums[2]) ** 4 - 1) * 100
+        if abs(headline - release['annualized_qoq']) > 0.05001:
+            raise ValueError('BEA_GDP_HEADLINE_CONFLICT')
+        if not -25 <= value <= 25:
+            raise ValueError('BEA_GDP_YOY_INVALID')
+        date = f'{year}-{q*3:02d}-{calendar.monthrange(year, q*3)[1]}'
+        return {'value': value, 'date': date, 'reference_period': f'{year}-Q{q}',
+                'source': 'BEA', 'source_url': BEA_GDP_WORKBOOK, 'series_id': 'BEA:T10106-Q:A191RX:YoY',
+                'frequency': 'quarterly', 'unit': 'percent YoY', 'seasonal_adjustment': 'SAAR',
+                'published_at': release['published_at'], 'checked_at': checked.isoformat(),
+                'next_due_at': release['next_due_at'], 'needs_hourly_check': True,
+                'transformation': 'Same-vintage real SAAR level / same quarter previous year - 1',
+                'release_stage': release.get('release_stage'),
+                'is_estimate': True,
+                'license': 'Public domain; source attribution requested'}
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise ValueError('BEA_GDP_SCHEMA_INVALID') from exc
+
+
+def fetch_bea_gdp(*, now=None, session=None):
+    client = session or requests
+    checked = _bea_now(now)
+    def get(url):
+        response = client.get(url, timeout=30)
+        response.raise_for_status()
+        return response
+    release_url = discover_bea_gdp_release(get(BEA_GDP_PAGE).text)
+    release = parse_bea_gdp_release(get(release_url).text, now=checked)
+    result = parse_bea_gdp(get(BEA_GDP_WORKBOOK).content, release, now=checked)
+    result['publication_basis'] = release_url
+    return result

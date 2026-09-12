@@ -274,3 +274,217 @@ class StatcanLabourTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+from official_macro import parse_statcan_gdp, fetch_statcan_gdp
+
+
+def statcan_gdp_fixture():
+    # Captured official contract and five observations, 2026-09-08.
+    return [[{'object': {'SeriesTitleEn': 'Canada;Chained (2017) dollars;Seasonally adjusted at annual rates;Gross '
+                                   'domestic product at market prices',
+                  'SeriesTitleFr': 'Canada;Dollars enchaînés (2017);Désaisonnalisées au taux annuel;Produit '
+                                   'intérieur brut aux prix du marché',
+                  'coordinate': '1.1.1.30.0.0.0.0.0.0',
+                  'decimals': 0,
+                  'frequencyCode': 9,
+                  'memberUomCode': 81,
+                  'productId': 36100104,
+                  'responseStatusCode': 0,
+                  'scalarFactorCode': 6,
+                  'terminated': 0,
+                  'vectorId': 62305752},
+       'status': 'SUCCESS'}],
+     [{'object': {'coordinate': '1.1.1.30.0.0.0.0.0.0',
+                  'productId': 36100104,
+                  'responseStatusCode': 0,
+                  'vectorDataPoint': [{'decimals': 0,
+                                       'frequencyCode': 9,
+                                       'refPer': '2025-04-01',
+                                       'refPer2': '',
+                                       'refPerRaw': '2025-06-01',
+                                       'refPerRaw2': '',
+                                       'releaseTime': '2026-05-29T08:30',
+                                       'scalarFactorCode': 6,
+                                       'securityLevelCode': 0,
+                                       'statusCode': 0,
+                                       'symbolCode': 0,
+                                       'value': 2495975.0},
+                                      {'decimals': 0,
+                                       'frequencyCode': 9,
+                                       'refPer': '2025-07-01',
+                                       'refPer2': '',
+                                       'refPerRaw': '2025-09-01',
+                                       'refPerRaw2': '',
+                                       'releaseTime': '2026-05-29T08:30',
+                                       'scalarFactorCode': 6,
+                                       'securityLevelCode': 0,
+                                       'statusCode': 0,
+                                       'symbolCode': 0,
+                                       'value': 2507754.0},
+                                      {'decimals': 0,
+                                       'frequencyCode': 9,
+                                       'refPer': '2025-10-01',
+                                       'refPer2': '',
+                                       'refPerRaw': '2025-12-01',
+                                       'refPerRaw2': '',
+                                       'releaseTime': '2026-05-29T08:30',
+                                       'scalarFactorCode': 6,
+                                       'securityLevelCode': 0,
+                                       'statusCode': 0,
+                                       'symbolCode': 0,
+                                       'value': 2501573.0},
+                                      {'decimals': 0,
+                                       'frequencyCode': 9,
+                                       'refPer': '2026-01-01',
+                                       'refPer2': '',
+                                       'refPerRaw': '2026-03-01',
+                                       'refPerRaw2': '',
+                                       'releaseTime': '2026-08-28T08:30',
+                                       'scalarFactorCode': 6,
+                                       'securityLevelCode': 0,
+                                       'statusCode': 0,
+                                       'symbolCode': 0,
+                                       'value': 2503604.0},
+                                      {'decimals': 0,
+                                       'frequencyCode': 9,
+                                       'refPer': '2026-04-01',
+                                       'refPer2': '',
+                                       'refPerRaw': '2026-06-01',
+                                       'refPerRaw2': '',
+                                       'releaseTime': '2026-08-28T08:30',
+                                       'scalarFactorCode': 6,
+                                       'securityLevelCode': 0,
+                                       'statusCode': 0,
+                                       'symbolCode': 0,
+                                       'value': 2524127.0}],
+                  'vectorId': 62305752},
+       'status': 'SUCCESS'}],
+     [{'object': {'archiveStatusCode': '2',
+                  'cubeEndDate': '2026-04-01',
+                  'cubeTitleEn': 'Gross domestic product, expenditure-based, Canada, quarterly',
+                  'dimension': [{'dimensionNameEn': 'Geography',
+                                 'dimensionPositionId': 1,
+                                 'hasUom': False,
+                                 'member': [{'classificationCode': '11124',
+                                             'classificationTypeCode': '1',
+                                             'geoLevel': 0,
+                                             'memberId': 1,
+                                             'memberNameEn': 'Canada',
+                                             'memberNameFr': 'Canada',
+                                             'memberUomCode': None,
+                                             'parentMemberId': None,
+                                             'terminated': 0,
+                                             'vintage': 2016}]},
+                                {'dimensionNameEn': 'Prices',
+                                 'dimensionPositionId': 2,
+                                 'hasUom': True,
+                                 'member': [{'classificationCode': None,
+                                             'classificationTypeCode': None,
+                                             'geoLevel': None,
+                                             'memberId': 1,
+                                             'memberNameEn': 'Chained (2017) dollars',
+                                             'memberNameFr': 'Dollars enchaînés (2017)',
+                                             'memberUomCode': 81,
+                                             'parentMemberId': None,
+                                             'terminated': 0,
+                                             'vintage': None}]},
+                                {'dimensionNameEn': 'Seasonal adjustment',
+                                 'dimensionPositionId': 3,
+                                 'hasUom': False,
+                                 'member': [{'classificationCode': None,
+                                             'classificationTypeCode': None,
+                                             'geoLevel': None,
+                                             'memberId': 1,
+                                             'memberNameEn': 'Seasonally adjusted at annual rates',
+                                             'memberNameFr': 'Désaisonnalisées au taux annuel',
+                                             'memberUomCode': None,
+                                             'parentMemberId': None,
+                                             'terminated': 0,
+                                             'vintage': None}]},
+                                {'dimensionNameEn': 'Estimates',
+                                 'dimensionPositionId': 4,
+                                 'hasUom': False,
+                                 'member': [{'classificationCode': None,
+                                             'classificationTypeCode': None,
+                                             'geoLevel': None,
+                                             'memberId': 30,
+                                             'memberNameEn': 'Gross domestic product at market prices',
+                                             'memberNameFr': 'Produit intérieur brut aux prix du marché',
+                                             'memberUomCode': None,
+                                             'parentMemberId': None,
+                                             'terminated': 0,
+                                             'vintage': None}]}],
+                  'frequencyCode': 9,
+                  'productId': '36100104',
+                  'releaseTime': '2026-08-28T08:30',
+                  'responseStatusCode': 0},
+       'status': 'SUCCESS'}]]
+
+class StatCanGDPTests(unittest.TestCase):
+    def test_current_same_vintage_four_quarter_yoy(self):
+        result = parse_statcan_gdp(*statcan_gdp_fixture(), now=NOW)
+        self.assertAlmostEqual(result['value'], 1.127895912418997)
+        self.assertNotAlmostEqual(result['value'], 100 * ((2524127 / 2503604) ** 4 - 1))
+        self.assertEqual(result['reference_period'], '2026-Q2')
+        self.assertEqual(result['date'], '2026-06-30')
+        self.assertEqual(result['published_at'], '2026-08-28T12:30:00+00:00')
+        self.assertTrue(result['needs_hourly_check'])
+
+    def test_wrong_series_units_and_adjustment_rejected(self):
+        for key, value in [('vectorId',1), ('frequencyCode',6), ('scalarFactorCode',0),
+                           ('memberUomCode',239), ('SeriesTitleEn','Monthly GDP by industry')]:
+            payloads=statcan_gdp_fixture(); payloads[0][0]['object'][key]=value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                parse_statcan_gdp(*payloads, now=NOW)
+        payloads=statcan_gdp_fixture()
+        payloads[2][0]['object']['dimension'][2]['member'][0]['memberNameEn']='Unadjusted'
+        with self.assertRaises(ValueError): parse_statcan_gdp(*payloads,now=NOW)
+
+    def test_bad_latest_or_baseline_never_falls_back(self):
+        for position in (0,4):
+            for value in (None, True, '100', float('nan'), float('inf'), 0, -1):
+                payloads=statcan_gdp_fixture(); payloads[1][0]['object']['vectorDataPoint'][position]['value']=value
+                with self.subTest(position=position,value=value), self.assertRaises(ValueError):
+                    parse_statcan_gdp(*payloads,now=NOW)
+
+    def test_missing_duplicate_and_wrong_raw_quarter_rejected(self):
+        for mutation in ('missing','duplicate','raw','gap','monthly'):
+            payloads=statcan_gdp_fixture(); points=payloads[1][0]['object']['vectorDataPoint']
+            if mutation=='missing': points.pop(2)
+            elif mutation=='duplicate': points[1]=dict(points[0])
+            elif mutation=='raw': points[-1]['refPerRaw']='2026-04-01'
+            elif mutation=='monthly': points[-1]['refPer']='2026-05-01'
+            else: points[1].update(refPer='2024-07-01', refPerRaw='2024-09-01')
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                parse_statcan_gdp(*payloads,now=NOW)
+
+    def test_future_or_unavailable_and_cube_lag_rejected(self):
+        for field,value in [('releaseTime','2026-09-10T08:30'),('symbolCode',1),('statusCode',1),('securityLevelCode',1)]:
+            payloads=statcan_gdp_fixture();payloads[1][0]['object']['vectorDataPoint'][-1][field]=value
+            with self.subTest(field=field), self.assertRaises(ValueError):parse_statcan_gdp(*payloads,now=NOW)
+        for field,value in [('cubeEndDate','2026-07-01'),('releaseTime','2026-09-01T08:30')]:
+            payloads=statcan_gdp_fixture();payloads[2][0]['object'][field]=value
+            with self.assertRaisesRegex(ValueError,'lags latest'):parse_statcan_gdp(*payloads,now=NOW)
+
+    def test_keyless_fetch_and_json_contract_failure(self):
+        import requests
+        session=Mock();session.post.side_effect=[Mock(json=Mock(return_value=p)) for p in statcan_gdp_fixture()]
+        self.assertAlmostEqual(fetch_statcan_gdp(now=NOW,session=session)['value'],1.127895912418997)
+        self.assertEqual(session.post.call_count,3)
+        self.assertEqual(session.post.call_args_list[1].kwargs['json'][0]['latestN'],5)
+        self.assertTrue(all(c.kwargs['timeout']==20 for c in session.post.call_args_list))
+        session=Mock();session.post.return_value.json.side_effect=requests.exceptions.JSONDecodeError('bad','x',0)
+        with self.assertRaisesRegex(ValueError,'STATCAN_GDP_JSON_INVALID') as caught:fetch_statcan_gdp(now=NOW,session=session)
+        self.assertNotIsInstance(caught.exception,requests.RequestException)
+        session=Mock();session.post.side_effect=requests.Timeout('offline')
+        with self.assertRaises(requests.Timeout):fetch_statcan_gdp(now=NOW,session=session)
+
+    def test_confirmed_next_release_blocks_at_eastern_day_boundary(self):
+        before = datetime(2026, 11, 30, 4, 59, tzinfo=timezone.utc)
+        result = parse_statcan_gdp(*statcan_gdp_fixture(), now=before)
+        self.assertEqual(result['next_due_at'], '2026-11-30T05:00:00+00:00')
+        self.assertEqual(result['next_due_precision'], 'date_only_start_of_CA_Eastern_day')
+        self.assertTrue(result['needs_hourly_check'])
+        with self.assertRaisesRegex(ValueError, 'Scheduled StatCan GDP'):
+            parse_statcan_gdp(*statcan_gdp_fixture(), now=datetime(2026,11,30,5,tzinfo=timezone.utc))

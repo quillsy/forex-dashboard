@@ -189,7 +189,7 @@ class CoreRegressionTests(unittest.TestCase):
         loader = self.actual_macro_loader()
         self.core['get_worldbank_data_historical'] = fail
         for factor in ('Arbeitsmarkt', 'GDP'):
-            result = loader('USD', factor)
+            result = loader('NZD' if factor == 'GDP' else 'USD', factor)
             self.assertIsNone(result['value'])
             self.assertEqual(result['source'], 'UNAVAILABLE')
             self.assertEqual(result['freshness'], 'UNAVAILABLE')

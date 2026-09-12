@@ -4695,13 +4695,14 @@ def get_macro_observation_details(curr, category, target_date=None):
         observation.setdefault("source", "UNAVAILABLE")
         return observation
     target_dt = pd.to_datetime(target_date) if target_date is not None else pd.Timestamp(datetime.now().date())
-    if (curr in ("AUD", "JPY") or (curr == "CAD" and category == "Arbeitsmarkt")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
-        from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_japan_gdp
+    if (curr in ("AUD", "JPY", "CAD") or (curr == "USD" and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
+        from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_statcan_gdp, fetch_japan_gdp, fetch_bea_gdp
         from official_quarterly_labour import fetch_japan_labour
         validation = "SOURCE_UNAVAILABLE"
         try:
             result = (fetch_abs_observation(category, session=requests) if curr == "AUD"
-                      else fetch_statcan_labour(session=requests) if curr == "CAD"
+                      else (fetch_statcan_labour if category == "Arbeitsmarkt" else fetch_statcan_gdp)(session=requests) if curr == "CAD"
+                      else fetch_bea_gdp(session=requests) if curr == "USD"
                       else fetch_japan_gdp(session=requests) if category == "GDP"
                       else fetch_japan_labour(session=requests))
             if result:
@@ -4717,7 +4718,7 @@ def get_macro_observation_details(curr, category, target_date=None):
             pass
         except Exception:
             validation = "UNVERIFIED"
-        return {"value": None, "date": None, "source": {"AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
+        return {"value": None, "date": None, "source": {"USD": "BEA", "AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
                 "series_id": None, "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly",
                 "freshness": "UNAVAILABLE", "_validation": validation,
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
@@ -5162,8 +5163,9 @@ def use_live_core_cache(target_date=None):
     return live_date and (os.environ.get("FX_COLLECTOR") != "1" or os.environ.get("FX_READ_CORE_CACHE") == "1")
 
 
-def compute_currency_details(curr: str, target_date=None, include_context=True) -> dict:
-    """Evaluate each CORE factor independently and fail closed on its errors."""
+def compute_currency_details(curr: str, target_date=None, include_context=True, factors_to_refresh=None) -> dict:
+    """Evaluate requested factors; default callers retain all CORE calculations."""
+    requested_factors = set(CORE_FACTOR_WEIGHTS if factors_to_refresh is None else factors_to_refresh)
     if use_live_core_cache(target_date):
         return live_data.details(curr)
     dt_str = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else datetime.now().strftime("%Y-%m-%d")
@@ -5171,94 +5173,99 @@ def compute_currency_details(curr: str, target_date=None, include_context=True) 
     freshness = {factor: "UNAVAILABLE" for factor in CORE_FACTOR_WEIGHTS}
     observations = {}
 
-    try:
-        policy = get_verified_policy_rate(curr)
-        policy_rate = finite_number(policy.get("rate")) if policy_rate_is_usable(policy) else None
-        yield_2y, observed, source = get_genuine_2y_yield_historical(curr, dt_str, FRED_KEY, EODHD_KEY)
-        yield_2y = finite_number(yield_2y)
-        freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
-        observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
-        if source == "US Treasury nominal 2Y constant maturity":
-            observations["Geldpolitik"].update(series_id="BC_2YEAR (FRED equivalent DGS2)",
-                source_url="https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve")
-        if freshness["Geldpolitik"] in ("FRESH", "AGING"):
-            gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
-            gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
-            scores["Geldpolitik"] = float(np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0))
-    except Exception:
-        freshness["Geldpolitik"] = "UNAVAILABLE"
+    if 'Geldpolitik' in requested_factors:
+        try:
+            policy = get_verified_policy_rate(curr)
+            policy_rate = finite_number(policy.get("rate")) if policy_rate_is_usable(policy) else None
+            yield_2y, observed, source = get_genuine_2y_yield_historical(curr, dt_str, FRED_KEY, EODHD_KEY)
+            yield_2y = finite_number(yield_2y)
+            freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
+            observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
+            if source == "US Treasury nominal 2Y constant maturity":
+                observations["Geldpolitik"].update(series_id="BC_2YEAR (FRED equivalent DGS2)",
+                    source_url="https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve")
+            if freshness["Geldpolitik"] in ("FRESH", "AGING"):
+                gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
+                gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
+                scores["Geldpolitik"] = float(np.clip(0.50 * gp_nominal_score + 0.50 * gp_market_score, -100.0, 100.0))
+        except Exception:
+            freshness["Geldpolitik"] = "UNAVAILABLE"
 
-    try:
-        cpi, observed, metric_type, source, series_id, status = get_cpi_yoy_details(curr, dt_str)
-        cpi = finite_number(cpi)
-        freshness["Inflation"] = status
-        observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
-        if pd.Timestamp(dt_str).date() == datetime.now().date():
-            observations["Inflation"].update({"frequency": "quarterly" if curr == "NZD" else "monthly",
-                "unit": "annual percent change", "seasonal_adjustment": "NSA"})
-            if observed is not None:
-                period = pd.Timestamp(observed)
-                observations["Inflation"]["reference_period"] = f"{period.year}-Q{(period.month - 1) // 3 + 1}" if curr == "NZD" else period.strftime("%Y-%m")
-        if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
-            official = get_current_official_cpi(curr)
-            if official:
-                observations["Inflation"].update(official)
-        if curr in ("NZD", "GBP", "CAD") and observed is not None:
-            loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
-            release_frame, _, _ = loader()
-            if release_frame is not None:
-                matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
-                if not matching.empty:
-                    release = matching.iloc[-1]
-                    if not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
-                        published = pd.Timestamp(release["release_date"])
-                        published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")
-                        observations["Inflation"]["published_at"] = published.isoformat()
-        if cpi is not None and normalized_freshness(status) in ("FRESH", "AGING"):
-            scores["Inflation"] = float(np.clip((cpi - 2.0) * 50.0, -100.0, 100.0))
-    except Exception:
-        freshness["Inflation"] = "UNAVAILABLE"
+    if 'Inflation' in requested_factors:
+        try:
+            cpi, observed, metric_type, source, series_id, status = get_cpi_yoy_details(curr, dt_str)
+            cpi = finite_number(cpi)
+            freshness["Inflation"] = status
+            observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+            if pd.Timestamp(dt_str).date() == datetime.now().date():
+                observations["Inflation"].update({"frequency": "quarterly" if curr == "NZD" else "monthly",
+                    "unit": "annual percent change", "seasonal_adjustment": "NSA"})
+                if observed is not None:
+                    period = pd.Timestamp(observed)
+                    observations["Inflation"]["reference_period"] = f"{period.year}-Q{(period.month - 1) // 3 + 1}" if curr == "NZD" else period.strftime("%Y-%m")
+            if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
+                official = get_current_official_cpi(curr)
+                if official:
+                    observations["Inflation"].update(official)
+            if curr in ("NZD", "GBP", "CAD") and observed is not None:
+                loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
+                release_frame, _, _ = loader()
+                if release_frame is not None:
+                    matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
+                    if not matching.empty:
+                        release = matching.iloc[-1]
+                        if not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
+                            published = pd.Timestamp(release["release_date"])
+                            published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")
+                            observations["Inflation"]["published_at"] = published.isoformat()
+            if cpi is not None and normalized_freshness(status) in ("FRESH", "AGING"):
+                scores["Inflation"] = float(np.clip((cpi - 2.0) * 50.0, -100.0, 100.0))
+        except Exception:
+            freshness["Inflation"] = "UNAVAILABLE"
 
-    try:
-        labour = get_macro_observation_details(curr, "Arbeitsmarkt", dt_str)
-        observations["Arbeitsmarkt"] = labour
-        freshness["Arbeitsmarkt"] = labour["freshness"]
-        value = finite_number(labour.get("value"))
-        if value is not None and normalized_freshness(labour["freshness"]) in ("FRESH", "AGING") and labour.get("frequency") != "annual":
-            scores["Arbeitsmarkt"] = float(np.clip((5.0 - value) / 3.0 * 100.0, -100.0, 100.0))
-    except Exception:
-        freshness["Arbeitsmarkt"] = "UNAVAILABLE"
+    if 'Arbeitsmarkt' in requested_factors:
+        try:
+            labour = get_macro_observation_details(curr, "Arbeitsmarkt", dt_str)
+            observations["Arbeitsmarkt"] = labour
+            freshness["Arbeitsmarkt"] = labour["freshness"]
+            value = finite_number(labour.get("value"))
+            if value is not None and normalized_freshness(labour["freshness"]) in ("FRESH", "AGING") and labour.get("frequency") != "annual":
+                scores["Arbeitsmarkt"] = float(np.clip((5.0 - value) / 3.0 * 100.0, -100.0, 100.0))
+        except Exception:
+            freshness["Arbeitsmarkt"] = "UNAVAILABLE"
 
-    try:
-        pmi = (get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=dt_str) or {}).get(curr, {})
-        eligible = []
-        component_status = []
-        observations["PMI"] = dict(pmi)
-        for component in ("m", "s"):
-            value = finite_number(pmi.get(f"{component}_last"))
-            status = observation_freshness(pmi.get(f"{component}_ref"), dt_str, 45, 90, monthly=True)
-            observations["PMI"][f"{component}_freshness"] = status
-            if value is not None and 0 < value <= 100 and status in ("FRESH", "AGING"):
-                eligible.append(value)
-                component_status.append(status)
-        observations["PMI"]["value"] = float(np.mean(eligible)) if eligible else None
-        if eligible:
-            freshness["PMI"] = "AGING" if "AGING" in component_status else "FRESH"
-            scores["PMI"] = float(np.clip((observations["PMI"]["value"] - 50.0) / 10.0 * 100.0, -100.0, 100.0))
-        else:
-            freshness["PMI"] = "STALE" if any(observations["PMI"].get(f"{c}_freshness") == "STALE" for c in ("m", "s")) else "UNAVAILABLE"
-    except Exception:
-        freshness["PMI"] = "UNAVAILABLE"
+    if 'PMI' in requested_factors:
+        try:
+            pmi = (get_all_pmi_data(FRED_KEY, EODHD_KEY, target_date=dt_str) or {}).get(curr, {})
+            eligible = []
+            component_status = []
+            observations["PMI"] = dict(pmi)
+            for component in ("m", "s"):
+                value = finite_number(pmi.get(f"{component}_last"))
+                status = observation_freshness(pmi.get(f"{component}_ref"), dt_str, 45, 90, monthly=True)
+                observations["PMI"][f"{component}_freshness"] = status
+                if value is not None and 0 < value <= 100 and status in ("FRESH", "AGING"):
+                    eligible.append(value)
+                    component_status.append(status)
+            observations["PMI"]["value"] = float(np.mean(eligible)) if eligible else None
+            if eligible:
+                freshness["PMI"] = "AGING" if "AGING" in component_status else "FRESH"
+                scores["PMI"] = float(np.clip((observations["PMI"]["value"] - 50.0) / 10.0 * 100.0, -100.0, 100.0))
+            else:
+                freshness["PMI"] = "STALE" if any(observations["PMI"].get(f"{c}_freshness") == "STALE" for c in ("m", "s")) else "UNAVAILABLE"
+        except Exception:
+            freshness["PMI"] = "UNAVAILABLE"
 
-    try:
-        gdp = get_macro_observation_details(curr, "GDP", dt_str)
-        observations["GDP"] = gdp
-        freshness["GDP"] = gdp["freshness"]
-        value = finite_number(gdp.get("value"))
-        if value is not None and normalized_freshness(gdp["freshness"]) in ("FRESH", "AGING") and gdp.get("frequency") != "annual":
-            scores["GDP"] = float(np.clip((value - 1.5) / 1.5 * 100.0, -100.0, 100.0))
-    except Exception:
-        freshness["GDP"] = "UNAVAILABLE"
+    if 'GDP' in requested_factors:
+        try:
+            gdp = get_macro_observation_details(curr, "GDP", dt_str)
+            observations["GDP"] = gdp
+            freshness["GDP"] = gdp["freshness"]
+            value = finite_number(gdp.get("value"))
+            if value is not None and normalized_freshness(gdp["freshness"]) in ("FRESH", "AGING") and gdp.get("frequency") != "annual":
+                scores["GDP"] = float(np.clip((value - 1.5) / 1.5 * 100.0, -100.0, 100.0))
+        except Exception:
+            freshness["GDP"] = "UNAVAILABLE"
 
     try:
         bci = get_bci_value(curr, dt_str) if include_context else None

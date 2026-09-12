@@ -239,6 +239,7 @@ class LiveDataTests(unittest.TestCase):
     def test_collector_metadata_outage_retains_but_conflict_invalidates(self):
         previous = self.record()
         previous['observation']['series_id'] = 'TEST_GDP'
+        previous['observation']['needs_hourly_check'] = True
         previous['next_due_at'] = (NOW + timedelta(days=1)).isoformat()
         app = Mock()
         app.FRED_KEY = 'test-only'
@@ -246,20 +247,23 @@ class LiveDataTests(unittest.TestCase):
             'GDP': 99, '_observations': {'GDP': dict(previous['observation'])},
             '_freshness': {'GDP': 'FRESH'}}
         app.get_verified_policy_rate.return_value = {'verification_timestamp': NOW.isoformat()}
-        for outage in (True, False):
+        for outage in (True, False, "invalid_json"):
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / 'live.json'
-                live.save({'model_version': live.MODEL, 'currencies': {'USD': {'GDP': previous}}}, path)
-                app.requests.get.side_effect = requests.RequestException('unavailable') if outage else None
+                live.save({'model_version': live.MODEL, 'currencies': {'NZD': {'GDP': previous}}}, path)
+                app.requests.get.side_effect = requests.RequestException('unavailable') if outage is True else None
                 app.requests.get.return_value = Mock()
+                if outage == "invalid_json":
+                    app.requests.get.return_value.json.side_effect = requests.exceptions.JSONDecodeError("bad", "invalid", 0)
                 with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), patch('source_contracts.validate_fred_metadata', return_value=False):
                     live.collect(app, path)
-                result = live.load(path)['currencies']['USD']['GDP']
-                if outage:
+                result = live.load(path)['currencies']['NZD']['GDP']
+                if outage is True:
                     self.assertEqual(result['checked_at'], previous['checked_at'])
                     self.assertEqual(result['score'], previous['score'])
                     self.assertEqual(result['last_error'], 'SOURCE_UNAVAILABLE')
-                    self.assertTrue(live.eligible(result, NOW + timedelta(hours=2))[0])
+                    self.assertTrue(live.eligible(result, NOW + timedelta(minutes=30))[0])
+                    self.assertFalse(live.eligible(result, NOW + timedelta(hours=1))[0])
                     self.assertFalse(live.eligible(result, NOW + timedelta(days=1))[0])
                 else:
                     self.assertEqual(result['validation'], 'UNVERIFIED')
@@ -340,6 +344,102 @@ class LiveDataTests(unittest.TestCase):
             self.assertFalse(live.eligible(row, NOW)[0])
 
 
+class ReleaseAwareCollectionTests(unittest.TestCase):
+    def setUp(self):
+        from test_core_regressions import load_core
+        from types import SimpleNamespace
+        self.now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        now = self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        self.core = load_core()
+        self.core['datetime'] = Clock
+        self.macro = Mock(return_value={'value': 3.0, 'date': '2026-06-30',
+            'source': 'Cabinet Office ESRI', 'frequency': 'quarterly', 'freshness': 'FRESH'})
+        self.core['get_macro_observation_details'] = self.macro
+        self.other = {}
+        for name in ('get_verified_policy_rate', 'get_genuine_2y_yield_historical',
+                     'get_cpi_yoy_details', 'get_all_pmi_data', 'get_bci_value'):
+            self.other[name] = Mock(side_effect=AssertionError('Unselected provider called: ' + name))
+            self.core[name] = self.other[name]
+        self.compute = Mock(wraps=self.core['compute_currency_details'])
+        self.app = SimpleNamespace(compute_currency_details=self.compute, FRED_KEY=None,
+                                   requests=Mock())
+
+    def record(self, factor='GDP'):
+        return live.build_record(factor, 20,
+            {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-07-31',
+             'source': 'Cabinet Office ESRI', 'frequency': 'quarterly' if factor == 'GDP' else 'monthly',
+             'next_due_at': (self.now + timedelta(days=1)).isoformat()}, 'FRESH',
+            (self.now - timedelta(minutes=30)).isoformat())
+
+    def collect_records(self, records, now=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL, 'currencies': {'JPY': records}}, path)
+            with patch.object(live, 'CURRENCIES', ('JPY',)), \
+                 patch.object(live, 'FACTORS', {factor: live.FACTORS[factor] for factor in records}), \
+                 patch.object(live, 'now_utc', return_value=now or self.now):
+                live.collect(self.app, path)
+            result = live.load(path)['currencies']['JPY']
+        self.app.requests.get.assert_not_called()
+        return result
+
+    def test_known_future_release_reuses_complete_record_without_calling_app(self):
+        previous = self.record()
+        previous['last_attempt_at'] = (self.now - timedelta(minutes=15)).isoformat()
+        previous['last_error'] = 'SOURCE_UNAVAILABLE'
+        result = self.collect_records({'GDP': previous})
+        self.assertEqual(result['GDP'], previous)
+        self.compute.assert_not_called()
+        self.macro.assert_not_called()
+
+    def test_mixed_plan_calls_only_due_factor_and_preserves_other_record(self):
+        gdp, labour = self.record(), self.record('Arbeitsmarkt')
+        labour['observation']['needs_hourly_check'] = True
+        result = self.collect_records({'GDP': gdp, 'Arbeitsmarkt': labour})
+        self.compute.assert_called_once_with('JPY', include_context=False, factors_to_refresh=('Arbeitsmarkt',))
+        self.macro.assert_called_once_with('JPY', 'Arbeitsmarkt', '2026-09-08')
+        self.assertEqual(result['GDP'], gdp)
+        for provider in self.other.values():
+            provider.assert_not_called()
+
+    def test_at_release_deadline_or_hourly_check_required_the_factor_is_requested(self):
+        for kind in ('due', 'hourly', 'unknown', 'expired'):
+            with self.subTest(kind=kind):
+                self.compute.reset_mock(); self.macro.reset_mock()
+                previous = self.record()
+                if kind == 'due': previous['next_due_at'] = self.now.isoformat()
+                elif kind == 'hourly': previous['observation']['needs_hourly_check'] = True
+                elif kind == 'unknown': previous['next_due_at'] = None
+                else: previous['expires_at'] = self.now.isoformat()
+                self.collect_records({'GDP': previous})
+                self.compute.assert_called_once_with('JPY', include_context=False, factors_to_refresh=('GDP',))
+                self.macro.assert_called_once_with('JPY', 'GDP', '2026-09-08')
+
+    def test_known_source_conflict_or_new_release_never_skips_refresh(self):
+        import source_contracts
+        previous = self.record()
+        conflict = {('JPY', 'GDP', '2026-06'): {'confirmed_at': self.now.isoformat(), 'reason': 'Conflicting official value'}}
+        with patch.dict(source_contracts.KNOWN_SOURCE_CONFLICTS, conflict):
+            row = self.collect_records({'GDP': previous})['GDP']
+            self.assertFalse(live.eligible(row, self.now, factor='GDP', currency='JPY')[0])
+        self.compute.assert_called_once()
+        self.compute.reset_mock(); self.macro.reset_mock()
+        release = {('JPY', 'GDP'): {'confirmed_at': self.now.isoformat(), 'period_start': '2026-07-01', 'label': '2026-Q3'}}
+        with patch.dict(source_contracts.KNOWN_RELEASES, release):
+            self.collect_records({'GDP': previous})
+        self.compute.assert_called_once()
+
+    def test_empty_selection_performs_no_core_or_context_provider_calls(self):
+        self.core['compute_currency_details']('JPY', include_context=False, factors_to_refresh=())
+        self.macro.assert_not_called()
+        for provider in self.other.values():
+            provider.assert_not_called()
+
+
 class DirectMacroCollectorIntegrationTests(unittest.TestCase):
     """Actual app routing/scoring -> collector -> persisted read, offline adapters."""
     def setUp(self):
@@ -377,9 +477,10 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
         previous_observation = {'value': 3.0, 'date': '2026-06-30' if factor == 'GDP' else '2026-08-31' if currency == 'CAD' else '2026-07-31',
             'frequency': 'quarterly' if factor == 'GDP' else 'monthly',
             'source': {'AUD': 'ABS', 'JPY': 'Cabinet Office ESRI' if factor == 'GDP' else 'Statistics Bureau of Japan',
-                       'CAD': 'Statistics Canada', 'CHF': 'Eurostat'}[currency],
+                       'CAD': 'Statistics Canada', 'CHF': 'Eurostat', 'USD': 'BEA'}[currency],
             'series_id': 'official-direct', 'next_due_at': (self.now + timedelta(days=1)).isoformat(),
-            'needs_hourly_check': currency == 'AUD' or (currency == 'JPY' and factor == 'GDP')}
+            # This test exercises an attempted refresh, independently of scheduling.
+            'needs_hourly_check': True}
         previous = live.build_record(factor, 10, previous_observation, 'FRESH',
                                      (self.now - timedelta(minutes=30)).isoformat())
         def response(*args, **kwargs):
@@ -395,6 +496,8 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                  patch('official_quarterly_labour.fetch_japan_labour', side_effect=response) as japan_labour, \
                  patch('official_macro.fetch_japan_gdp', side_effect=response) as japan_gdp, \
                  patch('official_macro.fetch_statcan_labour', side_effect=response) as statcan, \
+                 patch('official_macro.fetch_statcan_gdp', side_effect=response) as statcan_gdp, \
+                 patch('official_macro.fetch_bea_gdp', side_effect=response) as bea, \
                  patch('official_macro.fetch_eurostat_observation', side_effect=response) as eurostat, \
                  patch.object(live, 'now_utc', return_value=self.now), \
                  patch.object(live, 'CURRENCIES', (currency,)), \
@@ -408,7 +511,11 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                         japan_labour.assert_called_once_with(session=self.transport)
                         japan_gdp.assert_not_called()
                 elif currency == 'CAD':
-                    statcan.assert_called_once_with(session=self.transport)
+                    (statcan_gdp if factor == 'GDP' else statcan).assert_called_once_with(session=self.transport)
+                    (statcan if factor == 'GDP' else statcan_gdp).assert_not_called()
+                    eurostat.assert_not_called()
+                elif currency == 'USD':
+                    bea.assert_called_once_with(session=self.transport)
                     eurostat.assert_not_called()
                 elif currency == 'CHF':
                     eurostat.assert_called_once_with('GDP', geo='CH', session=self.transport)
@@ -420,7 +527,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
 
     def test_parser_conflict_revokes_previous_valid_direct_observation(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, ValueError('source contract conflict'))
                 self.assertEqual(row['validation'], 'UNVERIFIED')
@@ -431,19 +538,19 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
 
     def test_transport_outage_preserves_only_original_release_and_age_limits(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor, requests.RequestException('offline'))
                 for field in ('score', 'checked_at', 'expires_at', 'next_due_at'):
                     self.assertEqual(row[field], previous[field])
                 self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
                 self.assertTrue(live.eligible(row, self.now, factor=factor, currency=currency)[0])
-                expiry = self.now + (timedelta(minutes=30) if currency == 'AUD' or (currency == 'JPY' and factor == 'GDP') else timedelta(days=1))
+                expiry = self.now + timedelta(minutes=30)
                 self.assertFalse(live.eligible(row, expiry, factor=factor, currency=currency)[0])
 
     def test_successful_direct_observation_is_validated_without_fred_metadata(self):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
-                                 ('CAD', 'Arbeitsmarkt'), ('CHF', 'GDP'), ('JPY', 'GDP')):
+                                 ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
                 previous, row = self.collect_case(currency, factor)
                 self.assertEqual(row['validation'], 'VALID')
