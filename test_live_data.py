@@ -668,7 +668,7 @@ class TreasuryCollectorIntegrationTests(unittest.TestCase):
         self.core.update(datetime=Clock, requests=self.transport,
                          get_verified_policy_rate=policy, get_fred_data_historical=self.fred)
         self.app = SimpleNamespace(FRED_KEY='test-only', requests=self.transport,
-            get_verified_policy_rate=policy, compute_currency_details=self.core['compute_currency_details'])
+            get_verified_policy_rate=policy, policy_rate_is_usable=self.core['policy_rate_is_usable'], compute_currency_details=self.core['compute_currency_details'])
 
     def collect_case(self, failure=None):
         previous = live.build_record('Geldpolitik', 10,
@@ -764,3 +764,67 @@ class TransportTests(unittest.TestCase):
         client.get.assert_not_called()
 
 if __name__ == '__main__': unittest.main()
+
+
+class PolicyDeadlineCollectorTests(unittest.TestCase):
+    """Full collector persistence with real proof validation and read-time gate."""
+    def setUp(self):
+        from test_policy_regressions import PolicyRegressions
+        self.fixture = PolicyRegressions()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.ecb_pending_fixture()
+        self.p = self.fixture.p
+        self.now = datetime(2026, 9, 15, 21, 59, tzinfo=timezone.utc)
+        self.p['_policy_now'] = lambda: self.now
+        self.policy = self.fixture.valid('EUR', 2.25)
+        self.policy.update(verification_evidence=self.p['fetch_official_policy_rate_live']('EUR')['evidence'],
+            rate_effective_date='2026-06-17', last_policy_decision_date='2026-09-10', verified_at=self.now.isoformat())
+
+    def collect_policy(self, existing_due=None):
+        from types import SimpleNamespace
+        observation = {'policy_rate': 2.25, 'yield_2y': 2.0, 'date': '2026-09-15', 'source': 'ECB'}
+        if existing_due:
+            observation['next_due_at'] = existing_due
+        app = SimpleNamespace(get_verified_policy_rate=lambda c: self.policy,
+            policy_rate_is_usable=self.p['policy_rate_is_usable'], FRED_KEY=None,
+            compute_currency_details=lambda *a, **k: {'Geldpolitik': 20,
+                '_observations': {'Geldpolitik': observation}, '_freshness': {'Geldpolitik': 'FRESH'}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            with patch.object(live, 'CURRENCIES', ('EUR',)), \
+                 patch.object(live, 'FACTORS', {'Geldpolitik': live.FACTORS['Geldpolitik']}), \
+                 patch.object(live, 'now_utc', return_value=self.now):
+                live.collect(app, path)
+            return live.load(path)['currencies']['EUR']['Geldpolitik']
+
+    def test_projects_earliest_deadline_and_blocks_on_read_without_new_collector(self):
+        row = self.collect_policy('2026-09-16T12:00:00+00:00')
+        self.assertEqual(row['next_due_at'], '2026-09-15T22:00:00+00:00')
+        self.assertTrue(row['observation']['needs_hourly_check'])
+        self.assertTrue(live.eligible(row, self.now, factor='Geldpolitik', currency='EUR')[0])
+        self.assertFalse(live.eligible(row, datetime(2026, 9, 15, 22, tzinfo=timezone.utc), factor='Geldpolitik', currency='EUR')[0])
+        earlier = self.collect_policy('2026-09-15T21:59:30+00:00')
+        self.assertEqual(earlier['next_due_at'], '2026-09-15T21:59:30+00:00')
+
+    def test_invalid_missing_or_expired_proofs_cannot_publish_valid_factor(self):
+        from copy import deepcopy
+        original = deepcopy(self.policy)
+        for mutation in ('invalid_deadline', 'one_proof', 'expired', 'future_rate', 'null_proofs', 'bad_proof'):
+            self.policy = deepcopy(original)
+            if mutation == 'invalid_deadline':
+                self.policy['verification_evidence'][1]['valid_until'] = 'bad'
+            elif mutation == 'one_proof':
+                self.policy['verification_evidence'].pop()
+            elif mutation == 'expired':
+                self.policy['verification_evidence'][1]['valid_until'] = self.now.isoformat()
+            elif mutation == 'null_proofs':
+                self.policy['verification_evidence'] = None
+            elif mutation == 'bad_proof':
+                self.policy['verification_evidence'][1] = 'malformed'
+            else:
+                self.policy['verification_evidence'][1]['rate'] = 2.5
+            with self.subTest(mutation=mutation):
+                row = self.collect_policy()
+                self.assertEqual(row['validation'], 'UNVERIFIED')
+                self.assertFalse(live.eligible(row, self.now, factor='Geldpolitik', currency='EUR')[0])

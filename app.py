@@ -291,6 +291,40 @@ def _policy_pdf_text(currency, url):
     return " ".join(" ".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(_policy_request(currency, url).content)).pages).split())
 
 
+
+def _policy_ecb_pending(text, decision, table_soup, current, api_available):
+    """Verify an announced rate against its exact future effective table row."""
+    import re
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    match = re.search(r'deposit facility.{0,180}?(?:at|to|be)\s+(\d+(?:\.\d+)?)\s*%.{0,160}?with effect from (\d{1,2} [A-Za-z]+ 20\d{2})', text, re.I)
+    if not match:
+        raise ValueError('ECB_DECISION_TABLE_CONFLICT')
+    rate, effective = _policy_rate(match[1]), _policy_date(match[2])
+    now = _policy_now()
+    if not effective or decision > effective:
+        raise ValueError('ECB_EFFECTIVE_DATE_INVALID')
+    cutoff = datetime.fromisoformat(effective).replace(tzinfo=ZoneInfo('Europe/Berlin')).astimezone(timezone.utc)
+    if now >= cutoff or not api_available:
+        raise ValueError('ECB_CURRENT_RATE_UNCONFIRMED')
+    rows, year = [], None
+    for row in table_soup.find_all('tr'):
+        cells = [c.get_text(' ', strip=True) for c in row.find_all(['td','th'])]
+        if len(cells) >= 6 and cells[0].isdigit() and len(cells[0]) == 4:
+            year, date_text, value = cells[0], cells[1], cells[2]
+        elif year and len(cells) >= 5:
+            date_text, value = cells[0], cells[1]
+        else:
+            continue
+        date = _policy_date(date_text.replace('.', '')+' '+year)
+        if date == effective:
+            rows.append(_policy_rate(value))
+    if len(rows) != 1 or abs(rows[0]-rate) > 1e-8 or abs(current-rate) < 1e-8:
+        raise ValueError('ECB_PENDING_TABLE_CONFLICT')
+    return {'announced_rate': rate, 'announced_effective_date': effective,
+            'valid_until': cutoff.isoformat(), 'deadline_basis': 'ECB date-only effective date; conservative start of Frankfurt day'}
+
+
 def fetch_official_policy_rate_live(currency, fred_key=None):
     """Fetch two independent official documents. No inferred or default rates."""
     import re
@@ -336,7 +370,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 dates = payload["structure"]["dimensions"]["observation"][0]["values"]
                 evidence.append(_policy_history_evidence(currency, url, [(dates[int(k)]["id"], v[0]) for k, v in series.items()]))
             url2 = "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html"
-            secondary, _ = _policy_table_history(currency, url2, _policy_html(currency, url2), ecb=True)
+            table_soup = _policy_html(currency, url2)
+            secondary, _ = _policy_table_history(currency, url2, table_soup, ecb=True)
             # The decision index explicitly advertises its public year snippets.
             index = "https://www.ecb.europa.eu/press/govcdec/mopo/html/index.en.html"
             index_soup = _policy_html(currency, index)
@@ -349,7 +384,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             text = _policy_text(_policy_html(currency, statement))
             value = _policy_match_rate(text, [r"deposit facility.{0,180}?(?:at|to|be)\s+" + number + r"\s*%"])
             if abs(value - secondary["rate"]) > 1e-8:
-                raise ValueError("ECB_DECISION_TABLE_CONFLICT")
+                pending = _policy_ecb_pending(text, decision, table_soup, secondary["rate"], api_response is not None)
+                secondary.update(pending)
             secondary["last_policy_decision_date"] = decision
             secondary["decision_source"] = statement
             if api_response is None:
@@ -462,12 +498,18 @@ def _policy_proofs_valid(obj, check_age=True):
         if verified_age < -300 or (check_age and verified_age > POLICY_VERIFICATION_MAX_AGE_DAYS * 86400):
             return False
         proofs = obj.get("verification_evidence", [])
-        if len(proofs) != 2 or len({p.get("source_url") for p in proofs}) != 2:
+        if (not isinstance(proofs, list) or len(proofs) != 2
+                or any(not isinstance(p, dict) for p in proofs)
+                or len({p.get("source_url") for p in proofs}) != 2):
             return False
         for proof in proofs:
             if (proof.get("currency") != currency or proof.get("instrument") != POLICY_RATE_DEFINITIONS[currency]["instrument"]
                     or not _policy_url_allowed(currency, proof.get("source_url", "")) or abs(_policy_rate(proof["rate"]) - rate) > 1e-8):
                 return False
+            if "valid_until" in proof:
+                deadline = pd.to_datetime(proof["valid_until"], utc=True)
+                if pd.isna(deadline) or _policy_now() >= deadline:
+                    return False
             checked = pd.to_datetime(proof["retrieved_at"], utc=True)
             if pd.isna(checked):
                 return False

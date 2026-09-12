@@ -340,6 +340,20 @@ def collect(app, path=PATH):
                         reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Rendite-Metadaten nicht bestätigt"
                 # Policy verification must also have succeeded during this run.
                 policy = app.get_verified_policy_rate(currency)
+                proofs = policy.get("verification_evidence", [])
+                deadlines = [timestamp(p.get("valid_until")) for p in proofs
+                             if isinstance(p, dict) and "valid_until" in p] if isinstance(proofs, list) else []
+                if deadlines:
+                    if any(d is None for d in deadlines):
+                        validation, reason = "UNVERIFIED", "Ungültige Leitzins-Ablaufgrenze"
+                    else:
+                        existing_due = timestamp(observation.get("next_due_at"))
+                        deadline = min(deadlines + ([existing_due] if existing_due else []))
+                        observation["next_due_at"] = deadline.isoformat()
+                        # The yield still needs its regular hourly verification.
+                        observation["needs_hourly_check"] = True
+                if not app.policy_rate_is_usable(policy):
+                    validation, reason = "UNVERIFIED", "Leitzins-Belege ungültig oder angekündigter Zinswechsel fällig"
                 verified = policy.get("verification_timestamp") or policy.get("verified_at")
                 if verified is None:
                     verified = policy.get("last_verified_at")
