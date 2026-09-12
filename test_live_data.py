@@ -146,6 +146,12 @@ class LiveDataTests(unittest.TestCase):
         self.assertNotIn('private',str(out))
         self.assertEqual(out['value'],2)
 
+    def test_bea_publication_evidence_url_is_retained_without_untrusted_urls(self):
+        url='https://www.bea.gov/news/2026/gdp-second-estimate-and-corporate-profits-2nd-quarter-2026'
+        self.assertEqual(live.public_observation({'publication_basis':url})['publication_basis'],url)
+        for bad in (url+'?token=private',url.replace('www.bea.gov','evil.example')):
+            self.assertNotIn('publication_basis',live.public_observation({'publication_basis':bad}))
+
     def test_official_attribution_links_exclude_queries_and_other_hosts(self):
         url='https://www.stats.govt.nz/information-releases/labour-market-statistics-june-2026-quarter/'
         self.assertEqual(live.public_observation({'source_url':url})['source_url'], url)

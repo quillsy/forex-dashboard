@@ -169,6 +169,10 @@ def public_observation(observation):
     result = {}
     for key in OBS_FIELDS:
         value = observation.get(key)
+        if key == "publication_basis" and isinstance(value, str) and re.fullmatch(
+                r"https://www\.bea\.gov/news/\d{4}/[a-z0-9-]*gdp[a-z0-9-]*", value):
+            result[key] = value
+            continue
         if key == "source_url":
             official_links = {
                 "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/namq_10_gdp",
