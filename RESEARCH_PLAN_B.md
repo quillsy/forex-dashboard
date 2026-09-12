@@ -40,6 +40,44 @@ for these statistics. Terms checked on 12 September 2026:
 - https://data.bis.org/topics/CBPOL
 - https://www.bis.org/statistics/cbpol/cbpol_doc.pdf
 
+## Direct EA21 industry confidence
+
+The direct European Commission DG ECFIN series distributed by Eurostat is
+`ei_bsin_m_r2 / M / BS-ICI / SA / BAL / EA21`. This monthly survey balance
+is seasonally adjusted, not calendar adjusted. It is neither PMI nor the
+OECD harmonised confidence index. Source publication and API agree for
+January–August 2026; August is -5.3 balance points.
+
+The last reviewed full release is 28 August 2026, the next scheduled full
+release is 29 September. The September 22 date concerns flash consumer
+confidence and does not apply here. The calendar lists 11:00 without an
+explicit timezone on the reviewed sheet; no exact UTC time is inferred.
+The frozen date evidence is not extrapolated into future release calendars.
+After its scope expires, display marks calendar coverage as unknown and
+requires a recent successful hourly research retrieval for technical freshness.
+An hourly retrieval still cannot prove the absence of a newer publication.
+
+`python collect_ec_industry.py` stores the separate artifact and fixed status
+codes in `research_data/ec_industry.json` and `ec_industry_status.json`. It
+uses persisted hourly attempt suppression and keeps valid data after failures.
+The workflow uses the same serialized job as CORE collection. Page views do
+not fetch data. As with BIS, failed status publication can allow a repeat
+request on the next runner.
+
+Reuse is supported by Eurostat general statistical-data terms and the EC
+release attribution notice for this EU aggregate. This does not establish
+rights to individual survey microdata or third-party US indicators.
+
+- https://ec.europa.eu/eurostat/web/main/help/copyright-notice
+- https://ec.europa.eu/eurostat/cache/metadata/en/ei_bcs_esms.htm
+- https://economy-finance.ec.europa.eu/document/download/a766aa07-8863-471f-8862-1e17f33cc134_en?filename=bcs_2026_08_en.pdf
+- https://ec.europa.eu/economy_finance/db_indicators/surveys/documents/calendar/Publication%20dates%202026.pdf
+
+The statistical annex has a contradictory cover date (2025) although its
+title, table, listing and main release identify August 2026. Date extraction
+therefore must not rely solely on that cover. Historical seasonal adjustments
+are revised: stored current history does not establish past tradable vintages.
+
 ## OECD and manual evidence
 
 OECD business confidence and industrial production remain candidates awaiting
