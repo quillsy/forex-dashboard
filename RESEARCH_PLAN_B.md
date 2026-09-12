@@ -21,6 +21,11 @@ GitHub scheduling remains best effort. A 14-day observation warning and a
 24-hour collection interval are local research rules, not an official SLA or
 CORE freshness allowance.
 
+The 24-hour suppression depends on persisted attempt metadata. If a workflow
+cannot push that metadata, a subsequent runner can repeat the request. This is
+not an absolute distributed quota guarantee; GitHub run failures remain part
+of the operator's deployment checks.
+
 Only `research_data/bis_nz_policy.json` and `research_data/status.json` are
 included in the collector's explicit research file allowlist. No credentials
 are needed. Test fixtures are synthetic; actual collected observations carry
