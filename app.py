@@ -6049,7 +6049,19 @@ def get_pair_signal_and_badge(base, quote, model_weights=None):
     >-50.0 to <=-20.0 => MID SELL (MS)
     <= -50.0        => STRONG SELL (SS)
     """
-    if model_weights is not None:
+    if use_live_core_cache():
+        # A pair must use one collector dataset and one eligibility timestamp.
+        # Separate currency reads can straddle an atomic collector replacement.
+        dataset = live_data.load()
+        checked_now = live_data.now_utc()
+        b_details = live_data.details(base, now=checked_now, data=dataset)
+        q_details = live_data.details(quote, now=checked_now, data=dataset)
+        if not pair_core_is_complete(b_details) or not pair_core_is_complete(q_details):
+            return "INSUFFICIENT FUNDAMENTAL DATA", "#8b949e", None, "INSUFFICIENT DATA"
+        total_weight = sum(CORE_FACTOR_WEIGHTS.values())
+        b_core, q_core = [sum(details[factor] * weight for factor, weight in CORE_FACTOR_WEIGHTS.items()) / total_weight
+                          for details in (b_details, q_details)]
+    elif model_weights is not None:
         _, _, b_core, _, b_details = compute_currency_professional_score_and_regime_custom(base, model_weights)
         _, _, q_core, _, q_details = compute_currency_professional_score_and_regime_custom(quote, model_weights)
     else:

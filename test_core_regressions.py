@@ -3,10 +3,12 @@
 No API requests, UI rendering, cache writes or snapshot mutation are performed.
 """
 import ast
-from datetime import datetime
+import copy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -177,6 +179,54 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertFalse(self.core['pair_core_is_complete'](broken))
         self.assertFalse(self.core['pair_core_is_complete']({}))
         self.assertTrue(self.core['pair_core_is_complete'](complete))
+
+    def live_pair_fixture(self):
+        import live_data as live
+        now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+        dataset = {'model_version': live.MODEL, 'completed_at': now.isoformat(), 'currencies': {}}
+        for curr in ('EUR', 'USD'):
+            dataset['currencies'][curr] = {
+                factor: {'factor': factor, 'score': 40.0 if curr == 'EUR' and factor == 'Geldpolitik' else 0.0,
+                         'validation': 'VALID', 'freshness': 'FRESH', 'checked_at': now.isoformat(),
+                         'expires_at': (now + timedelta(minutes=30)).isoformat(),
+                         'observation': {'date': '2026-09-12', 'value': 2.0,
+                                         'policy_rate': 2.0, 'yield_2y': 2.0}}
+                for factor in live.FACTORS}
+        self.core.update(live_data=live, use_live_core_cache=lambda *args: True)
+        return live, now, dataset
+
+    def test_live_pair_cannot_combine_opposite_incomplete_collector_runs(self):
+        live, now, first = self.live_pair_fixture()
+        second = copy.deepcopy(first)
+        first['currencies']['USD']['PMI']['validation'] = 'UNAVAILABLE'
+        second['currencies']['EUR']['PMI']['validation'] = 'UNAVAILABLE'
+        for dataset in (first, second):
+            self.assertFalse(all(self.core['pair_core_is_complete'](live.details(curr, now=now, data=dataset))
+                                 for curr in ('EUR', 'USD')))
+        with patch.object(live, 'load', side_effect=[first, second]) as loader, \
+                patch.object(live, 'now_utc', return_value=now):
+            self.assertIsNone(self.core['get_pair_signal_and_badge']('EUR', 'USD')[2])
+        loader.assert_called_once_with()
+
+    def test_live_pair_frozen_weights_and_one_expiry_clock(self):
+        live, now, dataset = self.live_pair_fixture()
+        expires = now + timedelta(minutes=30)
+        before = expires - timedelta(microseconds=1)
+        for weights in (None, {'Geldpolitik': 0, 'PMI': 1000, 'Correction': 1000}):
+            with patch.object(live, 'load', return_value=dataset) as loader, \
+                    patch.object(live, 'now_utc', side_effect=[before, expires]) as clock, \
+                    patch.object(live, 'details', wraps=live.details) as reader:
+                result = self.core['get_pair_signal_and_badge']('EUR', 'USD', weights)
+            self.assertEqual(result[2:], (14.0, 'NT'))
+            loader.assert_called_once_with()
+            clock.assert_called_once_with()
+            self.assertEqual(len(reader.call_args_list), 2)
+            for call in reader.call_args_list:
+                self.assertIs(call.kwargs['data'], dataset)
+                self.assertEqual(call.kwargs['now'], before)
+        with patch.object(live, 'load', return_value=dataset), \
+                patch.object(live, 'now_utc', return_value=expires):
+            self.assertIsNone(self.core['get_pair_signal_and_badge']('EUR', 'USD')[2])
 
     def actual_macro_loader(self):
         # Restore just this production function after fixture stubbing.

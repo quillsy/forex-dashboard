@@ -38,6 +38,8 @@ def harness():
         "CURRENCIES": {"USD": {}, "EUR": {}},
         "st": SimpleNamespace(session_state={}),
         "check_demo_active": lambda: False,
+        "use_live_core_cache": lambda *args: True,
+        "CORE_FACTOR_WEIGHTS": {"Geldpolitik": 35.0, "Inflation": 20.0, "Arbeitsmarkt": 20.0, "PMI": 20.0, "GDP": 5.0},
         "compute_checklist_snapshot": lambda weights: [],
         "compute_currency_details": lambda curr, *args: {**dict.fromkeys(("Geldpolitik", "Inflation", "Arbeitsmarkt", "PMI", "GDP"), -5.0 if curr == "USD" else 20.0), "_live_checked": True, "_completeness": 100.0, "_missing": []},
         "compute_currency_professional_score_and_regime_custom": lambda *args: (20, "Normal", 20, 0, {}),
