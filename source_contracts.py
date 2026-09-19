@@ -104,33 +104,10 @@ KNOWN_RELEASES[("USD", "Geldpolitik")] = {
     "source": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value_month=202609",
 }
 
-# Same definition/period but unresolved disagreement between official API and
-# official publication. Never select whichever number produces a desired score.
-KNOWN_SOURCE_CONFLICTS = {
-    ("EUR", "Inflation", "2026-08"): {
-        "confirmed_at": "2026-09-08T10:00:12+00:00",
-        "reason": "Amtlicher Quellenkonflikt: Eurostat-API 3,2 %; Veröffentlichung 3,3 % (August 2026)",
-        "sources": ["https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_minr",
-                    "https://ec.europa.eu/eurostat/web/products-euro-indicators/w/2-01092026-ap"],
-    },
-}
-
-KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-07")] = {
-    **KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-08")],
-    "reason": "Amtlicher Quellenkonflikt: Eurostat-API 3,0 %; Veröffentlichung 2,9 % (Juli 2026)",
-}
-
-# The full August release agrees with the current unflagged API observation.
-# Keep the original conflict for older checks; July still disagrees (3.0/2.9).
-KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-08")]["resolution"] = {
-    "confirmed_at": "2026-09-19T11:33:20+00:00",
-    "source": "https://ec.europa.eu/eurostat/web/products-euro-indicators/w/2-17092026-ap",
-    "observation": {"value": 3.2, "source": "Eurostat",
-                    "series_id": "prc_hicp_minr:M.RCH_A.TOTAL.EA21",
-                    "unit": "annual percent change", "seasonal_adjustment": "NSA",
-                    "reference_period": "2026-08", "is_estimate": False,
-                    "provider_status": None},
-}
+# Only same-definition, same-period disagreements belong here. Eurostat's fixed
+# EA21 series and the changing-composition EA press release are distinct series,
+# not conflicting sources. See HICP_RESOLUTION_2026_09.md for the correction.
+KNOWN_SOURCE_CONFLICTS = {}
 
 KNOWN_RELEASES[("CHF", "Inflation")] = {
     "period_start": "2026-08-01", "label": "2026-08 (HICP/HVPI)",

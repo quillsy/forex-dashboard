@@ -66,36 +66,48 @@ class LiveDataTests(unittest.TestCase):
         self.assertIn('2026-07', aud['Grund'])
 
     def test_official_same_period_conflict_blocks_either_selected_value(self):
-        now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
-        for value in (3.2, 3.3):
-            row = live.build_record('Inflation', 60, {'value': value, 'date': '2026-08-31'}, 'FRESH', now.isoformat())
-            allowed, reason = live.eligible(row, now, currency='EUR')
-            self.assertFalse(allowed)
-            self.assertIn('Quellenkonflikt', reason)
-            self.assertTrue(live.eligible(row, now, currency='GBP')[0])
-
-    def test_august_hicp_resolution_requires_new_check_and_exact_final_observation(self):
         import source_contracts
-        resolution = source_contracts.KNOWN_SOURCE_CONFLICTS[('EUR', 'Inflation', '2026-08')]['resolution']
-        now = live.timestamp(resolution['confirmed_at'])
-        observation = {**resolution['observation'], 'date': '2026-08-31'}
-        row = live.build_record('Inflation', 60, observation, 'FRESH', now.isoformat())
-        self.assertTrue(live.eligible(row, now, currency='EUR')[0])
-        for key, value in [('value', 3.3), ('is_estimate', True), ('is_estimate', 0),
-                           ('provider_status', 'e'), ('series_id', 'wrong'),
-                           ('unit', 'percent'), ('seasonal_adjustment', 'SA'),
-                           ('source', 'mirror'), ('reference_period', '2026-07')]:
-            bad = copy.deepcopy(row)
-            bad['observation'][key] = value
-            with self.subTest(key=key, value=value):
-                self.assertFalse(live.eligible(bad, now, currency='EUR')[0])
-        old = copy.deepcopy(row)
-        old['checked_at'] = (now - timedelta(seconds=1)).isoformat()
-        self.assertFalse(live.eligible(old, now, currency='EUR')[0])
-        self.assertFalse(live.eligible(row, now + timedelta(hours=1), currency='EUR')[0])
-        july = copy.deepcopy(row)
-        july['observation'].update(date='2026-07-31', reference_period='2026-07', value=3.0)
-        self.assertFalse(live.eligible(july, now, currency='EUR')[0])
+        now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
+        # Synthetic same-definition disagreement, not EA versus fixed EA21.
+        conflict = {('EUR', 'Inflation', '2026-08'): {
+            'confirmed_at': now.isoformat(), 'reason': 'Synthetischer Quellenkonflikt'}}
+        with patch.dict(source_contracts.KNOWN_SOURCE_CONFLICTS, conflict):
+            for value in (3.2, 3.3):
+                row = live.build_record('Inflation', 60, {'value': value, 'date': '2026-08-31'}, 'FRESH', now.isoformat())
+                allowed, reason = live.eligible(row, now, currency='EUR')
+                self.assertFalse(allowed)
+                self.assertIn('Quellenkonflikt', reason)
+                self.assertTrue(live.eligible(row, now, currency='GBP')[0])
+
+    def test_fixed_ea21_values_and_revisions_are_not_cross_geography_conflicts(self):
+        from official_hicp import parse_hicp
+        from test_official_hicp import fixture
+        now = datetime(2026, 9, 19, 14, tzinfo=timezone.utc)
+        # July's 3.0 is fixed EA21, not the changing EA release's 2.9.
+        # The revised 3.1 case is synthetic: valid revisions must not be
+        # constrained to the previously hardcoded August value of 3.2.
+        for period, value, status in [('2026-07', 3.0, None),
+                                      ('2026-08', 3.2, None),
+                                      ('2026-08', 3.1, 'r'),
+                                      ('2026-08', 3.2, 'e')]:
+            with self.subTest(period=period, value=value, status=status):
+                data = fixture()
+                data['size'][-1] = 1
+                data['dimension']['time']['category']['index'] = {period: 0}
+                data['value'] = {'0': value}
+                data['status'] = {} if status is None else {'0': status}
+                observation = parse_hicp(data, now=now)
+                row = live.build_record('Inflation', 60, observation, 'FRESH', now.isoformat())
+                self.assertTrue(live.eligible(row, now, currency='EUR')[0])
+                self.assertEqual(observation['is_estimate'], status == 'e')
+                self.assertFalse(live.eligible(row, now + timedelta(hours=1), currency='EUR')[0])
+                row['validation'] = 'UNVERIFIED'
+                self.assertFalse(live.eligible(row, now, currency='EUR')[0])
+        for key, wrong in [('geo', 'EA'), ('unit', 'I25')]:
+            data = fixture()
+            data['dimension'][key]['category']['index'] = {wrong: 0}
+            with self.assertRaises(ValueError):
+                parse_hicp(data, now=now)
 
     def test_release_calendar_does_not_override_required_hourly_check(self):
         row = self.record()
@@ -220,7 +232,7 @@ class LiveDataTests(unittest.TestCase):
                 live.render_status(st)
             overview=st.dataframe.call_args_list[0].args[0]
             eur=next(row for row in overview if row['Währung']=='EUR')
-            self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig) · HICP')
+            self.assertEqual(eur['Inflation (% zum Vorjahr)'],'3.20 · 2026-08 (vorläufig) · HICP · EA21 fix')
 
     def test_bfs_provisional_flag_and_dataset_attribution_are_visible(self):
         record=live.build_record('Inflation',20,{'value':0.9,'date':'2026-08-31',
