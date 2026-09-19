@@ -120,6 +120,18 @@ KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-07")] = {
     "reason": "Amtlicher Quellenkonflikt: Eurostat-API 3,0 %; Veröffentlichung 2,9 % (Juli 2026)",
 }
 
+# The full August release agrees with the current unflagged API observation.
+# Keep the original conflict for older checks; July still disagrees (3.0/2.9).
+KNOWN_SOURCE_CONFLICTS[("EUR", "Inflation", "2026-08")]["resolution"] = {
+    "confirmed_at": "2026-09-19T11:33:20+00:00",
+    "source": "https://ec.europa.eu/eurostat/web/products-euro-indicators/w/2-17092026-ap",
+    "observation": {"value": 3.2, "source": "Eurostat",
+                    "series_id": "prc_hicp_minr:M.RCH_A.TOTAL.EA21",
+                    "unit": "annual percent change", "seasonal_adjustment": "NSA",
+                    "reference_period": "2026-08", "is_estimate": False,
+                    "provider_status": None},
+}
+
 KNOWN_RELEASES[("CHF", "Inflation")] = {
     "period_start": "2026-08-01", "label": "2026-08 (HICP/HVPI)",
     "published_at": "2026-09-03T06:30:00+00:00",
