@@ -114,17 +114,7 @@ def eligible(record, now=None, factor=None, currency=None):
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS
     conflict = KNOWN_SOURCE_CONFLICTS.get((currency, factor, reference.strftime("%Y-%m")))
     if conflict and now >= timestamp(conflict["confirmed_at"]):
-        resolution = conflict.get("resolution", {})
-        resolved_at = timestamp(resolution.get("confirmed_at"))
-        checked_at = timestamp(record.get("checked_at"))
-        expected = resolution.get("observation", {})
-        resolved = (resolved_at is not None and now >= resolved_at
-                    and checked_at is not None and checked_at >= resolved_at
-                    and bool(expected)
-                    and all(key in observation and type(observation[key]) is type(value)
-                            and observation[key] == value for key, value in expected.items()))
-        if not resolved:
-            return False, conflict["reason"]
+        return False, conflict["reason"]
     release = KNOWN_RELEASES.get((currency, factor))
     if release and now >= timestamp(release.get("published_at") or release["confirmed_at"]):
         minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -442,7 +432,7 @@ def render_status(st, authorized=False):
             if item[label] != "—" and row["Veröffentlichungsstatus"] == "Amtlich vorläufig":
                 item[label] += " (vorläufig)"
             if item[label] != "—" and factor == "Inflation" and currency in ("EUR", "CHF"):
-                item[label] += " · HICP"
+                item[label] += " · HICP · EA21 fix" if currency == "EUR" else " · HICP"
         overview.append(item)
     st.dataframe(overview, hide_index=True, use_container_width=True)
     st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
