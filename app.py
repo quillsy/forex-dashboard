@@ -909,9 +909,14 @@ def load_api_key(name, alt_names=None):
     local development (.env / os.environ), and GitHub Actions CI (env variables).
     Never prints, logs, or leaks secrets into exception messages or tracebacks.
     """
+    from provider_transport import credential_key_blocked
     candidates = [name]
     if alt_names:
         candidates.extend(alt_names)
+    # Block the provider, not merely one spelling of its secret name. This
+    # covers direct UI requests that do not use the collector transport.
+    if any(credential_key_blocked(candidate) for candidate in candidates):
+        return None
     if os.environ.get("FX_FALLBACK_MODE") == "1":
         from run_data_collection import LIVE_FALLBACK_KEYS
         return next((os.environ[key].strip() for key in candidates
@@ -929,6 +934,13 @@ def load_api_key(name, alt_names=None):
         except Exception:
             pass
     return None
+
+def fcs_credential_status():
+    from provider_transport import credential_key_blocked
+    if credential_key_blocked("FCS_API_KEY"):
+        return "Gesperrt: Schlüsselrotation noch nicht bestätigt"
+    return ("Schlüssel vorhanden (Verbindung ungeprüft)" if FCS_KEY
+            else "Inaktiv 🔴 (API-Key fehlt)")
 
 def operator_is_authorized():
     import hmac
@@ -8247,7 +8259,7 @@ if not getattr(st, "_mock_mode", False):
             api_health = [
                 {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
                 {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
-                {"API / Datenquelle": "FCS Price Data API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FCS_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                {"API / Datenquelle": "FCS Price Data API", "Status": fcs_credential_status()},
                 {"API / Datenquelle": "Tiingo Commodity API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
                 {"API / Datenquelle": "World Bank Indicator API", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"},
                 {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"}

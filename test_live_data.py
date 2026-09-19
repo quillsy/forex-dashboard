@@ -803,6 +803,21 @@ class TransportTests(unittest.TestCase):
             transport.get('https://api-v4.fcsapi.com/forex/history')
         client.get.assert_not_called()
 
+    def test_transport_rotation_ack_matches_ui_policy(self):
+        for ack in (' FCSAPI.COM ', ' API-V4.FCSAPI.COM '):
+            client = Mock(); client.get.return_value = self.response()
+            transport = CollectorTransport(client)
+            with patch.dict(os.environ, {'FX_COLLECTOR': '1', 'FX_ROTATED_PROVIDER_HOSTS': ack}):
+                transport.get('https://api-v4.fcsapi.com/forex/history')
+                with self.assertRaises(requests.RequestException):
+                    transport.get('https://api.benzinga.com/api/v2/news')
+            self.assertEqual(client.get.call_count, 1)
+        for ack in ('https://fcsapi.com', 'fcsapi.com.evil.test', '*.fcsapi.com'):
+            client = Mock(); transport = CollectorTransport(client)
+            with patch.dict(os.environ, {'FX_COLLECTOR': '1', 'FX_ROTATED_PROVIDER_HOSTS': ack}), self.assertRaises(requests.RequestException):
+                transport.get('https://api-v4.fcsapi.com/forex/history')
+            client.get.assert_not_called()
+
 if __name__ == '__main__': unittest.main()
 
 
