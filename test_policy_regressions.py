@@ -351,6 +351,78 @@ class PolicyRegressions(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertTrue(requests[-1].endswith('/mpr_2025/index.htm'))
 
+    def test_boj_year_opening_empty_or_404_index_uses_last_decision_once(self):
+        import requests
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                # Already January in Tokyo while still December in UTC.
+                self.p['_policy_now'] = lambda: datetime(2026, 12, 31, 16, tzinfo=timezone.utc)
+                requested = []
+                def html(currency, url):
+                    requested.append(url)
+                    if 'yoryo36' in url:
+                        body = '4. Interest Rate The interest rate shall be 1.25 percent'
+                    elif 'mpr_2027' in url:
+                        if missing:
+                            response = requests.Response()
+                            response.status_code, response.url = 404, url
+                            raise requests.HTTPError(response=response)
+                        body = '<h1>Monetary Policy Releases 2027</h1>'
+                    elif 'mpr_2026' in url:
+                        body = ('<a href="k261218a.pdf">Statement on Monetary Policy</a>'
+                                '<a href="k260918a.pdf">Change in the Guideline for Money Market Operations</a>')
+                    else:
+                        raise AssertionError('Unexpected extra index')
+                    return BeautifulSoup(body, 'html.parser')
+                self.p['_policy_html'] = html
+                self.p['_policy_pdf_text'] = lambda c, u: (
+                    'The uncollateralized overnight call rate remains at around 1.25 percent.'
+                    + (' The new guideline will be effective from September 24, 2026.' if '260918' in u else ''))
+                result = self.p['fetch_official_policy_rate_live']('JPY')
+                self.assertNotIn('error', result)
+                first, second = result['evidence']
+                self.assertEqual(first['rate_effective_date'], '2026-09-24')
+                self.assertEqual(second['last_policy_decision_date'], '2026-12-18')
+                self.assertTrue(second['source_url'].endswith('/k261218a.pdf'))
+                self.assertEqual(len(requested), 3)
+                self.assertEqual(len(set(requested)), 3)
+
+    def test_boj_year_opening_transport_or_date_conflict_cannot_fallback(self):
+        import requests
+        self.p['_policy_now'] = lambda: datetime(2027, 1, 5, tzinfo=timezone.utc)
+        for failure in ('timeout', '403', '500', 'foreign404', 'redirect404', 'wrongyear', 'invaliddate', 'garbage', 'login'):
+            with self.subTest(failure=failure):
+                requested = []
+                def html(currency, url):
+                    requested.append(url)
+                    if 'yoryo36' in url:
+                        return BeautifulSoup('4. Interest Rate The interest rate shall be 1.25 percent', 'html.parser')
+                    self.assertIn('mpr_2027', url)
+                    if failure == 'timeout':
+                        raise requests.Timeout()
+                    if failure in ('403', '500', 'foreign404', 'redirect404'):
+                        response = requests.Response()
+                        response.status_code = 404 if failure.endswith('404') else int(failure)
+                        response.url = ('https://example.com/missing' if failure == 'foreign404' else
+                                        'https://www.boj.or.jp/en/missing' if failure == 'redirect404' else url)
+                        raise requests.HTTPError(response=response)
+                    if failure in ('garbage', 'login'):
+                        return BeautifulSoup('' if failure == 'garbage' else '<h1>Sign in</h1>', 'html.parser')
+                    return BeautifulSoup('<a href="k' + ('261218' if failure == 'wrongyear' else '271332')
+                                         + 'a.pdf">Statement</a>', 'html.parser')
+                self.p['_policy_html'] = html
+                result = self.p['fetch_official_policy_rate_live']('JPY')
+                self.assertIn('error', result)
+                self.assertEqual(len(requested), 2)
+
+    def test_boj_latest_decision_discovery_stops_after_previous_year(self):
+        self.p['_policy_now'] = lambda: datetime(2027, 1, 5, tzinfo=timezone.utc)
+        self.p['_policy_html'] = Mock(side_effect=lambda c, u: BeautifulSoup(
+            '<h1>Monetary Policy Releases ' + ('2027' if '2027' in u else '2026') + '</h1>', 'html.parser'))
+        with self.assertRaisesRegex(ValueError, 'OFFICIAL_DECISION_NOT_FOUND'):
+            self.p['_policy_boj_latest_decision']()
+        self.assertEqual(self.p['_policy_html'].call_count, 2)
+
     def test_all_eight_parsers_with_official_document_formats(self):
         # Synthetic fixtures deliberately include hold rows, competing instruments,
         # a non-English ECB link and BOJ PDF word splitting seen in real responses.
