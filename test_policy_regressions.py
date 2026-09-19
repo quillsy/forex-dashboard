@@ -254,6 +254,103 @@ class PolicyRegressions(unittest.TestCase):
         self.assertIn('error', self.p['fetch_official_policy_rate_live']('EUR'))
         self.p['_policy_html'].assert_not_called()
 
+    def boj_pending_fixture(self, current=1.0):
+        self.p['_policy_now'] = lambda: datetime(2026, 9, 19, 12, tzinfo=timezone.utc)
+        def html(currency, url):
+            text = (f'4. Interest Rate The interest rate shall be {current} percent'
+                    if 'yoryo36' in url else
+                    '<a href="/k260918a.pdf">Change in the Guideline for Money Market Operations</a>'
+                    '<a href="/k260731a.pdf">Statement on Monetary Policy</a>'
+                    '<a href="/k260616a.pdf">Change in the Guideline for Money Market Operations</a>')
+            return BeautifulSoup(text, 'html.parser')
+        self.p['_policy_html'] = html
+        self.p['_policy_pdf_text'] = lambda currency, url: (
+            'The uncollateralized overnight call rate will remain at around 1.25 percent. '
+            'The new guideline for money market operations will be effective from September 24, 2026.'
+            if '260918' in url else
+            'The uncollateralized overnight call rate will remain at around 1.0 percent. '
+            'The new guideline for money market operations will be effective from June 17, 2026.')
+
+    def test_boj_future_announcement_preserves_current_proofs_and_cold_episode(self):
+        self.boj_pending_fixture()
+        result = self.p['fetch_official_policy_rate_live']('JPY')
+        self.assertNotIn('error', result)
+        first, second = result['evidence']
+        self.assertEqual((first['rate'], second['rate']), (1.0, 1.0))
+        self.assertEqual(first['rate_effective_date'], '2026-06-17')
+        self.assertTrue(second['source_url'].endswith('/k260616a.pdf'))
+        self.assertTrue(second['decision_source'].endswith('/k260918a.pdf'))
+        self.assertEqual(second['last_policy_decision_date'], '2026-09-18')
+        self.assertEqual(second['announced_rate'], 1.25)
+        self.assertEqual(second['valid_until'], '2026-09-23T15:00:00+00:00')
+        self.p['POLICY_RATE_DEFINITIONS'] = {'JPY': self.p['POLICY_RATE_DEFINITIONS']['JPY']}
+        obj = self.p['refresh_all_verified_policy_rates']()['JPY']
+        self.assertTrue(self.p['policy_rate_is_usable'](obj))
+        for stamp, expected in [('2026-09-23T14:59:59+00:00', True),
+                                ('2026-09-23T15:00:00+00:00', False)]:
+            self.p['_policy_now'] = lambda: datetime.fromisoformat(stamp)
+            self.assertEqual(self.p['_policy_proofs_valid'](obj, check_age=False), expected)
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('JPY'))
+        self.p['fetch_official_policy_rate_live'] = lambda *a: {'error': 'Timeout', 'evidence': []}
+        self.assertFalse(self.p['policy_rate_is_usable'](self.p['refresh_all_verified_policy_rates']()['JPY']))
+
+    def test_boj_new_rate_only_after_tokyo_cutoff_and_fresh_matching_terms(self):
+        self.boj_pending_fixture(current=1.25)
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('JPY'))
+        self.p['_policy_now'] = lambda: datetime(2026, 9, 23, 15, tzinfo=timezone.utc)
+        self.p['POLICY_RATE_DEFINITIONS'] = {'JPY': self.p['POLICY_RATE_DEFINITIONS']['JPY']}
+        obj = self.p['refresh_all_verified_policy_rates']()['JPY']
+        self.assertEqual(obj['rate'], 1.25)
+        self.assertEqual(obj['rate_effective_date'], '2026-09-24')
+        self.assertTrue(self.p['policy_rate_is_usable'](obj))
+        self.assertNotIn('announced_rate', obj['verification_evidence'][1])
+
+    def test_boj_missing_effective_or_conflicting_current_episode_fails(self):
+        for replacement in ('September 24, 2026', 'June 17, 2026'):
+            self.boj_pending_fixture()
+            original = self.p['_policy_pdf_text']
+            self.p['_policy_pdf_text'] = lambda c, u: original(c, u).replace(replacement, 'unknown')
+            self.assertIn('error', self.p['fetch_official_policy_rate_live']('JPY'))
+        self.boj_pending_fixture(current=0.75)
+        self.assertIn('error', self.p['fetch_official_policy_rate_live']('JPY'))
+
+    def test_boj_january_hold_recovers_previous_year_episode_without_old_decision(self):
+        self.p['_policy_now'] = lambda: datetime(2027, 1, 25, 12, tzinfo=timezone.utc)
+        requested = []
+        def html(currency, url):
+            requested.append(url)
+            if 'yoryo36' in url:
+                text = '4. Interest Rate The interest rate shall be 1.25 percent'
+            elif 'mpr_2027' in url:
+                text = '<a href="k270122a.pdf">Statement on Monetary Policy</a>'
+            elif 'mpr_2026' in url:
+                text = '<a href="k260918a.pdf">Change in the Guideline for Money Market Operations</a>'
+            else:
+                raise AssertionError('Unnecessary year fetch')
+            return BeautifulSoup(text, 'html.parser')
+        self.p['_policy_html'] = html
+        self.p['_policy_pdf_text'] = lambda c, u: (
+            'The uncollateralized overnight call rate will remain at around 1.25 percent.'
+            + (' The new guideline will be effective from September 24, 2026.' if '260918' in u else ''))
+        result = self.p['fetch_official_policy_rate_live']('JPY')
+        self.assertNotIn('error', result)
+        first, second = result['evidence']
+        self.assertEqual(first['rate_effective_date'], '2026-09-24')
+        self.assertTrue(first['effective_date_source'].endswith('/mpr_2026/k260918a.pdf'))
+        self.assertEqual(second['last_policy_decision_date'], '2027-01-22')
+        self.assertTrue(second['source_url'].endswith('/mpr_2027/k270122a.pdf'))
+        self.assertEqual(len(requested), 3)
+
+    def test_boj_episode_lookup_has_finite_year_bound(self):
+        self.p['_policy_now'] = lambda: datetime(2027, 1, 25, 12, tzinfo=timezone.utc)
+        requests = []
+        self.p['_policy_html'] = lambda c, u: requests.append(u) or BeautifulSoup('', 'html.parser')
+        self.assertEqual(list(self.p['_policy_boj_change_links'](
+            'https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2027/index.htm',
+            BeautifulSoup('', 'html.parser'), '2027-01-22')), [])
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[-1].endswith('/mpr_2025/index.htm'))
+
     def test_all_eight_parsers_with_official_document_formats(self):
         # Synthetic fixtures deliberately include hold rows, competing instruments,
         # a non-English ECB link and BOJ PDF word splitting seen in real responses.
@@ -281,7 +378,8 @@ class PolicyRegressions(unittest.TestCase):
             payload={'observations':[{'date':'2025-12-10','value':'3.75'},{'date':'2025-12-11','value':'3.5'}]} if currency=='USD' else {'observations':[{'d':'2025-10-29','V39079':{'v':'2.5'}},{'d':'2025-10-30','V39079':{'v':'2.25'}}]} if currency=='CAD' else {'dataSets':[{'series':{'0':{'observations':{'0':[2.0],'1':[2.25]}}}}], 'structure':{'dimensions':{'observation':[{'values':[{'id':'2025-06-11'},{'id':'2026-06-17'}]}]}}}
             return SimpleNamespace(json=lambda:payload)
         self.p['_policy_html']=html; self.p['_policy_request']=request
-        self.p['_policy_pdf_text']=lambda currency,url: 'The uncollateralized o vernight call rate will remain at around 1.0 percent. The new guideline will be effective from June 17, 2026.'
+        self.p['_policy_pdf_text']=lambda currency,url: ('The uncollateralized o vernight call rate will remain at around 1.0 percent.'
+            + (' The new guideline will be effective from June 17, 2026.' if '260616' in url else ''))
         expected={'USD':(3.5,'2025-12-11'),'EUR':(2.25,'2026-06-17'),'GBP':(3.75,'2025-12-18'),'CAD':(2.25,'2025-10-30'),'CHF':(0,'2025-06-20'),'AUD':(4.35,'2026-05-06'),'NZD':(2.75,'2026-09-02'),'JPY':(1,'2026-06-17')}
         for currency,(rate,date) in expected.items():
             with self.subTest(currency=currency):
