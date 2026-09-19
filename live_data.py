@@ -114,7 +114,17 @@ def eligible(record, now=None, factor=None, currency=None):
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS
     conflict = KNOWN_SOURCE_CONFLICTS.get((currency, factor, reference.strftime("%Y-%m")))
     if conflict and now >= timestamp(conflict["confirmed_at"]):
-        return False, conflict["reason"]
+        resolution = conflict.get("resolution", {})
+        resolved_at = timestamp(resolution.get("confirmed_at"))
+        checked_at = timestamp(record.get("checked_at"))
+        expected = resolution.get("observation", {})
+        resolved = (resolved_at is not None and now >= resolved_at
+                    and checked_at is not None and checked_at >= resolved_at
+                    and bool(expected)
+                    and all(key in observation and type(observation[key]) is type(value)
+                            and observation[key] == value for key, value in expected.items()))
+        if not resolved:
+            return False, conflict["reason"]
     release = KNOWN_RELEASES.get((currency, factor))
     if release and now >= timestamp(release.get("published_at") or release["confirmed_at"]):
         minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)

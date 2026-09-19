@@ -74,6 +74,29 @@ class LiveDataTests(unittest.TestCase):
             self.assertIn('Quellenkonflikt', reason)
             self.assertTrue(live.eligible(row, now, currency='GBP')[0])
 
+    def test_august_hicp_resolution_requires_new_check_and_exact_final_observation(self):
+        import source_contracts
+        resolution = source_contracts.KNOWN_SOURCE_CONFLICTS[('EUR', 'Inflation', '2026-08')]['resolution']
+        now = live.timestamp(resolution['confirmed_at'])
+        observation = {**resolution['observation'], 'date': '2026-08-31'}
+        row = live.build_record('Inflation', 60, observation, 'FRESH', now.isoformat())
+        self.assertTrue(live.eligible(row, now, currency='EUR')[0])
+        for key, value in [('value', 3.3), ('is_estimate', True), ('is_estimate', 0),
+                           ('provider_status', 'e'), ('series_id', 'wrong'),
+                           ('unit', 'percent'), ('seasonal_adjustment', 'SA'),
+                           ('source', 'mirror'), ('reference_period', '2026-07')]:
+            bad = copy.deepcopy(row)
+            bad['observation'][key] = value
+            with self.subTest(key=key, value=value):
+                self.assertFalse(live.eligible(bad, now, currency='EUR')[0])
+        old = copy.deepcopy(row)
+        old['checked_at'] = (now - timedelta(seconds=1)).isoformat()
+        self.assertFalse(live.eligible(old, now, currency='EUR')[0])
+        self.assertFalse(live.eligible(row, now + timedelta(hours=1), currency='EUR')[0])
+        july = copy.deepcopy(row)
+        july['observation'].update(date='2026-07-31', reference_period='2026-07', value=3.0)
+        self.assertFalse(live.eligible(july, now, currency='EUR')[0])
+
     def test_release_calendar_does_not_override_required_hourly_check(self):
         row = self.record()
         row['next_due_at'] = (NOW + timedelta(days=30)).isoformat()
