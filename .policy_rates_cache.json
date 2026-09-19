@@ -226,7 +226,7 @@
     "secondary_source": null,
     "verification_evidence": [],
     "verification_status": "🔴 OFFICIAL SOURCE UNAVAILABLE",
-    "last_attempt_at": "2026-09-19T11:39:24.542906+00:00",
+    "last_attempt_at": "2026-09-19T11:46:57.291853+00:00",
     "last_attempt_error": "RequestException"
   },
   "JPY": {
@@ -237,32 +237,35 @@
     "instrument": "Short-Term Policy Interest Rate",
     "central_bank": "Bank of Japan",
     "rate_effective_date": "2026-06-17",
-    "last_policy_decision_date": "2026-07-31",
-    "verified_at": "2026-09-18T01:19:25.220397+00:00",
+    "last_policy_decision_date": "2026-09-18",
+    "verified_at": "2026-09-19T11:46:57.344073+00:00",
     "primary_source": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
-    "secondary_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260731a.pdf",
+    "secondary_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260616a.pdf",
     "verification_evidence": [
       {
         "currency": "JPY",
         "instrument": "Short-Term Policy Interest Rate",
         "source_url": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
         "rate": 1.0,
-        "retrieved_at": "2026-09-18T01:19:26.279311+00:00",
+        "retrieved_at": "2026-09-19T11:46:57.935067+00:00",
         "rate_effective_date": "2026-06-17",
         "effective_date_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260616a.pdf"
       },
       {
         "currency": "JPY",
         "instrument": "Short-Term Policy Interest Rate",
-        "source_url": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260731a.pdf",
+        "source_url": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260616a.pdf",
         "rate": 1.0,
-        "retrieved_at": "2026-09-18T01:19:27.226689+00:00",
-        "last_policy_decision_date": "2026-07-31"
+        "retrieved_at": "2026-09-19T11:46:59.843522+00:00",
+        "last_policy_decision_date": "2026-09-18",
+        "announced_rate": 1.25,
+        "announced_effective_date": "2026-09-24",
+        "valid_until": "2026-09-23T15:00:00+00:00",
+        "decision_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
+        "deadline_basis": "BOJ date-only effective date; conservative start of Tokyo day"
       }
     ],
-    "verification_status": "🔴 UNVERIFIED CHANGE",
-    "last_attempt_at": "2026-09-19T11:39:24.544563+00:00",
-    "last_attempt_error": "INCOMPLETE_OFFICIAL_VERIFICATION",
-    "candidate_rate": 1.0
+    "verification_status": "🟢 VERIFIED_UNCHANGED",
+    "last_attempt_at": "2026-09-19T11:46:57.344073+00:00"
   }
 }
