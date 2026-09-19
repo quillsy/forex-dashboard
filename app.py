@@ -328,6 +328,25 @@ def _policy_ecb_pending(text, decision, table_soup, current, api_available):
             'valid_until': cutoff.isoformat(), 'deadline_basis': 'ECB date-only effective date; conservative start of Frankfurt day'}
 
 
+def _policy_boj_change_links(index, soup, decision):
+    """Search at most three official year indexes, only as far as needed."""
+    import re
+    from urllib.parse import urljoin
+    for year in range(_policy_now().year, _policy_now().year - 3, -1):
+        year_index = f"https://www.boj.or.jp/en/mopo/mpmdeci/mpr_{year}/index.htm"
+        year_soup = soup if year_index == index else _policy_html("JPY", year_index)
+        links = set()
+        for a in year_soup.find_all("a", href=True):
+            if "Change in the Guideline for Money Market Operations" not in a.get_text(" ", strip=True) or "Reference" in a.get_text():
+                continue
+            candidate = urljoin(year_index, a["href"])
+            match = re.search(r"/k(\d{6})a\.pdf$", candidate)
+            date = _policy_date("20" + match[1]) if match else None
+            if date and date.startswith(str(year)) and date <= decision:
+                links.add(candidate)
+        yield from sorted(links, reverse=True)
+
+
 def fetch_official_policy_rate_live(currency, fred_key=None):
     """Fetch two independent official documents. No inferred or default rates."""
     import re
@@ -454,6 +473,8 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             evidence.append(_policy_evidence(currency, url2, rate, last_policy_decision_date=decision))
 
         elif currency == "JPY":
+            from datetime import datetime, timezone
+            from zoneinfo import ZoneInfo
             url = "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm"
             text = _policy_text(_policy_html(currency, url))
             rate = _policy_match_rate(text, [r"4\. Interest Rate\s+The interest rate shall be\s+" + number + r"\s+percent"])
@@ -466,22 +487,45 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             call_rate_pattern = r"uncollateralized\s+o\s*vernight\s+call\s+rate.{0,70}?around\s+" + number + r"\s+percent"
             latest_rate = _policy_match_rate(text, [call_rate_pattern])
             secondary = _policy_evidence(currency, statement, latest_rate, last_policy_decision_date=decision)
+            effective_pattern = r"new guideline.{0,50}?effective from\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})"
+            pending = None
+            latest_effective = re.search(effective_pattern, text, re.I)
+            if latest_effective:
+                effective = _policy_date(latest_effective[1])
+                if not effective or effective < decision:
+                    raise ValueError("BOJ_EFFECTIVE_DATE_INVALID")
+                cutoff = datetime.fromisoformat(effective).replace(tzinfo=ZoneInfo("Asia/Tokyo")).astimezone(timezone.utc)
+                if _policy_now() < cutoff:
+                    if abs(latest_rate - rate) < 1e-8:
+                        raise ValueError("BOJ_FUTURE_RATE_NOT_CURRENT")
+                    pending = dict(announced_rate=latest_rate, announced_effective_date=effective,
+                                   valid_until=cutoff.isoformat(), decision_source=statement,
+                                   deadline_basis="BOJ date-only effective date; conservative start of Tokyo day")
+            if abs(latest_rate - rate) > 1e-8 and pending is None:
+                raise ValueError("BOJ_CURRENT_RATE_CONFLICT")
             # Find the latest explicit rate-changing statement, not the latest hold.
-            change_links = []
-            for a in soup.find_all("a", href=True):
-                if "Change in the Guideline for Money Market Operations" in a.get_text(" ", strip=True) and "Reference" not in a.get_text():
-                    candidate = urljoin(index, a["href"])
-                    match = re.search(r"/k(\d{6})a\.pdf$", candidate)
-                    if match and _policy_date("20" + match[1]) <= decision:
-                        change_links.append(candidate)
-            if change_links:
-                change_url = max(change_links)
+            for change_url in _policy_boj_change_links(index, soup, decision):
                 change_text = text if change_url == statement else _policy_pdf_text(currency, change_url)
                 changed_rate = _policy_match_rate(change_text, [call_rate_pattern])
-                effective_match = re.search(r"new guideline.{0,50}?effective from\s+([A-Za-z]+\s+\d{1,2},?\s+20\d{2})", change_text, re.I)
-                if abs(changed_rate - rate) < 1e-8 and effective_match:
-                    primary["rate_effective_date"] = _policy_date(effective_match[1])
-                    primary["effective_date_source"] = change_url
+                effective_match = re.search(effective_pattern, change_text, re.I)
+                if not effective_match:
+                    raise ValueError("BOJ_CHANGE_EFFECTIVE_DATE_MISSING")
+                change_effective = _policy_date(effective_match[1])
+                change_cutoff = datetime.fromisoformat(change_effective).replace(tzinfo=ZoneInfo("Asia/Tokyo")).astimezone(timezone.utc)
+                if _policy_now() < change_cutoff:
+                    continue
+                if abs(changed_rate - rate) > 1e-8:
+                    raise ValueError("BOJ_CURRENT_EPISODE_CONFLICT")
+                primary["rate_effective_date"] = change_effective
+                primary["effective_date_source"] = change_url
+                if pending:
+                    # Re-read the still-effective decision as the second current
+                    # proof; the latest announcement is metadata, not today's rate.
+                    secondary = _policy_evidence(currency, change_url, changed_rate,
+                        last_policy_decision_date=decision, **pending)
+                break
+            if "rate_effective_date" not in primary:
+                raise ValueError("BOJ_CURRENT_EPISODE_NOT_FOUND")
             evidence.append(secondary)
         else:
             raise ValueError("UNSUPPORTED_CURRENCY")
@@ -521,7 +565,11 @@ def _policy_proofs_valid(obj, check_age=True):
                 return False
         effective = _policy_date(obj.get("rate_effective_date"))
         decision = _policy_date(obj.get("last_policy_decision_date"))
-        return bool(effective and decision and effective <= _policy_now().date().isoformat() and decision <= _policy_now().date().isoformat())
+        today = _policy_now().date().isoformat()
+        if currency == "JPY":
+            from zoneinfo import ZoneInfo
+            today = _policy_now().astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat()
+        return bool(effective and decision and effective <= today and decision <= today)
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
