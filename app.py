@@ -328,13 +328,59 @@ def _policy_ecb_pending(text, decision, table_soup, current, api_available):
             'valid_until': cutoff.isoformat(), 'deadline_basis': 'ECB date-only effective date; conservative start of Frankfurt day'}
 
 
-def _policy_boj_change_links(index, soup, decision):
+def _policy_boj_latest_decision():
+    """Use the preceding year only after an empty or confirmed-404 current index."""
+    import re
+    from requests import HTTPError
+    from urllib.parse import urljoin
+    from zoneinfo import ZoneInfo
+    today = _policy_now().astimezone(ZoneInfo("Asia/Tokyo")).date()
+    indexes = {}
+    for year in (today.year, today.year - 1):
+        index = f"https://www.boj.or.jp/en/mopo/mpmdeci/mpr_{year}/index.htm"
+        try:
+            soup = _policy_html("JPY", index)
+        except HTTPError as exc:
+            response = exc.response
+            if (year != today.year or response is None or response.status_code != 404
+                    or response.url != index):
+                raise
+            indexes[index] = None
+            continue
+        indexes[index] = soup
+        candidates = []
+        for anchor in soup.find_all("a", href=True):
+            url = urljoin(index, anchor["href"])
+            match = re.search(r"/k(\d{6})a\.pdf$", url)
+            if not match or not _policy_url_allowed("JPY", url):
+                continue
+            date = _policy_date("20" + match[1])
+            if not date or not date.startswith(str(year)):
+                raise ValueError("BOJ_DECISION_INDEX_DATE_CONFLICT")
+            if date <= today.isoformat():
+                candidates.append((date, url))
+        if candidates:
+            decision, statement = max(candidates)
+            return index, soup, decision, statement, indexes
+        heading = soup.find("h1")
+        if heading is None or heading.get_text(" ", strip=True) != f"Monetary Policy Releases {year}":
+            raise ValueError("BOJ_DECISION_INDEX_UNRECOGNIZED")
+    raise ValueError("OFFICIAL_DECISION_NOT_FOUND")
+
+
+def _policy_boj_change_links(index, soup, decision, indexes=None):
     """Search at most three official year indexes, only as far as needed."""
     import re
     from urllib.parse import urljoin
-    for year in range(_policy_now().year, _policy_now().year - 3, -1):
+    from zoneinfo import ZoneInfo
+    current_year = _policy_now().astimezone(ZoneInfo("Asia/Tokyo")).year
+    indexes = dict(indexes or {})
+    indexes[index] = soup
+    for year in range(current_year, current_year - 3, -1):
         year_index = f"https://www.boj.or.jp/en/mopo/mpmdeci/mpr_{year}/index.htm"
-        year_soup = soup if year_index == index else _policy_html("JPY", year_index)
+        year_soup = indexes[year_index] if year_index in indexes else _policy_html("JPY", year_index)
+        if year_soup is None:  # Current-year 404 already verified by decision discovery.
+            continue
         links = set()
         for a in year_soup.find_all("a", href=True):
             if "Change in the Guideline for Money Market Operations" not in a.get_text(" ", strip=True) or "Reference" in a.get_text():
@@ -480,9 +526,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             rate = _policy_match_rate(text, [r"4\. Interest Rate\s+The interest rate shall be\s+" + number + r"\s+percent"])
             primary = _policy_evidence(currency, url, rate)
             evidence.append(primary)
-            index = f"https://www.boj.or.jp/en/mopo/mpmdeci/mpr_{_policy_now().year}/index.htm"
-            soup = _policy_html(currency, index)
-            decision, statement = _policy_latest_link(currency, index, soup, r"/k(\d{6})a\.pdf$")
+            index, soup, decision, statement, indexes = _policy_boj_latest_decision()
             text = _policy_pdf_text(currency, statement)
             call_rate_pattern = r"uncollateralized\s+o\s*vernight\s+call\s+rate.{0,70}?around\s+" + number + r"\s+percent"
             latest_rate = _policy_match_rate(text, [call_rate_pattern])
@@ -504,7 +548,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             if abs(latest_rate - rate) > 1e-8 and pending is None:
                 raise ValueError("BOJ_CURRENT_RATE_CONFLICT")
             # Find the latest explicit rate-changing statement, not the latest hold.
-            for change_url in _policy_boj_change_links(index, soup, decision):
+            for change_url in _policy_boj_change_links(index, soup, decision, indexes):
                 change_text = text if change_url == statement else _policy_pdf_text(currency, change_url)
                 changed_rate = _policy_match_rate(change_text, [call_rate_pattern])
                 effective_match = re.search(effective_pattern, change_text, re.I)
