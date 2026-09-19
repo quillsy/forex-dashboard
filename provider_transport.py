@@ -11,6 +11,35 @@ from urllib.parse import urlparse
 import requests as http
 
 
+COMPROMISED_PROVIDER_HOSTS = frozenset({
+    "fcsapi.com", "alphavantage.co", "benzinga.com",
+    "financialmodelingprep.com", "stockdata.org",
+})
+_CREDENTIAL_HOSTS = {
+    **dict.fromkeys(("ALPHA_VANTAGE_API_KEY", "AV_API_KEY", "AV_KEY"), "www.alphavantage.co"),
+    **dict.fromkeys(("BENZINGA_API_KEY", "BENZINGA_KEY"), "api.benzinga.com"),
+    **dict.fromkeys(("FCS_API_KEY", "FCS_KEY"), "api-v4.fcsapi.com"),
+    **dict.fromkeys(("FMP_API_KEY", "FMP_KEY"), "financialmodelingprep.com"),
+    **dict.fromkeys(("STOCKDATA_API_KEY", "STOCKDATA_KEY", "STOCKDATA_TOKEN",
+                     "STOCK_DATA_API_KEY", "STOCKDATA_API_TOKEN", "STOCK_DATA_KEY"), "api.stockdata.org"),
+}
+
+
+def credential_rotation_required(host):
+    """Operator acknowledgement is configuration, not proof of provider revocation."""
+    host = host.strip().lower()
+    root = next((root for root in COMPROMISED_PROVIDER_HOSTS
+                 if host == root or host.endswith("." + root)), None)
+    rotated = {item.strip().lower() for item in
+               os.environ.get("FX_ROTATED_PROVIDER_HOSTS", "").split(",")}
+    return bool(root and host not in rotated and root not in rotated)
+
+
+def credential_key_blocked(name):
+    host = _CREDENTIAL_HOSTS.get(name.upper())
+    return bool(host and credential_rotation_required(host))
+
+
 class CollectorTransport:
     RequestException = http.RequestException
     exceptions = http.exceptions
@@ -70,11 +99,7 @@ class CollectorTransport:
         host = urlparse(url).hostname or "unknown"
         if (host == "rbnz.govt.nz" or host.endswith(".rbnz.govt.nz")) and os.environ.get("FX_RBNZ_AUTOMATION_APPROVED") != "1":
             raise http.RequestException("PROVIDER_AUTOMATION_PERMISSION_REQUIRED")
-        compromised = {"fcsapi.com", "alphavantage.co", "benzinga.com",
-                       "financialmodelingprep.com", "stockdata.org"}
-        rotated = set(os.environ.get("FX_ROTATED_PROVIDER_HOSTS", "").split(","))
-        compromised_root = next((root for root in compromised if host == root or host.endswith("." + root)), None)
-        if compromised_root and host not in rotated and compromised_root not in rotated:
+        if credential_rotation_required(host):
             raise http.RequestException("CREDENTIAL_ROTATION_REQUIRED")
         # No raw URLs, parameters, tokens, response bodies or credential hashes
         # are exported. Hashes exist only within this process for deduplication.

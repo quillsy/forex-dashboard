@@ -12,6 +12,50 @@ import run_data_collection as collector
 import live_data
 
 class FallbackTests(unittest.TestCase):
+    def resolver(self, secrets=None):
+        import ast
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name in {'load_api_key', 'fcs_credential_status'}]
+        st = Mock(); st.secrets = secrets or {}
+        ns = {'os': os, 'st': st, 'FCS_KEY': 'test-only'}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<keys>', 'exec'), ns)
+        return ns
+
+    def test_unrotated_ui_credentials_block_env_and_streamlit_aliases(self):
+        from provider_transport import _CREDENTIAL_HOSTS
+        for alias in _CREDENTIAL_HOSTS:
+            for streamlit in (False, True):
+                with self.subTest(alias=alias, streamlit=streamlit), patch.dict(os.environ, {}, clear=True):
+                    ns = self.resolver({alias.lower(): 'test-only'} if streamlit else {})
+                    if not streamlit:
+                        os.environ[alias] = 'test-only'
+                    self.assertIsNone(ns['load_api_key'](alias))
+                    self.assertIsNone(ns['load_api_key']('ALTERNATE', [alias]))
+
+    def test_rotation_ack_is_normalized_and_does_not_unlock_other_providers(self):
+        with patch.dict(os.environ, {'FX_ROTATED_PROVIDER_HOSTS': ' API-V4.FCSAPI.COM , ',
+                                    'FCS_API_KEY': 'test-only', 'AV_API_KEY': 'blocked'}, clear=True):
+            ns = self.resolver()
+            self.assertEqual(ns['load_api_key']('FCS_API_KEY'), 'test-only')
+            self.assertIsNone(ns['load_api_key']('ALPHA_VANTAGE_API_KEY', ['AV_API_KEY']))
+            self.assertEqual(ns['fcs_credential_status'](), 'Schlüssel vorhanden (Verbindung ungeprüft)')
+        with patch.dict(os.environ, {'FX_ROTATED_PROVIDER_HOSTS': ' STOCKDATA.ORG '}, clear=True):
+            ns = self.resolver({'stockdata_token': 'test-only'})
+            self.assertEqual(ns['load_api_key']('STOCKDATA_API_KEY', ['STOCKDATA_TOKEN']), 'test-only')
+
+    def test_rotation_guard_preserves_unrelated_keys_and_fallback_allowlist(self):
+        with patch.dict(os.environ, {}, clear=True):
+            ns = self.resolver({'fred_api_key': 'test-fred', 'estat_app_id': 'test-estat'})
+            self.assertEqual(ns['load_api_key']('FRED_API_KEY'), 'test-fred')
+            self.assertEqual(ns['load_api_key']('ESTAT_APP_ID'), 'test-estat')
+            self.assertIn('Gesperrt', ns['fcs_credential_status']())
+        with patch.dict(os.environ, {'FX_FALLBACK_MODE': '1', 'FX_ROTATED_PROVIDER_HOSTS': 'fcsapi.com',
+                                    'FCS_API_KEY': 'test-only', 'FRED_API_KEY': 'test-fred'}, clear=True):
+            ns = self.resolver()
+            self.assertIsNone(ns['load_api_key']('FCS_API_KEY'))
+            self.assertEqual(ns['load_api_key']('FRED_API_KEY'), 'test-fred')
+
     def test_seed_preserves_local_counts_and_longest_cooldown(self):
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/'remote.json';destination=Path(tmp)/'local.json'
