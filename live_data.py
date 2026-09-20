@@ -462,7 +462,10 @@ def render_status(st, authorized=False):
             except (OSError, ValueError):
                 status = {}
             providers = status.get("providers", {})
-            st.dataframe([{"Anbieter": host, "Status": item.get("status"),
+            st.dataframe([{"Anbieter": host, "Letzter Abrufstatus": item.get("status"),
+                           "Ergebnisse im letzten Lauf": json.dumps(item.get("outcomes_this_run", {}), sort_keys=True),
+                           "Letzter Versuch": item.get("last_attempt_at") or "Unbekannt",
+                           "Fehlerzeit im letzten Lauf": item.get("last_failure_at") or "Keiner dokumentiert",
                            "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
                            "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
                            "Anfragen im letzten Lauf": item.get("requests_this_run"),

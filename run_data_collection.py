@@ -254,7 +254,7 @@ def main():
                 usage["counted_day_utc"] = day
             providers = {}
             for host, old in old_providers.items():
-                providers[host] = dict(old, requests_this_run=0, status="NOT_REQUESTED",
+                providers[host] = dict(old, requests_this_run=0, outcomes_this_run={}, last_failure_at=None, status="NOT_REQUESTED",
                     requests_observed_utc_day=old.get("requests_observed_utc_day", 0) if old.get("counted_day_utc") == day else 0,
                     counted_day_utc=day)
             providers.update(app.requests.usage)
