@@ -10,6 +10,45 @@ from provider_transport import CollectorTransport
 
 
 class ProviderRetryTests(unittest.TestCase):
+    def test_ons_fallback_through_actual_collector_transport(self):
+        from official_ons import fetch_ons_gdp, PN2_FALLBACK_URL
+        from test_official_ons import fixture, NOW
+        for failure in (requests.exceptions.Timeout('private-key'), requests.exceptions.SSLError('private-key')):
+            with self.subTest(failure=type(failure)):
+                responses = []
+                for family in ('PN2', 'QNA'):
+                    response = requests.Response()
+                    response.status_code = 200
+                    response._content = json.dumps(fixture(family)).encode()
+                    responses.append(response)
+                self.client.get.reset_mock()
+                self.client.get.side_effect = [failure, *responses]
+                transport = self.transport()
+                if isinstance(failure, requests.exceptions.SSLError):
+                    with self.assertRaises(requests.RequestException):
+                        fetch_ons_gdp(now=NOW, session=transport)
+                    self.assertEqual(self.client.get.call_count, 1)
+                else:
+                    result = fetch_ons_gdp(now=NOW, session=transport)
+                    self.assertEqual(result['source_url'], PN2_FALLBACK_URL)
+                    self.assertEqual(self.client.get.call_count, 3)
+                    self.assertEqual(result['value'], 1.2)
+
+    def test_transient_categories_sanitized_but_tls_not_fallback_eligible(self):
+        for source, expected in [(requests.exceptions.Timeout, requests.exceptions.Timeout),
+                                 (requests.exceptions.ConnectionError, requests.exceptions.ConnectionError),
+                                 (requests.exceptions.SSLError, requests.RequestException)]:
+            with self.subTest(source=source):
+                self.client.get.side_effect = source('private-url-key')
+                transport = self.transport()
+                with self.assertRaises(expected) as caught:
+                    transport.get('https://official.example/data')
+                self.assertIs(type(caught.exception), expected)
+                self.assertEqual(str(caught.exception), 'PROVIDER_REQUEST_FAILED')
+                self.assertIsNone(caught.exception.request)
+                self.assertIsNone(caught.exception.response)
+                self.assertNotIn('private', json.dumps(transport.usage))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 BASE = "https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/"
+PN2_FALLBACK_URL = "https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2"
 TITLE = "Gross Domestic Product: q-on-q4 growth rate CVM SA %"
 
 
@@ -82,15 +83,36 @@ def fetch_ons_gdp(*, now=None, session=None):
 
     A stale family cannot prove latest availability while the other is down.
     Same-quarter newer releases are legitimate revisions; conflicting values
-    with the same release date reject the observation.
+    with the same release date reject the observation. Only PN2 transport
+    outages may use its official API route once, with the same timeout. Parsing
+    and publication dates stay unchanged; no alternate QNA route is approved.
     """
     checked = _now(now)
     results = []
     for dataset in ("PN2", "QNA"):
-        response = (session or requests).get(BASE + dataset.lower() + "/data", timeout=20)
-        response.raise_for_status()
+        client = session or requests
+        used_fallback = False
+        try:
+            response = client.get(BASE + dataset.lower() + "/data", timeout=20)
+            response.raise_for_status()
+        except requests.exceptions.SSLError:
+            raise
+        except (requests.Timeout, requests.ConnectionError):
+            if dataset != "PN2":
+                raise
+            used_fallback = True
+            response = client.get(PN2_FALLBACK_URL, timeout=20)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            if dataset != "PN2" or exc.response is None or exc.response.status_code not in (500, 502, 504):
+                raise
+            used_fallback = True
+            response = client.get(PN2_FALLBACK_URL, timeout=20)
+            response.raise_for_status()
         observation = parse_ons_gdp(response.json(), dataset, now=checked)
         if observation:
+            if used_fallback:
+                observation["source_url"] = PN2_FALLBACK_URL
             results.append(observation)
     if not results:
         return None

@@ -13,6 +13,12 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_ons_gdp_provenance_exact_allowlist(self):
+        url = 'https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2'
+        self.assertEqual(live.public_observation({'source_url': url})['source_url'], url)
+        for bad in (url + '&api_key=private', url.replace('ihyr', 'ihyp'), url.replace('pn2', 'qna'), url.replace('https:', 'http:')):
+            self.assertNotIn('source_url', live.public_observation({'source_url': bad}))
+
     def record(self):
         return live.build_record('GDP', 20, {'value': 1.8, 'date': '2026-06-30', 'source': 'Eurostat', 'frequency': 'quarterly'}, 'FRESH', NOW.isoformat())
 

@@ -175,6 +175,9 @@ def public_observation(observation):
             continue
         if key == "source_url":
             official_links = {
+                "https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/pn2",
+                "https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/qna",
+                "https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2",
                 "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/namq_10_gdp",
                 "https://apps.bea.gov/national/Release/XLS/Survey/Section1All_xls.xlsx",
                 "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve",
