@@ -129,8 +129,16 @@ class CollectorTransport:
         self.responses[identity] = None
         try:
             response = getattr(self.client, method)(url, **kwargs)
-        except http.RequestException:
+        except http.RequestException as error:
             usage["status"] = "NETWORK_ERROR"
+            # Preserve only safe transient categories for a bounded same-series
+            # alternate transport. Never carry request/response objects or URLs.
+            if isinstance(error, http.exceptions.SSLError):
+                raise http.RequestException("PROVIDER_REQUEST_FAILED") from None
+            if isinstance(error, http.exceptions.Timeout):
+                raise http.exceptions.Timeout("PROVIDER_REQUEST_FAILED") from None
+            if isinstance(error, http.exceptions.ConnectionError):
+                raise http.exceptions.ConnectionError("PROVIDER_REQUEST_FAILED") from None
             raise http.RequestException("PROVIDER_REQUEST_FAILED") from None
         usage["last_checked_at"] = self.clock().isoformat()
         usage["status"] = "SUCCESS" if 200 <= response.status_code < 300 else "HTTP_" + str(response.status_code)
