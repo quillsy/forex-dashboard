@@ -49,6 +49,35 @@ class ProviderRetryTests(unittest.TestCase):
                 self.assertIsNone(caught.exception.response)
                 self.assertNotIn('private', json.dumps(transport.usage))
 
+    def test_success_does_not_erase_prior_failure_and_dedup_does_not_count(self):
+        ok = requests.Response(); ok.status_code = 200; ok._content = b'{}'
+        self.client.get.side_effect = [requests.exceptions.Timeout('private-key'), ok]
+        transport = self.transport()
+        with self.assertRaises(requests.exceptions.Timeout):
+            transport.get('https://official.example/cpi?key=private-key')
+        failed_at = self.now.isoformat()
+        self.now += timedelta(seconds=5)
+        transport.get('https://official.example/labour')
+        transport.get('https://official.example/labour')
+        usage = transport.usage['official.example']
+        self.assertEqual(usage['status'], 'SUCCESS')
+        self.assertEqual(usage['outcomes_this_run'], {'TIMEOUT': 1, 'SUCCESS': 1})
+        self.assertEqual(usage['requests_this_run'], 2)
+        self.assertEqual(usage['last_failure_at'], failed_at)
+        self.assertEqual(usage['last_attempt_at'], self.now.isoformat())
+        self.assertNotIn('private', json.dumps(usage))
+
+    def test_outcome_counts_reset_on_restart_and_cooldown_does_not_count(self):
+        self.response(429, '7200'); first = self.transport()
+        first.get('https://official.example/data')
+        self.assertEqual(first.usage['official.example']['outcomes_this_run'], {'HTTP_429': 1})
+        self.path.write_text(json.dumps({'providers': first.usage}))
+        second = self.transport()
+        with self.assertRaises(requests.RequestException):
+            second.get('https://official.example/data')
+        self.assertEqual(second.usage['official.example']['outcomes_this_run'], {})
+        self.assertNotIn('last_attempt_at', second.usage['official.example'])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

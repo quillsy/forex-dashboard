@@ -87,6 +87,13 @@ class CollectorTransport:
         except (ValueError, TypeError, OverflowError):
             return None
 
+    def _record_outcome(self, usage, category):
+        # Fixed categories only; never exception messages, URLs or payloads.
+        outcomes = usage["outcomes_this_run"]
+        outcomes[category] = outcomes.get(category, 0) + 1
+        if category != "SUCCESS":
+            usage["last_failure_at"] = self.clock().isoformat()
+
     def get(self, url, **kwargs):
         return self.request("get", url, **kwargs)
 
@@ -111,7 +118,7 @@ class CollectorTransport:
             return result
         usage = self.usage.setdefault(host, {"requests_this_run": 0, "status": "NOT_CHECKED",
                                            "remaining": None, "limit": None, "reset_at": None,
-                                           "budget_evidence": "unknown"})
+                                           "budget_evidence": "unknown", "outcomes_this_run": {}})
         deadline = self.retry_after.get(host)
         if deadline and deadline > self.clock():
             usage.update(status="PROVIDER_COOLDOWN", retry_after_at=deadline.isoformat())
@@ -126,11 +133,17 @@ class CollectorTransport:
             self.cooldown.add(host)
             raise http.RequestException("RUN_SAFETY_LIMIT")
         usage["requests_this_run"] += 1
+        usage["last_attempt_at"] = self.clock().isoformat()
         self.responses[identity] = None
         try:
             response = getattr(self.client, method)(url, **kwargs)
         except http.RequestException as error:
             usage["status"] = "NETWORK_ERROR"
+            category = ("TLS_ERROR" if isinstance(error, http.exceptions.SSLError) else
+                        "TIMEOUT" if isinstance(error, http.exceptions.Timeout) else
+                        "CONNECTION_ERROR" if isinstance(error, http.exceptions.ConnectionError) else
+                        "NETWORK_ERROR")
+            self._record_outcome(usage, category)
             # Preserve only safe transient categories for a bounded same-series
             # alternate transport. Never carry request/response objects or URLs.
             if isinstance(error, http.exceptions.SSLError):
@@ -142,6 +155,7 @@ class CollectorTransport:
             raise http.RequestException("PROVIDER_REQUEST_FAILED") from None
         usage["last_checked_at"] = self.clock().isoformat()
         usage["status"] = "SUCCESS" if 200 <= response.status_code < 300 else "HTTP_" + str(response.status_code)
+        self._record_outcome(usage, usage["status"])
         if response.status_code in (429, 503):
             deadline = self._parse_retry_after(response.headers.get("Retry-After"))
             if deadline:
