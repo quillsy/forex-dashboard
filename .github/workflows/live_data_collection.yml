@@ -29,7 +29,18 @@ on:
     # The preflight below still limits provider collection to roughly 30 minutes.
     - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
-    # Enable manual run trigger
+    inputs:
+      dispatch_mode:
+        description: 'Choose manual for an operator run; watchdog requires a validated UTC slot'
+        required: true
+        type: choice
+        options:
+          - manual
+          - watchdog
+      watchdog_slot_utc:
+        description: 'Optional UTC schedule slot for an independent watchdog (YYYY-MM-DDTHH:MM:SS.000Z)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -43,6 +54,8 @@ jobs:
   collect-data:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TZ: UTC
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,6 +67,8 @@ jobs:
         env:
           FX_WORKFLOW_EVENT: ${{ github.event_name }}
           FX_WORKFLOW_SCHEDULE: ${{ github.event.schedule }}
+          FX_DISPATCH_MODE: ${{ inputs.dispatch_mode }}
+          FX_WATCHDOG_SLOT: ${{ inputs.watchdog_slot_utc }}
         run: python collector_preflight.py
 
       - name: Set up Python
@@ -69,6 +84,25 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Persist daily attempt before provider requests
+        id: daily_reservation
+        if: steps.preflight.outputs.run_collector == 'true' && steps.preflight.outputs.collector_mode == 'daily'
+        run: |
+          python -B - <<'PY'
+          from datetime import datetime, timezone
+          from run_data_collection import update_daily_markers
+          update_daily_markers(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), {}, False)
+          PY
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add -- daily_collection_status.json
+          if git diff --cached --quiet; then
+            echo "No new durable daily attempt; refusing provider requests."
+            exit 1
+          fi
+          git commit -m "Reserve daily collector attempt [skip ci]"
+          git push
+
       - name: Run data collection script
         if: steps.preflight.outputs.run_collector == 'true'
         env:
@@ -80,28 +114,28 @@ jobs:
           STATS_NZ_API_KEY: ${{ secrets.STATS_NZ_API_KEY }}
           OCP_APIM_SUBSCRIPTION_KEY: ${{ secrets.OCP_APIM_SUBSCRIPTION_KEY }}
         run: |
-          if [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+          if [ "${{ steps.preflight.outputs.collector_mode }}" = "daily" ]; then
             python run_data_collection.py
           else
             python run_data_collection.py --live-only
           fi
 
       - name: Collect separate BIS research observation when due
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
         continue-on-error: true
         run: python collect_research.py
 
       - name: Collect separate EA21 research observation when due
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
         continue-on-error: true
         run: python collect_ec_industry.py
 
       - name: Commit and push changes
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          for file in live_signals.json live_core_data.json data_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json research_data/bis_nz_policy.json research_data/status.json research_data/ec_industry.json research_data/ec_industry_status.json research_data/bis_nz_policy_vintages.json research_data/ec_industry_vintages.json; do
+          for file in live_signals.json live_core_data.json data_collection_status.json daily_collection_status.json .eodhd_bonds_cache.json .eodhd_events_cache.json .eodhd_status.json .policy_rates_cache.json research_data/bis_nz_policy.json research_data/status.json research_data/ec_industry.json research_data/ec_industry_status.json research_data/bis_nz_policy_vintages.json research_data/ec_industry_vintages.json; do
             if [ -f "$file" ]; then git add -- "$file"; fi
           done
           if ! git diff --cached --quiet; then

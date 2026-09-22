@@ -2,12 +2,17 @@
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 MIN_INTERVAL = timedelta(minutes=30)
 DAILY_SCHEDULE = "0 22 * * *"
+HOURLY_MINUTES = {7, 17, 27, 37, 47, 57}
+WATCHDOG_GRACE = timedelta(minutes=10)
+MAX_WATCHDOG_HOURLY_DELAY = timedelta(minutes=90)
+MAX_WATCHDOG_DAILY_DELAY = timedelta(minutes=90)
 
 
 def _timestamp(path, field):
@@ -20,25 +25,98 @@ def _timestamp(path, field):
         return None
 
 
-def should_collect(event, schedule, root=Path("."), now=None):
-    """Manual/push and daily runs always proceed; other cron runs respect cooldown."""
-    if event != "schedule" or schedule == DAILY_SCHEDULE:
-        return True
-    now = now or datetime.now(timezone.utc)
+def _recent_attempt(root, now):
     timestamps = [
         _timestamp(root / "live_core_data.json", "completed_at"),
         _timestamp(root / "data_collection_status.json", "last_run_timestamp"),
     ]
     if any(value is not None and value > now for value in timestamps):
-        return True
+        return False
     latest = max((value for value in timestamps if value is not None), default=None)
-    return latest is None or now - latest >= MIN_INTERVAL
+    return latest is not None and now - latest < MIN_INTERVAL
+
+
+def _daily_slot(now):
+    slot = now.replace(hour=22, minute=0, second=0, microsecond=0)
+    return slot if slot <= now else slot - timedelta(days=1)
+
+
+def _daily_attempted(root, slot, now):
+    marker = root / "daily_collection_status.json"
+    attempt = _timestamp(marker, "last_daily_attempt_at")
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        expected = slot.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        if isinstance(payload, dict) and payload.get("last_daily_attempt_slot_utc") == expected:
+            return attempt is not None and slot <= attempt <= now
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    # A pre-marker daily run can still be recognized during rollout.
+    path = root / "data_collection_status.json"
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+        previous = _timestamp(path, "last_run_timestamp")
+        return status.get("mode") == "daily" and previous is not None and slot <= previous <= now
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
+def _watchdog_slot(raw, now):
+    if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z", raw):
+        return None
+    try:
+        slot = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    daily = slot.hour == 22 and slot.minute == 0
+    if not daily and slot.minute not in HOURLY_MINUTES:
+        return None
+    age = now - slot
+    max_delay = MAX_WATCHDOG_DAILY_DELAY if daily else MAX_WATCHDOG_HOURLY_DELAY
+    return (slot, daily) if WATCHDOG_GRACE <= age <= max_delay else None
+
+
+def preflight_decision(event, schedule, watchdog_slot="", root=Path("."), now=None,
+                       dispatch_mode=""):
+    """Return (run_collector, mode); invalid watchdog inputs fail closed."""
+    now = now or datetime.now(timezone.utc)
+    if event == "workflow_dispatch":
+        if dispatch_mode == "manual" and not watchdog_slot:
+            return True, "live"
+        if dispatch_mode != "watchdog" or not watchdog_slot:
+            return False, "live"
+        parsed = _watchdog_slot(watchdog_slot, now)
+        if parsed is None:
+            return False, "live"
+        slot, daily = parsed
+        if daily:
+            return not _daily_attempted(root, slot, now), "daily"
+        return not _recent_attempt(root, now), "live"
+    if event != "schedule":
+        return True, "live"
+    if schedule == DAILY_SCHEDULE:
+        slot = _daily_slot(now)
+        # Snapshots are dated by the runner's current UTC day. A much-delayed
+        # 22:00 event must not claim to have recorded the previous day.
+        if now - slot > MAX_WATCHDOG_DAILY_DELAY:
+            return not _recent_attempt(root, now), "live"
+        return not _daily_attempted(root, slot, now), "daily"
+    return not _recent_attempt(root, now), "live"
+
+
+def should_collect(event, schedule, root=Path("."), now=None, watchdog_slot="",
+                   dispatch_mode=""):
+    """Compatibility wrapper for the scheduled collector tests."""
+    return preflight_decision(event, schedule, watchdog_slot, root, now, dispatch_mode)[0]
 
 
 def main():
-    collect = should_collect(os.environ.get("FX_WORKFLOW_EVENT"),
-                             os.environ.get("FX_WORKFLOW_SCHEDULE"))
+    collect, mode = preflight_decision(os.environ.get("FX_WORKFLOW_EVENT"),
+                                       os.environ.get("FX_WORKFLOW_SCHEDULE"),
+                                       os.environ.get("FX_WATCHDOG_SLOT", ""),
+                                       dispatch_mode=os.environ.get("FX_DISPATCH_MODE", ""))
     output = "run_collector=" + ("true" if collect else "false") + "\n"
+    output += "collector_mode=" + mode + "\n"
     destination = os.environ.get("GITHUB_OUTPUT")
     if destination:
         with open(destination, "a", encoding="utf-8") as stream:

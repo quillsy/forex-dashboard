@@ -4,7 +4,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from collector_preflight import should_collect
+from collector_preflight import preflight_decision, should_collect
+from run_data_collection import update_daily_markers
 
 
 class CollectorPreflightTests(unittest.TestCase):
@@ -43,9 +44,80 @@ class CollectorPreflightTests(unittest.TestCase):
 
     def test_manual_push_and_daily_run_bypass_throttle(self):
         self.write_time("live_core_data.json", "completed_at", 1)
-        self.assertTrue(self.decision("workflow_dispatch"))
+        self.assertTrue(should_collect("workflow_dispatch", "", self.root, self.now,
+                                       dispatch_mode="manual"))
         self.assertTrue(self.decision("push"))
-        self.assertTrue(self.decision("schedule", "0 22 * * *"))
+        self.assertTrue(should_collect("schedule", "0 22 * * *", self.root,
+            datetime(2026, 9, 23, 22, 0, tzinfo=timezone.utc)))
+
+    def test_watchdog_hourly_slot_is_validated_and_respects_cooldown(self):
+        slot = "2026-09-23T11:47:00.000Z"
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, self.now, "watchdog"),
+                         (True, "live"))
+        self.write_time("data_collection_status.json", "last_run_timestamp", 8)
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, self.now, "watchdog"),
+                         (False, "live"))
+        for bad in ("2026-09-23T11:50:00.000Z", "2026-09-23T12:17:00.000Z",
+                    "2026-09-23T10:17:00.000Z", "2026-09-23T11:47:00Z", "invalid"):
+            with self.subTest(slot=bad):
+                self.assertEqual(preflight_decision("workflow_dispatch", "", bad, self.root, self.now, "watchdog"),
+                                 (False, "live"))
+        self.assertEqual(preflight_decision("workflow_dispatch", "", "", self.root, self.now,
+                                            "watchdog"), (False, "live"))
+        self.assertEqual(preflight_decision("workflow_dispatch", "", "", self.root, self.now),
+                         (False, "live"))
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, self.now,
+                                            "manual"), (False, "live"))
+
+    def test_daily_watchdog_not_covered_by_nearby_live_run(self):
+        now = datetime(2026, 9, 23, 22, 15, tzinfo=timezone.utc)
+        slot = "2026-09-23T22:00:00.000Z"
+        (self.root / "data_collection_status.json").write_text(json.dumps({
+            "last_run_timestamp": "2026-09-23T22:07:00Z", "mode": "live"}))
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, now, "watchdog"),
+                         (True, "daily"))
+        update_daily_markers("2026-09-23T22:13:00Z", {
+            "live_core": {"status": "PARTIAL"},
+            "snapshots": {"status": "SUCCESS"}, "outcomes": {"status": "SUCCESS"}},
+            False, self.root / "daily_collection_status.json", "2026-09-23T22:14:00Z")
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, now, "watchdog"),
+                         (False, "daily"))
+        self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root, now),
+                         (False, "daily"))
+
+    def test_failed_daily_attempt_is_not_success_but_prevents_duplicate(self):
+        marker = self.root / "daily_collection_status.json"
+        update_daily_markers("2026-09-23T22:12:00Z", {
+            "live_core": {"status": "PARTIAL"},
+            "snapshots": {"status": "FAILED"}, "outcomes": {"status": "SUCCESS"}}, False, marker)
+        state = json.loads(marker.read_text())
+        self.assertEqual(state["last_daily_attempt_slot_utc"], "2026-09-23T22:00:00.000Z")
+        self.assertIsNone(state["last_daily_completed_at"])
+        now = datetime(2026, 9, 23, 22, 15, tzinfo=timezone.utc)
+        self.assertEqual(preflight_decision("workflow_dispatch", "",
+            "2026-09-23T22:00:00.000Z", self.root, now, "watchdog"), (False, "daily"))
+        update_daily_markers("2026-09-23T22:16:00Z", {}, True, marker)
+        self.assertEqual(json.loads(marker.read_text()), state)
+        update_daily_markers("2026-09-23T22:18:00Z", {
+            "live_core": {"status": "FAILED"},
+            "snapshots": {"status": "SUCCESS"}, "outcomes": {"status": "SUCCESS"}},
+            False, marker)
+        self.assertIsNone(json.loads(marker.read_text())["last_daily_completed_at"])
+
+    def test_future_daily_attempt_does_not_suppress_recovery(self):
+        marker = self.root / "daily_collection_status.json"
+        update_daily_markers("2026-09-23T22:20:00Z", {}, False, marker)
+        now = datetime(2026, 9, 23, 22, 15, tzinfo=timezone.utc)
+        self.assertEqual(preflight_decision("workflow_dispatch", "",
+            "2026-09-23T22:00:00.000Z", self.root, now, "watchdog"), (True, "daily"))
+
+    def test_late_daily_run_cannot_label_next_calendar_day(self):
+        next_day = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(preflight_decision("workflow_dispatch", "",
+            "2026-09-23T22:00:00.000Z", self.root, next_day, "watchdog"),
+                         (False, "live"))
+        self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root, next_day),
+                         (True, "live"))
 
 
 if __name__ == "__main__":
