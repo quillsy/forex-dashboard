@@ -389,10 +389,12 @@ def collect(app, path=PATH):
 def render_status(st, authorized=False):
     data = load()
     checked = timestamp(data.get("completed_at"))
+    now = now_utc()
+    completed = checked is not None and checked <= now
     st.caption("LIVE-ANALYSE · G8 · Fundamentaler Horizont: 1–2 Wochen")
-    if checked is None or checked > now_utc():
+    if not completed:
         st.error("Noch kein geprüfter Live-Datensatz vorhanden. Paar-Signale sind gesperrt.")
-    elif now_utc() - checked >= timedelta(hours=1):
+    elif now - checked >= timedelta(hours=1):
         st.warning("Der letzte abgeschlossene Abruf liegt über eine Stunde zurück. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
     else:
         st.info("Zentraler Datenabruf: " + checked.strftime("%d.%m.%Y %H:%M UTC") + " · Ziel: neue Veröffentlichungen binnen einer Stunde berücksichtigen.")
@@ -403,7 +405,9 @@ def render_status(st, authorized=False):
         for factor in FACTORS:
             record = data.get("currencies", {}).get(currency, {}).get(factor, {})
             record = record if isinstance(record, dict) else {}
-            valid, reason = eligible(record, factor=factor, currency=currency)
+            valid, reason = eligible(record, now, factor=factor, currency=currency)
+            if not completed and valid:
+                valid, reason = False, "Kein abgeschlossener Live-Datensatz"
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
