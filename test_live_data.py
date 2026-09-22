@@ -249,6 +249,9 @@ class LiveDataTests(unittest.TestCase):
         st=MagicMock()
         with patch.object(live,'load',return_value={'currencies':{'CHF':{'Inflation':record}}}), patch.object(live,'now_utc',return_value=NOW):
             live.render_status(st)
+        overview=next(r for r in st.dataframe.call_args_list[0].args[0] if r['Währung']=='CHF')
+        self.assertEqual(overview['Faktoren'],'1/5')
+        self.assertEqual(overview['Gewichtete CORE-Abdeckung'],'20%')
         row=next(r for r in st.dataframe.call_args_list[1].args[0] if r['Währung']=='CHF' and r['Faktor']=='Inflation')
         self.assertEqual(row['Veröffentlichungsstatus'],'Amtlich vorläufig')
         self.assertEqual(row['Datensatz'],record['observation']['source_title'])
@@ -271,6 +274,14 @@ class LiveDataTests(unittest.TestCase):
         block_rows = st.dataframe.call_args_list[2].args[0]
         eur = next(item for item in block_rows if item['Währung'] == 'EUR')
         self.assertIn('PMI: PMI licence unresolved', eur['Sperrgründe'])
+        row['reason'] = 'PMI: Anbieterfreigabe fehlt'
+        st = MagicMock()
+        with patch.object(live, 'load', return_value={'currencies': {'EUR': {'PMI': row}}}):
+            live.render_status(st)
+        block_rows = st.dataframe.call_args_list[2].args[0]
+        eur = next(item for item in block_rows if item['Währung'] == 'EUR')
+        self.assertIn('PMI: Anbieterfreigabe fehlt', eur['Sperrgründe'])
+        self.assertNotIn('PMI: PMI:', eur['Sperrgründe'])
 
     def test_read_checks_expected_factor_and_completed_run(self):
         row = self.record()

@@ -396,7 +396,8 @@ def render_status(st, authorized=False):
         st.warning("Der letzte abgeschlossene Abruf liegt über eine Stunde zurück. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
     else:
         st.info("Zentraler Datenabruf: " + checked.strftime("%d.%m.%Y %H:%M UTC") + " · Ziel: neue Veröffentlichungen binnen einer Stunde berücksichtigen.")
-    st.caption("Abdeckung misst verfügbare geprüfte Faktoren, keine Trefferwahrscheinlichkeit. Kontext und historische Detailansichten können unvollständig sein; der Live-Datenstatus unten ist maßgeblich.")
+    weights = "/".join(str(weight) for weight in FACTORS.values())
+    st.caption(f"Die Gesamtzahl zählt geprüfte Faktoren; die CORE-Abdeckung je Währung summiert deren Modellgewichte ({weights}). Beides ist keine Trefferwahrscheinlichkeit. Kontext und historische Detailansichten können unvollständig sein; der Live-Datenstatus unten ist maßgeblich.")
     rows = []
     for currency in CURRENCIES:
         for factor in FACTORS:
@@ -427,7 +428,9 @@ def render_status(st, authorized=False):
     labels = {"Geldpolitik": "2J-Rendite (%)", "Inflation": "Inflation (% zum Vorjahr)",
               "Arbeitsmarkt": "Arbeitslosenquote (%)", "PMI": "PMI (Index)", "GDP": "Reales GDP (% zum Vorjahr)"}
     for currency in CURRENCIES:
-        item = {"Währung": currency}
+        valid_rows = [row for row in rows if row["Währung"] == currency and row["Status"] == "Verfügbar"]
+        item = {"Währung": currency, "Faktoren": f"{len(valid_rows)}/{len(FACTORS)}",
+                "Gewichtete CORE-Abdeckung": f"{sum(FACTORS[row['Faktor']] for row in valid_rows)}%"}
         for factor, label in labels.items():
             row = next(row for row in rows if row["Währung"] == currency and row["Faktor"] == factor)
             value = number(row["Wert"])
@@ -447,8 +450,13 @@ def render_status(st, authorized=False):
     with st.expander("Sperrgründe je Währung", expanded=True):
         blocked = []
         for currency in CURRENCIES:
-            reasons = [f"{row['Faktor']}: {row['Grund']}" for row in rows
-                       if row['Währung'] == currency and row['Status'] == 'Gesperrt']
+            reasons = []
+            for row in rows:
+                if row["Währung"] != currency or row["Status"] != "Gesperrt":
+                    continue
+                prefix = f"{row['Faktor']}:"
+                reason = str(row["Grund"]).strip()
+                reasons.append(reason if reason.startswith(prefix) else f"{prefix} {reason}")
             if reasons:
                 blocked.append({"Währung": currency, "Sperrgründe": "; ".join(reasons)})
         if blocked:
