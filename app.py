@@ -9,6 +9,7 @@ from provider_transport import transport as requests
 import live_data
 from pathlib import Path
 from research_panel import render_research_panel, render_archive_summary
+from niche_context_panel import render_niche_context
 from ec_industry_research import render_ec_industry
 from datetime import datetime, timedelta
 import plotly.express as px
@@ -8245,6 +8246,7 @@ if not getattr(st, "_mock_mode", False):
             render_archive_summary(st, Path(__file__).resolve().parent / "research_data", "bis_nz_policy")
             render_ec_industry(st, Path(__file__).resolve().parent / "research_data" / "ec_industry.json")
             render_archive_summary(st, Path(__file__).resolve().parent / "research_data", "ec_industry")
+            render_niche_context(st, Path(__file__).resolve().parent / "research_data")
             st.info("Nicht verfügbar: Historische Score-Rekonstruktion und eine Prüfung der zum damaligen Zeitpunkt verfügbaren Daten sind noch nicht implementiert.")
 
         with lab4:

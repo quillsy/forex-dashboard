@@ -1,0 +1,7 @@
+# Niche context research cache
+
+`niche_ecb_est.csv` is the unmodified ECB CSV response for `EST.B.EU000A2X2A25.NB` and `.TT` (latest 45 observations per series). Source: ECB statistics. [Series](https://data.ecb.europa.eu/data/datasets/EST) · [reuse policy](https://www.ecb.europa.eu/stats/ecb_statistics/governance_and_quality_framework/html/usage_policy.ga.html). The CSV is not an ECB endorsement of this dashboard. The companion `niche_context.json` records the fetch time, source hash, source metadata, and context-only display selection.
+
+The Statistics Canada data in `niche_context.json` are adapted from *International merchandise trade by province, commodity, and Principal Trading Partners*, table 12-10-0175-01, vector 1567083339, with the reference date and required attribution in each artifact. This does not constitute an endorsement by Statistics Canada of this product. [Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence).
+
+`niche_context_vintages.json` records prospective fetches as losslessly compressed, size-bounded snapshots after this collector begins; it does not reconstruct historical first-release dates. `niche_context_status.json` anchors the journal and records the last attempt. The journal still grows over time and should be monitored before archival rotation is needed. The separate research display hides values when a collection failed, files disagree, or the cache is old. These files do not affect CORE eligibility or signals.
