@@ -247,12 +247,33 @@ class LiveDataTests(unittest.TestCase):
             'source_url':'https://dam-api.bfs.admin.ch/hub/api/dam/assets/36835033/master'},
             'FRESH',NOW.isoformat())
         st=MagicMock()
-        with patch.object(live,'load',return_value={'currencies':{'CHF':{'Inflation':record}}}), patch.object(live,'now_utc',return_value=NOW):
+        with patch.object(live,'load',return_value={'completed_at':NOW.isoformat(),'currencies':{'CHF':{'Inflation':record}}}), patch.object(live,'now_utc',return_value=NOW):
             live.render_status(st)
+        overview=next(r for r in st.dataframe.call_args_list[0].args[0] if r['Währung']=='CHF')
+        self.assertEqual(overview['Faktoren'],'1/5')
+        self.assertEqual(overview['Gewichtete CORE-Abdeckung'],'20%')
         row=next(r for r in st.dataframe.call_args_list[1].args[0] if r['Währung']=='CHF' and r['Faktor']=='Inflation')
         self.assertEqual(row['Veröffentlichungsstatus'],'Amtlich vorläufig')
         self.assertEqual(row['Datensatz'],record['observation']['source_title'])
         self.assertIn('dam-api.bfs.admin.ch',row['Quellenlink'])
+
+    def test_no_completed_live_run_hides_individually_valid_observations(self):
+        record=live.build_record('Inflation',20,{'value':0.9,'date':'2026-08-31'},'FRESH',NOW.isoformat())
+        for completed_at in (None,(NOW+timedelta(minutes=1)).isoformat()):
+            with self.subTest(completed_at=completed_at):
+                data={'completed_at':completed_at,'currencies':{'CHF':{'Inflation':record}}}
+                self.assertTrue(live.eligible(record,NOW,factor='Inflation',currency='CHF')[0])
+                self.assertFalse(live.details('CHF',NOW,data)['_live_checked'])
+                st=MagicMock()
+                with patch.object(live,'load',return_value=data),patch.object(live,'now_utc',return_value=NOW):
+                    live.render_status(st)
+                overview=next(r for r in st.dataframe.call_args_list[0].args[0] if r['Währung']=='CHF')
+                self.assertEqual(overview['Faktoren'],'0/5')
+                self.assertEqual(overview['Gewichtete CORE-Abdeckung'],'0%')
+                self.assertEqual(overview['Inflation (% zum Vorjahr)'],'—')
+                row=next(r for r in st.dataframe.call_args_list[1].args[0] if r['Währung']=='CHF' and r['Faktor']=='Inflation')
+                self.assertEqual(row['Status'],'Gesperrt')
+                self.assertEqual(row['Grund'],'Kein abgeschlossener Live-Datensatz')
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
@@ -271,6 +292,14 @@ class LiveDataTests(unittest.TestCase):
         block_rows = st.dataframe.call_args_list[2].args[0]
         eur = next(item for item in block_rows if item['Währung'] == 'EUR')
         self.assertIn('PMI: PMI licence unresolved', eur['Sperrgründe'])
+        row['reason'] = 'PMI: Anbieterfreigabe fehlt'
+        st = MagicMock()
+        with patch.object(live, 'load', return_value={'currencies': {'EUR': {'PMI': row}}}):
+            live.render_status(st)
+        block_rows = st.dataframe.call_args_list[2].args[0]
+        eur = next(item for item in block_rows if item['Währung'] == 'EUR')
+        self.assertIn('PMI: Anbieterfreigabe fehlt', eur['Sperrgründe'])
+        self.assertNotIn('PMI: PMI:', eur['Sperrgründe'])
 
     def test_read_checks_expected_factor_and_completed_run(self):
         row = self.record()

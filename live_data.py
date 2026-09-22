@@ -389,20 +389,25 @@ def collect(app, path=PATH):
 def render_status(st, authorized=False):
     data = load()
     checked = timestamp(data.get("completed_at"))
+    now = now_utc()
+    completed = checked is not None and checked <= now
     st.caption("LIVE-ANALYSE · G8 · Fundamentaler Horizont: 1–2 Wochen")
-    if checked is None or checked > now_utc():
+    if not completed:
         st.error("Noch kein geprüfter Live-Datensatz vorhanden. Paar-Signale sind gesperrt.")
-    elif now_utc() - checked >= timedelta(hours=1):
+    elif now - checked >= timedelta(hours=1):
         st.warning("Der letzte abgeschlossene Abruf liegt über eine Stunde zurück. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
     else:
         st.info("Zentraler Datenabruf: " + checked.strftime("%d.%m.%Y %H:%M UTC") + " · Ziel: neue Veröffentlichungen binnen einer Stunde berücksichtigen.")
-    st.caption("Abdeckung misst verfügbare geprüfte Faktoren, keine Trefferwahrscheinlichkeit. Kontext und historische Detailansichten können unvollständig sein; der Live-Datenstatus unten ist maßgeblich.")
+    weights = "/".join(str(weight) for weight in FACTORS.values())
+    st.caption(f"Die Gesamtzahl zählt geprüfte Faktoren; die CORE-Abdeckung je Währung summiert deren Modellgewichte ({weights}). Beides ist keine Trefferwahrscheinlichkeit. Kontext und historische Detailansichten können unvollständig sein; der Live-Datenstatus unten ist maßgeblich.")
     rows = []
     for currency in CURRENCIES:
         for factor in FACTORS:
             record = data.get("currencies", {}).get(currency, {}).get(factor, {})
             record = record if isinstance(record, dict) else {}
-            valid, reason = eligible(record, factor=factor, currency=currency)
+            valid, reason = eligible(record, now, factor=factor, currency=currency)
+            if not completed and valid:
+                valid, reason = False, "Kein abgeschlossener Live-Datensatz"
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
@@ -427,7 +432,9 @@ def render_status(st, authorized=False):
     labels = {"Geldpolitik": "2J-Rendite (%)", "Inflation": "Inflation (% zum Vorjahr)",
               "Arbeitsmarkt": "Arbeitslosenquote (%)", "PMI": "PMI (Index)", "GDP": "Reales GDP (% zum Vorjahr)"}
     for currency in CURRENCIES:
-        item = {"Währung": currency}
+        valid_rows = [row for row in rows if row["Währung"] == currency and row["Status"] == "Verfügbar"]
+        item = {"Währung": currency, "Faktoren": f"{len(valid_rows)}/{len(FACTORS)}",
+                "Gewichtete CORE-Abdeckung": f"{sum(FACTORS[row['Faktor']] for row in valid_rows)}%"}
         for factor, label in labels.items():
             row = next(row for row in rows if row["Währung"] == currency and row["Faktor"] == factor)
             value = number(row["Wert"])
@@ -447,8 +454,13 @@ def render_status(st, authorized=False):
     with st.expander("Sperrgründe je Währung", expanded=True):
         blocked = []
         for currency in CURRENCIES:
-            reasons = [f"{row['Faktor']}: {row['Grund']}" for row in rows
-                       if row['Währung'] == currency and row['Status'] == 'Gesperrt']
+            reasons = []
+            for row in rows:
+                if row["Währung"] != currency or row["Status"] != "Gesperrt":
+                    continue
+                prefix = f"{row['Faktor']}:"
+                reason = str(row["Grund"]).strip()
+                reasons.append(reason if reason.startswith(prefix) else f"{prefix} {reason}")
             if reasons:
                 blocked.append({"Währung": currency, "Sperrgründe": "; ".join(reasons)})
         if blocked:
