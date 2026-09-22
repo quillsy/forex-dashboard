@@ -3217,7 +3217,10 @@ def get_official_2y_data(curr, target_date):
                                             "end_date": end.strftime("%Y-%m-%d")}, timeout=12)
             response.raise_for_status()
             payload = response.json()
-            if payload.get("seriesDetail", {}).get(series, {}).get("label") != "Benchmark bond yield: 2 year":
+            # The BoC changed this label's punctuation while retaining the
+            # exact two-year benchmark series identifier and observations.
+            if payload.get("seriesDetail", {}).get(series, {}).get("label") not in {
+                    "Benchmark bond yield: 2 year", "Benchmark bond yield, 2-year"}:
                 return None
             records = [{"date": row.get("d"), "value": row.get(series, {}).get("v")}
                        for row in payload.get("observations", [])]

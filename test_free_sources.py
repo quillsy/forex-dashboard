@@ -91,6 +91,13 @@ class FreeSources(unittest.TestCase):
         self.n['requests'].get=Mock(return_value=SimpleNamespace(json=lambda:payload,raise_for_status=lambda:None))
         frame=self.n['get_official_2y_data']('CAD','2025-09-05')
         self.assertEqual(frame.iloc[-1]['value'],3.1)
+        # Current official metadata changed its label but not series/tenor.
+        payload['seriesDetail'][series]['label']='Benchmark bond yield, 2-year'
+        frame=self.n['get_official_2y_data']('CAD','2025-09-05')
+        self.assertEqual(frame.iloc[-1]['value'],3.1)
+        payload['seriesDetail']={'BD.CDN.5YR.DQ.YLD':{'label':'Benchmark bond yield, 2-year'}}
+        self.assertIsNone(self.n['get_official_2y_data']('CAD','2025-09-05'))
+        payload['seriesDetail']={series:{'label':'Benchmark bond yield, 2-year'}}
         payload['seriesDetail'][series]['label']='Benchmark bond yield: 5 year'
         self.assertIsNone(self.n['get_official_2y_data']('CAD','2025-09-05'))
 
