@@ -34,6 +34,7 @@ permissions:
 concurrency:
   group: g10-live-data-collection
   cancel-in-progress: false
+  queue: max
 
 jobs:
   collect-data:
