@@ -15,6 +15,7 @@ on:
       - 'official_yields.py'
       - 'source_contracts.py'
       - 'run_data_collection.py'
+      - 'collector_preflight.py'
       - 'bis_research.py'
       - 'collect_research.py'
       - 'ec_industry_research.py'
@@ -24,7 +25,9 @@ on:
   schedule:
     # Run once daily at 22:00 UTC (after market close)
     - cron: '0 22 * * *'
-    - cron: '17,47 * * * *'
+    # More start attempts compensate for delayed/missed GitHub schedule events.
+    # The preflight below still limits provider collection to roughly 30 minutes.
+    - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
     # Enable manual run trigger
 
@@ -46,18 +49,28 @@ jobs:
         with:
           ref: main
 
+      - name: Check scheduled collector freshness
+        id: preflight
+        env:
+          FX_WORKFLOW_EVENT: ${{ github.event_name }}
+          FX_WORKFLOW_SCHEDULE: ${{ github.event.schedule }}
+        run: python collector_preflight.py
+
       - name: Set up Python
+        if: steps.preflight.outputs.run_collector == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.preflight.outputs.run_collector == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run data collection script
+        if: steps.preflight.outputs.run_collector == 'true'
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
@@ -74,17 +87,17 @@ jobs:
           fi
 
       - name: Collect separate BIS research observation when due
-        if: ${{ always() }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
         continue-on-error: true
         run: python collect_research.py
 
       - name: Collect separate EA21 research observation when due
-        if: ${{ always() }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
         continue-on-error: true
         run: python collect_ec_industry.py
 
       - name: Commit and push changes
-        if: ${{ always() }}
+        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
