@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 LIVE_FALLBACK_KEYS = frozenset({"FRED_API_KEY", "ESTAT_APP_ID", "STATS_NZ_API_KEY",
@@ -211,6 +212,39 @@ def collect(app):
     return overall, components
 
 
+def update_daily_markers(timestamp, components, live_only, path=Path("daily_collection_status.json"), finished_at=None):
+    """Persist only the daily slot, attempt and completed snapshot timestamps."""
+    if live_only:
+        return
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    fields = ("last_daily_attempt_slot_utc", "last_daily_attempt_at",
+              "last_daily_completed_slot_utc", "last_daily_completed_at")
+    marker = {field: existing.get(field) if isinstance(existing.get(field), str) else None
+              for field in fields}
+    started = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    slot = started.replace(hour=22, minute=0, second=0, microsecond=0)
+    if started < slot:
+        from datetime import timedelta
+        slot -= timedelta(days=1)
+    slot_utc = slot.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    marker["last_daily_attempt_slot_utc"] = slot_utc
+    marker["last_daily_attempt_at"] = timestamp
+    live_core_state = components.get("live_core", {}).get("collection_status",
+                    components.get("live_core", {}).get("status"))
+    if live_core_state in ("SUCCESS", "PARTIAL") and all(
+           components.get(name, {}).get("collection_status",
+                components.get(name, {}).get("status")) == "SUCCESS"
+           for name in ("snapshots", "outcomes")):
+        marker["last_daily_completed_slot_utc"] = slot_utc
+        marker["last_daily_completed_at"] = finished_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _fallback_state(path, marker)
+
+
 def main():
     import fcntl
     import live_data
@@ -225,6 +259,9 @@ def main():
             return 1
         status = load_status()
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Write the daily attempt before any provider request. The workflow's
+        # always-run commit step can then retain it after a collector crash.
+        update_daily_markers(timestamp, {}, live_only)
         try:
             app = import_collection_app()
             components = {}
@@ -244,6 +281,9 @@ def main():
         status.update({"last_run_timestamp": timestamp, "last_run_status": overall,
                        "last_run_error": error, "components": components})
         status["mode"] = "live" if live_only else "daily"
+        # Preserve these across subsequent live-only runs. The attempt marker
+        # prevents duplicate provider requests; completion remains distinct.
+        update_daily_markers(timestamp, components, live_only)
         if "app" in locals():
             old_providers = status.get("providers", {})
             day = timestamp[:10]
