@@ -73,7 +73,44 @@ class JapanMofYieldTests(unittest.TestCase):
 
 
 
-from official_yields import parse_treasury_2y, fetch_treasury_2y
+from official_yields import (
+    TREASURY_TEXTVIEW_URL, TREASURY_XML_URL, fetch_treasury_2y,
+    parse_treasury_2y, parse_treasury_textview_2y,
+)
+
+
+# Header and the two latest September rows follow Treasury's published nominal
+# TextView table (checked 2026-09-23):
+# https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month=202609
+# The surrounding markup is kept small so
+# tests exercise its column identity, not Drupal's unrelated navigation/CSS.
+TREASURY_TEXTVIEW_HEADERS = (
+    'Date', '20 YR', '30 YR', 'Extrapolation Factor',
+    '6 WEEKS BANK DISCOUNT', 'COUPON EQUIVALENT',
+    '8 WEEKS BANK DISCOUNT', 'COUPON EQUIVALENT',
+    '17 WEEKS BANK DISCOUNT', 'COUPON EQUIVALENT',
+    '52 WEEKS BANK DISCOUNT', 'COUPON EQUIVALENT',
+    '1 Mo', '1.5 Mo', '2 Mo', '3 Mo', '4 Mo', '6 Mo',
+    '1 Yr', '2 Yr', '3 Yr', '5 Yr', '7 Yr', '10 Yr', '20 Yr', '30 Yr',
+)
+TREASURY_TEXTVIEW_ROWS = (
+    ('09/21/2026', *('N/A',) * 11, '3.96', '4.02', '4.10', '4.17', '4.26', '4.27',
+     '4.45', '4.76', '4.82', '4.83', '4.89', '4.96', '5.33', '5.29'),
+    ('09/22/2026', *('N/A',) * 11, '3.97', '4.04', '4.09', '4.16', '4.26', '4.26',
+     '4.43', '4.71', '4.81', '4.83', '4.89', '4.96', '5.33', '5.29'),
+)
+
+
+def treasury_textview_fixture(headers=TREASURY_TEXTVIEW_HEADERS,
+                              rows=TREASURY_TEXTVIEW_ROWS,
+                              heading='Daily Treasury Par Yield Curve Rates'):
+    from html import escape
+    head = ''.join(f'<th scope="col">{escape(value)}</th>' for value in headers)
+    body = ''.join('<tr>' + ''.join(f'<td>{escape(value)}</td>' for value in row) + '</tr>'
+                   for row in rows)
+    return (f'<html><main><h4>{heading}</h4><a>Download CSV</a>'
+            f'<table class="views-table"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{body}</tbody></table></main></html>')
 
 
 def treasury_fixture(rows=(('2026-09-03','4.34'),('2026-09-04','4.37'))):
@@ -84,6 +121,91 @@ def treasury_fixture(rows=(('2026-09-03','4.34'),('2026-09-04','4.37'))):
 
 
 class TreasuryYieldTests(unittest.TestCase):
+    def test_textview_exact_nominal_table_and_observation_date(self):
+        now = datetime(2026, 9, 23, 9, tzinfo=timezone.utc)
+        result = parse_treasury_textview_2y(
+            treasury_textview_fixture(), '2026-09-23', '202609', now=now)
+        self.assertEqual((result['value'], result['observation_date']), (4.71, '2026-09-22'))
+        self.assertEqual(result['source'], 'US Treasury nominal 2Y constant maturity (TextView)')
+        self.assertEqual(result['series_id'], 'BC_2YEAR')
+        self.assertEqual(result['unit'], 'percent_per_annum')
+        self.assertIsNone(result['published_at'])
+        earlier = parse_treasury_textview_2y(
+            treasury_textview_fixture(), '2026-09-21', '202609', now=now)
+        self.assertEqual((earlier['value'], earlier['observation_date']), (4.76, '2026-09-21'))
+
+    def test_textview_rejects_wrong_or_ambiguous_table_identity(self):
+        now = datetime(2026, 9, 23, 9, tzinfo=timezone.utc)
+        fixture = treasury_textview_fixture()
+        cases = (
+            fixture.replace('Daily Treasury Par Yield Curve Rates', 'Daily Treasury Par Real Yield Curve Rates'),
+            fixture.replace('<th scope="col">2 Yr</th>', '<th scope="col">20 Yr</th>'),
+            fixture.replace('<th scope="col">1 Yr</th>', '<th scope="col">2 Yr</th>'),
+            fixture + fixture,
+        )
+        for case in cases:
+            with self.subTest(case=case[:70]), self.assertRaises(ValueError):
+                parse_treasury_textview_2y(case, '2026-09-23', '202609', now=now)
+
+    def test_textview_rejects_bad_dates_values_and_wrong_month(self):
+        now = datetime(2026, 9, 23, 9, tzinfo=timezone.utc)
+        for rows in (
+            TREASURY_TEXTVIEW_ROWS + (TREASURY_TEXTVIEW_ROWS[-1],),
+            TREASURY_TEXTVIEW_ROWS[:-1] + (('09/24/2026', *TREASURY_TEXTVIEW_ROWS[-1][1:]),),
+            TREASURY_TEXTVIEW_ROWS[:-1] + (('08/31/2026', *TREASURY_TEXTVIEW_ROWS[-1][1:]),),
+            TREASURY_TEXTVIEW_ROWS[:-1] + (('09/22/2026', *TREASURY_TEXTVIEW_ROWS[-1][1:19], 'NaN', *TREASURY_TEXTVIEW_ROWS[-1][20:]),),
+            TREASURY_TEXTVIEW_ROWS[:-1] + (('09/22/2026', *TREASURY_TEXTVIEW_ROWS[-1][1:19], 'N/A', *TREASURY_TEXTVIEW_ROWS[-1][20:]),),
+        ):
+            with self.subTest(rows=rows[-1][:2]), self.assertRaises(ValueError):
+                parse_treasury_textview_2y(treasury_textview_fixture(rows=rows),
+                                           '2026-09-23', '202609', now=now)
+
+    def test_textview_only_after_xml_transport_failure(self):
+        now = datetime(2026, 9, 23, 9, tzinfo=timezone.utc)
+        client = Mock()
+        client.get.side_effect = [requests.Timeout('xml timeout'),
+                                  Mock(text=treasury_textview_fixture())]
+        result = fetch_treasury_2y('2026-09-23', client=client, now=now)
+        self.assertEqual((result['value'], result['observation_date']), (4.71, '2026-09-22'))
+        self.assertEqual([call.args[0] for call in client.get.call_args_list],
+                         [TREASURY_XML_URL, TREASURY_TEXTVIEW_URL])
+        self.assertEqual(client.get.call_args_list[1].kwargs['params'],
+                         {'type': 'daily_treasury_yield_curve', 'field_tdr_date_value_month': '202609'})
+
+    def test_retryable_http_error_uses_textview_but_bad_request_does_not(self):
+        now = datetime(2026, 9, 23, 9, tzinfo=timezone.utc)
+        for status, fallback in ((503, True), (429, True), (400, False)):
+            client = Mock()
+            response = requests.Response()
+            response.status_code = status
+            error = requests.HTTPError('xml response failed', response=response)
+            client.get.side_effect = [error, Mock(text=treasury_textview_fixture())]
+            with self.subTest(status=status):
+                if fallback:
+                    self.assertEqual(fetch_treasury_2y('2026-09-23', client=client, now=now)['value'], 4.71)
+                    self.assertEqual(client.get.call_count, 2)
+                else:
+                    with self.assertRaises(requests.HTTPError):
+                        fetch_treasury_2y('2026-09-23', client=client, now=now)
+                    client.get.assert_called_once()
+
+    def test_xml_semantic_failure_never_tries_textview(self):
+        client = Mock()
+        client.get.return_value.text = treasury_fixture((('2026-09-22', 'NaN'),))
+        with self.assertRaises(ValueError):
+            fetch_treasury_2y('2026-09-23', client=client,
+                              now=datetime(2026, 9, 23, 9, tzinfo=timezone.utc))
+        client.get.assert_called_once()
+
+    def test_empty_current_month_does_not_refresh_old_month_late(self):
+        client = Mock()
+        client.get.side_effect = [requests.Timeout('xml timeout'),
+                                  Mock(text=treasury_textview_fixture(rows=()))]
+        result = fetch_treasury_2y('2026-09-23', client=client,
+                                   now=datetime(2026, 9, 23, 9, tzinfo=timezone.utc))
+        self.assertIsNone(result)
+        self.assertEqual(client.get.call_count, 2)
+
     def test_current_nominal_cmt_identity(self):
         result=parse_treasury_2y(treasury_fixture(),'2026-09-07',now=NOW)
         self.assertEqual((result['value'],result['observation_date']), (4.37,'2026-09-04'))

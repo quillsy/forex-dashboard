@@ -7,6 +7,7 @@ import math
 import re
 
 import requests
+from bs4 import BeautifulSoup
 
 
 JAPAN_MOF_CURRENT_URL = (
@@ -91,6 +92,92 @@ def fetch_japan_mof_2y(target_date, client=None, now=None, timeout=15):
 
 
 TREASURY_XML_URL = 'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml'
+TREASURY_TEXTVIEW_URL = 'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView'
+TREASURY_SOURCE = 'US Treasury nominal 2Y constant maturity'
+
+
+def parse_treasury_textview_2y(html_text, target_date, month, now=None):
+    """Read only the official nominal par-CMT table and its exact 2 Yr column.
+
+    This is a second representation of Treasury's daily yield-curve data, not a
+    different bond, maturity, or estimator. HTML structure/identity drift fails
+    closed. The page's update date is not an observation publication timestamp.
+    """
+    target = min(_date(target_date), _date(now or datetime.now(timezone.utc)))
+    requested_month = str(month)
+    if not re.fullmatch(r'\d{6}', requested_month):
+        raise ValueError('TREASURY_MONTH_INVALID')
+    soup = BeautifulSoup(html_text, 'html.parser')
+    matches = []
+    for table in soup.find_all('table'):
+        heading = table.find_previous(re.compile(r'^h[1-6]$'))
+        if heading is None or heading.get_text(' ', strip=True) != 'Daily Treasury Par Yield Curve Rates':
+            continue
+        rows = table.find_all('tr')
+        headers = []
+        for position, row in enumerate(rows):
+            cells = row.find_all(['th', 'td'], recursive=False)
+            labels = [' '.join(cell.get_text(' ', strip=True).split()) for cell in cells]
+            if labels.count('Date') == 1 and labels.count('2 Yr') == 1:
+                headers.append((position, labels))
+        if headers:
+            matches.append((rows, headers))
+    if len(matches) != 1 or len(matches[0][1]) != 1:
+        raise ValueError('TREASURY_NOMINAL_TABLE_REQUIRED')
+    rows, headers = matches[0]
+    header_at, labels = headers[0]
+    if labels[0] != 'Date' or labels.count('2 Yr') != 1:
+        raise ValueError('TREASURY_2YEAR_REQUIRED')
+    index = labels.index('2 Yr')
+    observations = {}
+    for row in rows[header_at + 1:]:
+        cells = row.find_all(['th', 'td'], recursive=False)
+        if not cells:
+            continue
+        if len(cells) != len(labels):
+            raise ValueError('TREASURY_TABLE_ROW_INVALID')
+        raw_date = cells[0].get_text(' ', strip=True)
+        if not re.fullmatch(r'\d{2}/\d{2}/\d{4}', raw_date):
+            raise ValueError('TREASURY_DATE_INVALID')
+        observed = datetime.strptime(raw_date, '%m/%d/%Y').date()
+        if observed > _date(now or datetime.now(timezone.utc)) or observed in observations:
+            raise ValueError('TREASURY_FUTURE_OR_DUPLICATE_DATE')
+        if observed.strftime('%Y%m') != requested_month:
+            raise ValueError('TREASURY_WRONG_REQUESTED_MONTH')
+        raw_value = cells[index].get_text(' ', strip=True)
+        try:
+            value = float(raw_value)
+        except ValueError:
+            raise ValueError('TREASURY_OBSERVATION_INVALID') from None
+        if not math.isfinite(value) or not 0 <= value <= 30:
+            raise ValueError('TREASURY_OBSERVATION_INVALID')
+        observations[observed] = value
+    eligible = {day: value for day, value in observations.items() if day <= target}
+    if not eligible:
+        return None
+    observed = max(eligible)
+    return {'value': eligible[observed], 'observation_date': observed.isoformat(),
+            'source': TREASURY_SOURCE + ' (TextView)', 'series_id': 'BC_2YEAR',
+            'equivalent_series_id': 'DGS2', 'unit': 'percent_per_annum',
+            'source_url': TREASURY_TEXTVIEW_URL + '?type=daily_treasury_yield_curve',
+            'published_at': None}
+
+
+def _treasury_transport_failure(exc):
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        return status in (408, 429) or isinstance(status, int) and 500 <= status <= 599
+    return False
+
+
+def _fetch_treasury_textview_2y(target, month, client, now, timeout):
+    response = client.get(TREASURY_TEXTVIEW_URL,
+        params={'type': 'daily_treasury_yield_curve', 'field_tdr_date_value_month': month.strftime('%Y%m')},
+        timeout=timeout)
+    response.raise_for_status()
+    return parse_treasury_textview_2y(response.text, target, month.strftime('%Y%m'), now=now)
 
 
 def parse_treasury_2y(xml_text, target_date, now=None):
@@ -151,22 +238,34 @@ def parse_treasury_2y(xml_text, target_date, now=None):
 
 
 def fetch_treasury_2y(target_date, client=None, now=None, timeout=20):
-    """One current/target month request; preceding month only if feed is empty.
+    """Use Treasury XML; try its official TextView only on transport failure.
 
     At month boundaries weekends/holidays may precede the first observation.
-    Invalid or null observations raise, never trigger older-month fallback.
+    Invalid or null XML observations raise, never trigger HTML or older-month
+    fallback. A TextView schema/value conflict also raises and fails closed.
     """
     from datetime import timedelta
     target = min(_date(target_date), _date(now or datetime.now(timezone.utc)))
     month = target.replace(day=1)
+    transport = client or requests
     for attempt in range(2):
-        response = (client or requests).get(TREASURY_XML_URL,
-            params={'data': 'daily_treasury_yield_curve', 'field_tdr_date_value_month': month.strftime('%Y%m')}, timeout=timeout)
-        response.raise_for_status()
-        result = parse_treasury_2y(response.text, target, now=now)
+        try:
+            response = transport.get(TREASURY_XML_URL,
+                params={'data': 'daily_treasury_yield_curve', 'field_tdr_date_value_month': month.strftime('%Y%m')}, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            if not _treasury_transport_failure(exc):
+                raise
+            result = _fetch_treasury_textview_2y(target, month, transport, now, timeout)
+        else:
+            result = parse_treasury_2y(response.text, target, now=now)
         if result is not None:
             if result['observation_date'][:7] != month.strftime('%Y-%m'):
                 raise ValueError('TREASURY_WRONG_REQUESTED_MONTH')
             return result
+        if attempt == 0 and target.day > 5:
+            # A blank current month well after its first business day cannot
+            # justify silently refreshing from last month's observations.
+            return None
         month = (month - timedelta(days=1)).replace(day=1)
     return None
