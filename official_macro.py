@@ -231,12 +231,53 @@ def parse_abs_observation(content, category, *, now=None):
     }
 
 
-def _abs_release_metadata(html, category, observation, checked):
+def _abs_schedule_time(html, category, release_date, reference_period):
+    """Accept an exact due time only when the ABS series calendar agrees."""
+    from bs4 import BeautifulSoup
+    from datetime import timedelta
+    soup = BeautifulSoup(html, 'html.parser')
+    spec = ABS_SPECS[category]
+    heading = soup.find('h1')
+    if not heading or heading.get_text(' ', strip=True) != spec['title']:
+        return None
+    if category == 'Arbeitsmarkt':
+        year, month = map(int, reference_period.split('-'))
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    else:
+        year, quarter = int(reference_period[:4]), int(reference_period[-1])
+        year, month = (year + 1, 3) if quarter == 4 else (year, (quarter + 1) * 3)
+    expected_label = f"{spec['title']}, {datetime(year, month, 1):%B %Y}"
+    matches = []
+    for row in soup.select('.view-content .views-row'):
+        if not row.get_text(' ', strip=True).startswith(expected_label + ' Release date'):
+            continue
+        time = row.select_one('time.datetime[datetime]')
+        if time is None:
+            continue
+        visible = re.fullmatch(r'(\d{1,2}/\d{1,2}/\d{4}) (\d{1,2}:\d{2}[ap]m) (AEST|AEDT)',
+                               time.get_text(' ', strip=True))
+        if visible is None:
+            continue
+        try:
+            local = datetime.strptime(visible[1] + ' ' + visible[2], '%d/%m/%Y %I:%M%p').replace(
+                tzinfo=timezone(timedelta(hours=10 if visible[3] == 'AEST' else 11)))
+            declared = datetime.fromisoformat(time['datetime'].replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if local.date() != release_date:
+            continue
+        if declared.tzinfo is None or declared.astimezone(timezone.utc) != local.astimezone(timezone.utc):
+            return None
+        matches.append(declared.astimezone(timezone.utc))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _abs_release_metadata(html, category, observation, checked, schedule_html=None):
     """Require API period to match the independently fetched official release.
 
-    Date-only future releases use a conservative start-of-day blocking deadline,
-    explicitly marked as such, not a claimed publication time. Hourly checks
-    remain mandatory independently of the deadline.
+    The matching ABS series calendar provides the exact future due time. If it
+    cannot be validated, retain the conservative date-only blocking deadline.
+    Hourly checks remain mandatory independently of the deadline.
     """
     from bs4 import BeautifulSoup
     from datetime import timedelta
@@ -286,25 +327,30 @@ def _abs_release_metadata(html, category, observation, checked):
         if match:
             next_dates.append(datetime.strptime(match[1], '%d/%m/%Y').date())
     next_date = min(next_dates) if next_dates else None
-    # Conservatively recheck a date-only scheduled release on that Australian day.
+    scheduled = (_abs_schedule_time(schedule_html, category, next_date, observation['reference_period'])
+                 if next_date and schedule_html else None)
+    # An unconfirmed release is due at its verified time, or conservatively at
+    # the start of the Australian date when the exact time is unknown.
     from zoneinfo import ZoneInfo
     australian_today = checked.astimezone(ZoneInfo('Australia/Sydney')).date()
-    if next_date and next_date <= australian_today:
+    if next_date and (scheduled <= checked if scheduled else next_date <= australian_today):
         raise ValueError('Scheduled ABS release not yet confirmed')
-    next_due = (datetime.combine(next_date, datetime.min.time(), tzinfo=ZoneInfo('Australia/Sydney'))
-                .astimezone(timezone.utc).isoformat()) if next_date else None
+    next_due = scheduled or (datetime.combine(next_date, datetime.min.time(), tzinfo=ZoneInfo('Australia/Sydney'))
+                             .astimezone(timezone.utc) if next_date else None)
     return {'published_at': publication.isoformat() if publication else None,
             'release_date_known': release_date.isoformat() if release_date else None,
             'next_release_date': next_date.isoformat() if next_date else None,
-            'next_due_at': next_due, 'next_due_precision': 'date_only_start_of_AU_day' if next_due else None,
+            'next_due_at': next_due.isoformat() if next_due else None,
+            'next_due_precision': ('official_scheduled_time' if scheduled else 'date_only_start_of_AU_day') if next_due else None,
             'needs_hourly_check': True, 'release_url': spec['release']}
 
 
 def fetch_abs_observation(category, *, now=None, session=None):
-    """Two bounded keyless requests: exact CSV plus official release freshness.
+    """Keyless exact CSV, official release, and series calendar checks.
 
-    No process cache: callers must recheck at least hourly. Failures propagate
-    without promoting any cached observation's checked_at timestamp.
+    No process cache: callers must recheck at least hourly. Series or release
+    failures propagate; a calendar failure uses the conservative date-only
+    deadline without promoting an old observation's checked_at timestamp.
     """
     checked, spec = _utc_now(now), ABS_SPECS[category]
     client = session or requests
@@ -315,7 +361,15 @@ def fetch_abs_observation(category, *, now=None, session=None):
     observation = parse_abs_observation(response.text, category, now=checked)
     release = client.get(spec['release'], timeout=20)
     release.raise_for_status()
-    observation.update(_abs_release_metadata(release.text, category, observation, checked))
+    schedule_html = None
+    try:
+        schedule = client.get(spec['release'].removesuffix('/latest-release'), timeout=20)
+        schedule.raise_for_status()
+        schedule_html = schedule.text
+    except requests.RequestException:
+        # The existing date-only deadline remains safe when the calendar fails.
+        pass
+    observation.update(_abs_release_metadata(release.text, category, observation, checked, schedule_html))
     observation['frequency'] = 'monthly' if category == 'Arbeitsmarkt' else 'quarterly'
     return observation
 

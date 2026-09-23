@@ -1,4 +1,5 @@
 import unittest
+import requests
 from datetime import datetime, timezone
 from unittest.mock import Mock
 from official_macro import EUROSTAT_SPECS, parse_eurostat_observation, fetch_eurostat_observation
@@ -116,11 +117,23 @@ def abs_release(category):
     <ul><li class="future-release">Next Release {due}</li></ul>'''
 
 
+def abs_schedule(category):
+    if category == 'Arbeitsmarkt':
+        period, due, utc_due = 'August 2026', '24/09/2026 11:30am AEST', '2026-09-24T01:30:00Z'
+    else:
+        period, due, utc_due = 'September 2026', '02/12/2026 11:30am AEDT', '2026-12-02T00:30:00Z'
+    title = ABS_SPECS[category]['title']
+    return f'''<h1>{title}</h1><div class="view-content"><div class="views-row">
+    {title}, {period}<span class="release-date-label">Release date</span>
+    <time class="datetime" datetime="{utc_due}">{due}</time></div></div>'''
+
+
 class AbsTests(unittest.TestCase):
-    def fetch(self, category, csv=None, html=None, now=NOW):
+    def fetch(self, category, csv=None, html=None, schedule=None, now=NOW):
         session = Mock()
         session.get.side_effect = [Mock(text=csv if csv is not None else abs_csv(category)),
-                                   Mock(text=html if html is not None else abs_release(category))]
+                                   Mock(text=html if html is not None else abs_release(category)),
+                                   Mock(text=schedule if schedule is not None else abs_schedule(category))]
         return fetch_abs_observation(category, session=session, now=now), session
 
     def test_actual_csv_shapes_sorted_and_exact_yoy(self):
@@ -131,8 +144,8 @@ class AbsTests(unittest.TestCase):
         self.assertEqual(gdp['date'], '2026-06-30')
         self.assertEqual(gdp['published_at'], '2026-09-02T01:30:00+00:00')
         self.assertEqual(gdp['next_release_date'], '2026-12-02')
-        self.assertEqual(gdp['next_due_at'], '2026-12-01T13:00:00+00:00')
-        self.assertEqual(gdp['next_due_precision'], 'date_only_start_of_AU_day')
+        self.assertEqual(gdp['next_due_at'], '2026-12-02T00:30:00+00:00')
+        self.assertEqual(gdp['next_due_precision'], 'official_scheduled_time')
         self.assertTrue(gdp['needs_hourly_check'])
         self.assertEqual(gdp['frequency'], 'quarterly')
         self.assertEqual(labour['frequency'], 'monthly')
@@ -180,20 +193,44 @@ class AbsTests(unittest.TestCase):
         observation, _ = self.fetch('GDP', html=html)
         self.assertIsNone(observation['published_at'])
         self.assertEqual(observation['release_date_known'], '2026-09-02')
-        self.assertEqual(observation['next_due_at'], '2026-12-01T13:00:00+00:00')
+        self.assertEqual(observation['next_due_at'], '2026-12-02T00:30:00+00:00')
 
-    def test_date_only_deadline_australian_day_boundary(self):
-        before = datetime(2026, 9, 23, 13, 59, tzinfo=timezone.utc)
+    def test_official_deadline_allows_july_until_release_then_blocks_missing_august(self):
+        before = datetime(2026, 9, 24, 1, 29, tzinfo=timezone.utc)
         result, _ = self.fetch('Arbeitsmarkt', now=before)
-        self.assertEqual(result['next_due_at'], '2026-09-23T14:00:00+00:00')
+        self.assertEqual((result['value'], result['reference_period']), (4.46182469, '2026-07'))
+        self.assertEqual(result['next_due_at'], '2026-09-24T01:30:00+00:00')
         with self.assertRaisesRegex(ValueError, 'Scheduled ABS release'):
-            self.fetch('Arbeitsmarkt', now=datetime(2026, 9, 23, 14, tzinfo=timezone.utc))
+            self.fetch('Arbeitsmarkt', now=datetime(2026, 9, 24, 1, 30, tzinfo=timezone.utc))
 
-    def test_two_bounded_keyless_uncached_requests_and_http_failure(self):
+    def test_missing_or_conflicting_calendar_keeps_conservative_date_only_gate(self):
+        for schedule in ('<h1>Wrong series</h1>',
+                         abs_schedule('Arbeitsmarkt').replace('01:30:00Z', '02:30:00Z'),
+                         abs_schedule('Arbeitsmarkt').replace('August 2026', 'September 2026')):
+            result, _ = self.fetch('Arbeitsmarkt', schedule=schedule,
+                                   now=datetime(2026, 9, 23, 13, 59, tzinfo=timezone.utc))
+            self.assertEqual(result['next_due_at'], '2026-09-23T14:00:00+00:00')
+            self.assertEqual(result['next_due_precision'], 'date_only_start_of_AU_day')
+            with self.assertRaisesRegex(ValueError, 'Scheduled ABS release'):
+                self.fetch('Arbeitsmarkt', schedule=schedule,
+                           now=datetime(2026, 9, 23, 14, tzinfo=timezone.utc))
+
+    def test_calendar_http_failure_keeps_date_only_gate(self):
+        session = Mock()
+        calendar = Mock()
+        calendar.raise_for_status.side_effect = requests.HTTPError('calendar unavailable')
+        session.get.side_effect = [Mock(text=abs_csv('Arbeitsmarkt')),
+                                   Mock(text=abs_release('Arbeitsmarkt')), calendar]
+        result = fetch_abs_observation('Arbeitsmarkt', session=session, now=NOW)
+        self.assertEqual(result['next_due_at'], '2026-09-23T14:00:00+00:00')
+        self.assertEqual(result['next_due_precision'], 'date_only_start_of_AU_day')
+
+    def test_three_bounded_keyless_uncached_requests_and_http_failure(self):
         _, session = self.fetch('GDP')
-        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(session.get.call_count, 3)
         for call in session.get.call_args_list: self.assertEqual(call.kwargs['timeout'], 20)
         self.assertEqual(session.get.call_args_list[0].kwargs['params']['format'], 'csv')
+        self.assertEqual(session.get.call_args_list[2].args[0], ABS_SPECS['GDP']['release'].removesuffix('/latest-release'))
         session = Mock()
         session.get.return_value.raise_for_status.side_effect = RuntimeError('HTTP unavailable')
         with self.assertRaises(RuntimeError): fetch_abs_observation('GDP', now=NOW, session=session)
