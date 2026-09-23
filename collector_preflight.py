@@ -114,7 +114,10 @@ def preflight_decision(event, schedule, watchdog_slot="", root=Path("."), now=No
             return False, "live"
         slot, daily = parsed
         if daily:
-            return not _daily_attempted(root, slot, now), "daily"
+            # A watchdog rescue is optional: defer it if a live run recently
+            # reserved provider calls. Recheck at the next watchdog tick; the
+            # original 22:00 schedule retains its separate Daily priority.
+            return not _daily_attempted(root, slot, now) and not _recent_attempt(root, now), "daily"
         return not _recent_attempt(root, now), "live"
     if event != "schedule":
         return True, "live"

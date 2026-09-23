@@ -107,21 +107,51 @@ class CollectorPreflightTests(unittest.TestCase):
         self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, self.now,
                                             "manual"), (False, "live"))
 
-    def test_daily_watchdog_not_covered_by_nearby_live_run(self):
+    def test_daily_watchdog_waits_for_live_cooldown_without_losing_daily_slot(self):
         now = datetime(2026, 9, 23, 22, 15, tzinfo=timezone.utc)
         slot = "2026-09-23T22:00:00.000Z"
         (self.root / "data_collection_status.json").write_text(json.dumps({
             "last_run_timestamp": "2026-09-23T22:07:00Z", "mode": "live"}))
         self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, now, "watchdog"),
-                         (True, "daily"))
+                         (False, "daily"))
+        after_cooldown = datetime(2026, 9, 23, 22, 37, tzinfo=timezone.utc)
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root,
+                                            after_cooldown, "watchdog"), (True, "daily"))
         update_daily_markers("2026-09-23T22:13:00Z", {
             "live_core": {"status": "PARTIAL"},
             "snapshots": {"status": "SUCCESS"}, "outcomes": {"status": "SUCCESS"}},
             False, self.root / "daily_collection_status.json", "2026-09-23T22:14:00Z")
-        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root, now, "watchdog"),
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root,
+                                            after_cooldown, "watchdog"),
                          (False, "daily"))
-        self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root, now),
+        self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root, after_cooldown),
                          (False, "daily"))
+
+    def test_daily_watchdog_uses_pre_provider_reservation_when_completion_is_missing(self):
+        slot = "2026-09-23T22:00:00.000Z"
+        marker = self.root / "daily_collection_status.json"
+        # An hourly run may have started after the Worker checked GitHub but
+        # before the watchdog dispatch reaches repository preflight.
+        update_daily_markers("2026-09-23T22:11:00Z", {}, True, marker,
+                             reserve_provider_attempt=True)
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root,
+                                            datetime(2026, 9, 23, 22, 12, tzinfo=timezone.utc),
+                                            "watchdog"), (False, "daily"))
+        self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root,
+                                            datetime(2026, 9, 23, 22, 41, tzinfo=timezone.utc),
+                                            "watchdog"), (True, "daily"))
+
+    def test_daily_watchdog_invalid_reservation_fails_closed_but_primary_schedule_is_unchanged(self):
+        slot = "2026-09-23T22:00:00.000Z"
+        now = datetime(2026, 9, 23, 22, 15, tzinfo=timezone.utc)
+        marker = self.root / "daily_collection_status.json"
+        for value in ("2026-09-23T22:16:00Z", "invalid"):
+            with self.subTest(value=value):
+                marker.write_text(json.dumps({"last_provider_attempt_at": value}))
+                self.assertEqual(preflight_decision("workflow_dispatch", "", slot, self.root,
+                                                    now, "watchdog"), (False, "daily"))
+                self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root,
+                                                    now), (True, "daily"))
 
     def test_failed_daily_attempt_is_not_success_but_prevents_duplicate(self):
         marker = self.root / "daily_collection_status.json"
