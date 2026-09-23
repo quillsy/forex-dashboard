@@ -94,6 +94,18 @@ class CollectorTransport:
         if category != "SUCCESS":
             usage["last_failure_at"] = self.clock().isoformat()
 
+    def note_official_outage(self, host):
+        """Record a recognized provider outage hidden behind an HTTP 200 page."""
+        if host != "www150.statcan.gc.ca":
+            return
+        usage = self.usage.get(host)
+        if isinstance(usage, dict):
+            # HTTP outcome remains recorded as SUCCESS; this is the separately
+            # validated content status shown to the operator.
+            usage["status"] = "SOURCE_UNAVAILABLE"
+            usage["data_status"] = "OFFICIAL_OUTAGE_PAGE"
+            usage["last_failure_at"] = self.clock().isoformat()
+
     def get(self, url, **kwargs):
         return self.request("get", url, **kwargs)
 

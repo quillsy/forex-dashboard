@@ -145,6 +145,24 @@ class LiveDataTests(unittest.TestCase):
         self.assertIn('last_error', updated)
         self.assertFalse(live.eligible(updated, NOW + timedelta(hours=1))[0])
 
+    def test_cad_outage_cache_stops_at_hour_release_and_age_boundaries(self):
+        observation = {'value': 1.2, 'date': '2026-06-30', 'source': 'Statistics Canada',
+                       'frequency': 'quarterly', 'needs_hourly_check': True,
+                       'next_due_at': (NOW + timedelta(minutes=40)).isoformat()}
+        previous = live.build_record('GDP', 20, observation, 'FRESH', NOW.isoformat())
+        failed = live.build_record('GDP', None, {'source': 'Statistics Canada'}, 'UNAVAILABLE',
+                                   (NOW + timedelta(minutes=10)).isoformat(), previous,
+                                   'SOURCE_UNAVAILABLE', 'Amtliche Quelle vorübergehend nicht erreichbar')
+        self.assertEqual(failed['checked_at'], NOW.isoformat())
+        self.assertEqual(failed['score'], previous['score'])
+        self.assertTrue(live.eligible(failed, NOW + timedelta(minutes=39), factor='GDP', currency='CAD')[0])
+        self.assertFalse(live.eligible(failed, NOW + timedelta(minutes=40), factor='GDP', currency='CAD')[0])
+        failed['next_due_at'] = (NOW + timedelta(days=1)).isoformat()
+        self.assertFalse(live.eligible(failed, NOW + timedelta(hours=1), factor='GDP', currency='CAD')[0])
+        failed['checked_at'] = (NOW + timedelta(minutes=50)).isoformat()
+        failed['expires_at'] = (NOW + timedelta(minutes=55)).isoformat()
+        self.assertFalse(live.eligible(failed, NOW + timedelta(minutes=55), factor='GDP', currency='CAD')[0])
+
     def test_conflicting_or_unverified_source_never_reuses_old_value(self):
         row = live.build_record('GDP', 30, {'date': '2026-06-30'}, 'FRESH', NOW.isoformat(), self.record(), 'UNVERIFIED', 'Conflict')
         self.assertFalse(live.eligible(row, NOW)[0])

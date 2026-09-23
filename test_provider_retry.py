@@ -10,6 +10,24 @@ from provider_transport import CollectorTransport
 
 
 class ProviderRetryTests(unittest.TestCase):
+    def test_statcan_html_outage_is_labelled_without_persisting_body(self):
+        from official_macro import fetch_statcan_labour
+        response = requests.Response()
+        response.status_code = 200
+        response.headers['Content-Type'] = 'text/html'
+        response._content = b"<title>Statistics Canada - We're sorry! The website is currently unavailable</title>private-detail"
+        self.client.post.return_value = response
+        transport = self.transport()
+        with self.assertRaisesRegex(requests.RequestException, 'STATCAN_OFFICIAL_OUTAGE'):
+            fetch_statcan_labour(session=transport)
+        usage = transport.usage['www150.statcan.gc.ca']
+        self.assertEqual(usage['requests_this_run'], 1)
+        self.assertEqual(usage['outcomes_this_run'], {'SUCCESS': 1})  # HTTP transport did succeed.
+        self.assertEqual(usage['status'], 'SOURCE_UNAVAILABLE')
+        self.assertEqual(usage['data_status'], 'OFFICIAL_OUTAGE_PAGE')
+        self.assertEqual(usage['last_failure_at'], self.now.isoformat())
+        self.assertNotIn('private-detail', json.dumps(usage))
+
     def test_ons_fallback_through_actual_collector_transport(self):
         from official_ons import fetch_ons_gdp, PN2_FALLBACK_URL
         from test_official_ons import fixture, NOW
