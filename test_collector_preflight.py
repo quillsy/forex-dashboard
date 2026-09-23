@@ -35,6 +35,44 @@ class CollectorPreflightTests(unittest.TestCase):
         self.write_time("data_collection_status.json", "last_run_timestamp", 30)
         self.assertTrue(self.decision())
 
+    def test_durable_provider_reservation_throttles_uncommitted_collector(self):
+        marker = self.root / "daily_collection_status.json"
+        for elapsed, expected in ((0, False), (29, False), (30, True), (31, True)):
+            with self.subTest(elapsed=elapsed):
+                reserved = (self.now - timedelta(minutes=elapsed)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                update_daily_markers(reserved, {}, True, marker, reserve_provider_attempt=True)
+                self.assertIs(self.decision(), expected)
+        self.assertIsNone(json.loads(marker.read_text())["last_daily_attempt_at"])
+
+    def test_daily_reservation_also_throttles_hourly_recovery(self):
+        marker = self.root / "daily_collection_status.json"
+        reserved = datetime(2026, 9, 23, 22, 12, tzinfo=timezone.utc)
+        update_daily_markers(reserved.strftime("%Y-%m-%dT%H:%M:%SZ"), {}, False, marker,
+                             reserve_provider_attempt=True)
+        now = reserved + timedelta(minutes=7)
+        self.assertFalse(should_collect("schedule", "7,17,27,37,47,57 * * * *", self.root, now))
+        self.assertEqual(json.loads(marker.read_text())["last_daily_attempt_slot_utc"],
+                         "2026-09-23T22:00:00.000Z")
+
+    def test_collector_marker_update_preserves_reserved_attempt(self):
+        marker = self.root / "daily_collection_status.json"
+        update_daily_markers("2026-09-23T22:12:00Z", {}, False, marker,
+                             reserve_provider_attempt=True)
+        update_daily_markers("2026-09-23T22:18:00Z", {}, False, marker)
+        state = json.loads(marker.read_text())
+        self.assertEqual(state["last_provider_attempt_at"], "2026-09-23T22:12:00Z")
+        update_daily_markers("2026-09-23T22:21:00Z", {}, True, marker)
+        self.assertEqual(json.loads(marker.read_text()), state)
+
+    def test_future_or_invalid_provider_reservation_fails_closed(self):
+        marker = self.root / "daily_collection_status.json"
+        for value in ("2026-09-23T12:01:00Z", "nonsense", 17, "2026-09-23T11:59:00"):
+            with self.subTest(value=value):
+                marker.write_text(json.dumps({"last_provider_attempt_at": value}))
+                self.assertFalse(self.decision())
+        marker.write_text("invalid json")
+        self.assertFalse(self.decision())
+
     def test_missing_malformed_and_future_timestamps_trigger_collection(self):
         self.assertTrue(self.decision())
         (self.root / "live_core_data.json").write_text('{"completed_at":"invalid"}')
