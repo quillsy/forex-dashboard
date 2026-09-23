@@ -394,6 +394,26 @@ def _policy_boj_change_links(index, soup, decision, indexes=None):
         yield from sorted(links, reverse=True)
 
 
+def _policy_boj_terms_revision(text):
+    """Read the last revision date of the consolidated deposit-facility terms."""
+    import re
+    preamble = re.split(r"\b1\.\s*Purpose\b", text, maxsplit=1, flags=re.I)[0]
+    dates = [_policy_date(value) for value in re.findall(r"[A-Za-z]+\s+\d{1,2},\s+20\d{2}", preamble)]
+    return max(dates) if dates else None
+
+
+def _policy_boj_current_guideline(soup):
+    """Read the current overnight policy guideline, not adjacent deposit/loan rates."""
+    import re
+    text = _policy_text(soup)
+    pattern = (r"\bGuideline\s+The Bank will encourage the uncollateralized\s+"
+               r"overnight call rate to remain at around\s+([+-]?\d+(?:\.\d+)?)\s+percent\b")
+    matches = re.findall(pattern, text, re.I)
+    if len(matches) != 1:
+        raise ValueError("BOJ_CURRENT_GUIDELINE_UNCONFIRMED")
+    return _policy_rate(matches[0])
+
+
 def fetch_official_policy_rate_live(currency, fred_key=None):
     """Fetch two independent official documents. No inferred or default rates."""
     import re
@@ -523,10 +543,9 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
             from datetime import datetime, timezone
             from zoneinfo import ZoneInfo
             url = "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm"
-            text = _policy_text(_policy_html(currency, url))
-            rate = _policy_match_rate(text, [r"4\. Interest Rate\s+The interest rate shall be\s+" + number + r"\s+percent"])
+            terms_text = _policy_text(_policy_html(currency, url))
+            rate = _policy_match_rate(terms_text, [r"4\. Interest Rate\s+The interest rate shall be\s+" + number + r"\s+percent"])
             primary = _policy_evidence(currency, url, rate)
-            evidence.append(primary)
             index, soup, decision, statement, indexes = _policy_boj_latest_decision()
             text = _policy_pdf_text(currency, statement)
             call_rate_pattern = r"uncollateralized\s+o\s*vernight\s+call\s+rate.{0,70}?around\s+" + number + r"\s+percent"
@@ -547,7 +566,26 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                                    valid_until=cutoff.isoformat(), decision_source=statement,
                                    deadline_basis="BOJ date-only effective date; conservative start of Tokyo day")
             if abs(latest_rate - rate) > 1e-8 and pending is None:
-                raise ValueError("BOJ_CURRENT_RATE_CONFLICT")
+                # The BOJ sometimes updates its current homepage before the
+                # consolidated deposit-facility terms. Require that the latter
+                # predates the decision and that the actual overnight guideline
+                # on the homepage agrees with the decision. The change document
+                # below must still prove the effective date has passed.
+                terms_revision = _policy_boj_terms_revision(terms_text)
+                if not terms_revision or terms_revision >= decision:
+                    evidence.extend((primary, secondary))
+                    raise ValueError("BOJ_CURRENT_RATE_CONFLICT")
+                home = "https://www.boj.or.jp/en/"
+                homepage_rate = _policy_boj_current_guideline(_policy_html(currency, home))
+                if abs(homepage_rate - latest_rate) > 1e-8:
+                    evidence.extend((_policy_evidence(currency, home, homepage_rate), secondary))
+                    raise ValueError("BOJ_CURRENT_RATE_CONFLICT")
+                old_terms_rate = rate
+                rate = homepage_rate
+                primary = _policy_evidence(currency, home, rate,
+                                           superseded_terms_source=url,
+                                           superseded_terms_rate=old_terms_rate,
+                                           superseded_terms_revision_date=terms_revision)
             # Find the latest explicit rate-changing statement, not the latest hold.
             for change_url in _policy_boj_change_links(index, soup, decision, indexes):
                 change_text = text if change_url == statement else _policy_pdf_text(currency, change_url)
@@ -560,6 +598,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 if _policy_now() < change_cutoff:
                     continue
                 if abs(changed_rate - rate) > 1e-8:
+                    evidence.extend((primary, _policy_evidence(currency, change_url, changed_rate)))
                     raise ValueError("BOJ_CURRENT_EPISODE_CONFLICT")
                 primary["rate_effective_date"] = change_effective
                 primary["effective_date_source"] = change_url
@@ -571,6 +610,7 @@ def fetch_official_policy_rate_live(currency, fred_key=None):
                 break
             if "rate_effective_date" not in primary:
                 raise ValueError("BOJ_CURRENT_EPISODE_NOT_FOUND")
+            evidence.append(primary)
             evidence.append(secondary)
         else:
             raise ValueError("UNSUPPORTED_CURRENCY")
