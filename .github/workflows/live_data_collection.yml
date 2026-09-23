@@ -71,40 +71,42 @@ jobs:
           FX_WATCHDOG_SLOT: ${{ inputs.watchdog_slot_utc }}
         run: python collector_preflight.py
 
-      - name: Set up Python
+      - name: Persist provider attempt before any provider requests
+        id: provider_reservation
         if: steps.preflight.outputs.run_collector == 'true'
+        run: |
+          python -B - <<'PY'
+          from datetime import datetime, timezone
+          from run_data_collection import update_daily_markers
+          mode = "${{ steps.preflight.outputs.collector_mode }}"
+          update_daily_markers(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), {}, mode != "daily",
+                               reserve_provider_attempt=True)
+          PY
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add -- daily_collection_status.json
+          if git diff --cached --quiet; then
+            echo "No new durable provider attempt; refusing provider requests."
+            exit 1
+          fi
+          git commit -m "Reserve collector provider attempt [skip ci]"
+          git push
+
+      - name: Set up Python
+        if: steps.provider_reservation.outcome == 'success'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
       - name: Install dependencies
-        if: steps.preflight.outputs.run_collector == 'true'
+        if: steps.provider_reservation.outcome == 'success'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Persist daily attempt before provider requests
-        id: daily_reservation
-        if: steps.preflight.outputs.run_collector == 'true' && steps.preflight.outputs.collector_mode == 'daily'
-        run: |
-          python -B - <<'PY'
-          from datetime import datetime, timezone
-          from run_data_collection import update_daily_markers
-          update_daily_markers(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), {}, False)
-          PY
-          git config user.name "GitHub Action"
-          git config user.email "action@github.com"
-          git add -- daily_collection_status.json
-          if git diff --cached --quiet; then
-            echo "No new durable daily attempt; refusing provider requests."
-            exit 1
-          fi
-          git commit -m "Reserve daily collector attempt [skip ci]"
-          git push
-
       - name: Run data collection script
-        if: steps.preflight.outputs.run_collector == 'true'
+        if: steps.provider_reservation.outcome == 'success'
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
@@ -121,17 +123,17 @@ jobs:
           fi
 
       - name: Collect separate BIS research observation when due
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
+        if: ${{ always() && steps.provider_reservation.outcome == 'success' }}
         continue-on-error: true
         run: python collect_research.py
 
       - name: Collect separate EA21 research observation when due
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
+        if: ${{ always() && steps.provider_reservation.outcome == 'success' }}
         continue-on-error: true
         run: python collect_ec_industry.py
 
       - name: Commit and push changes
-        if: ${{ always() && steps.preflight.outputs.run_collector == 'true' && (steps.preflight.outputs.collector_mode != 'daily' || steps.daily_reservation.outcome == 'success') }}
+        if: ${{ always() && steps.provider_reservation.outcome == 'success' }}
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"

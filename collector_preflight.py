@@ -26,6 +26,30 @@ def _timestamp(path, field):
 
 
 def _recent_attempt(root, now):
+    # This marker is committed before any provider request. It covers runs
+    # whose later CORE/status commit fails or whose job is interrupted.
+    marker = root / "daily_collection_status.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return True
+        raw = payload.get("last_provider_attempt_at")
+    except FileNotFoundError:
+        raw = None  # Legacy checkout before the attempt marker was introduced.
+    except (OSError, ValueError, AttributeError, TypeError):
+        return True
+    if raw is not None:
+        try:
+            reserved = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if reserved.tzinfo is None:
+                return True
+            reserved = reserved.astimezone(timezone.utc)
+        except (ValueError, AttributeError, TypeError):
+            return True
+        # A future reservation is a clock/provenance anomaly. Do not risk
+        # duplicate requests until the marker is inspected and repaired.
+        if reserved > now or now - reserved < MIN_INTERVAL:
+            return True
     timestamps = [
         _timestamp(root / "live_core_data.json", "completed_at"),
         _timestamp(root / "data_collection_status.json", "last_run_timestamp"),

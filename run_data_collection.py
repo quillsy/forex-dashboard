@@ -212,9 +212,10 @@ def collect(app):
     return overall, components
 
 
-def update_daily_markers(timestamp, components, live_only, path=Path("daily_collection_status.json"), finished_at=None):
-    """Persist only the daily slot, attempt and completed snapshot timestamps."""
-    if live_only:
+def update_daily_markers(timestamp, components, live_only, path=Path("daily_collection_status.json"), finished_at=None,
+                         reserve_provider_attempt=False):
+    """Persist the pre-provider reservation and daily snapshot lifecycle."""
+    if live_only and not reserve_provider_attempt:
         return
     try:
         existing = json.loads(path.read_text(encoding="utf-8"))
@@ -223,9 +224,15 @@ def update_daily_markers(timestamp, components, live_only, path=Path("daily_coll
     if not isinstance(existing, dict):
         existing = {}
     fields = ("last_daily_attempt_slot_utc", "last_daily_attempt_at",
-              "last_daily_completed_slot_utc", "last_daily_completed_at")
+              "last_daily_completed_slot_utc", "last_daily_completed_at",
+              "last_provider_attempt_at")
     marker = {field: existing.get(field) if isinstance(existing.get(field), str) else None
               for field in fields}
+    if reserve_provider_attempt:
+        marker["last_provider_attempt_at"] = timestamp
+    if live_only:
+        _fallback_state(path, marker)
+        return
     started = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     slot = started.replace(hour=22, minute=0, second=0, microsecond=0)
     if started < slot:
