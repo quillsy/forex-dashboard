@@ -745,13 +745,13 @@ class TreasuryCollectorIntegrationTests(unittest.TestCase):
         self.app = SimpleNamespace(FRED_KEY='test-only', requests=self.transport,
             get_verified_policy_rate=policy, policy_rate_is_usable=self.core['policy_rate_is_usable'], compute_currency_details=self.core['compute_currency_details'])
 
-    def collect_case(self, failure=None):
-        previous = live.build_record('Geldpolitik', 10,
+    def collect_case(self, failure=None, previous=None, observation=None):
+        previous = previous or live.build_record('Geldpolitik', 10,
             {'policy_rate': 4.0, 'yield_2y': 4.0, 'date': '2026-09-04',
              'source': 'US Treasury nominal 2Y constant maturity'}, 'FRESH',
             (self.now - timedelta(minutes=30)).isoformat())
-        observation = {'value': 4.37, 'observation_date': '2026-09-04',
-                       'source': 'US Treasury nominal 2Y constant maturity'}
+        observation = observation or {'value': 4.37, 'observation_date': '2026-09-04',
+                                      'source': 'US Treasury nominal 2Y constant maturity'}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'live.json'
             live.save({'model_version': live.MODEL,
@@ -793,6 +793,36 @@ class TreasuryCollectorIntegrationTests(unittest.TestCase):
         self.assertIsNone(row['score'])
         self.assertNotIn('last_error', row)
         self.assertFalse(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
+
+    def test_same_day_xml_textview_mismatch_blocks_factor(self):
+        xml_url = ('https://home.treasury.gov/resource-center/data-chart-center/'
+                   'interest-rates/pages/xml?data=daily_treasury_yield_curve')
+        previous = live.build_record('Geldpolitik', 10,
+            {'policy_rate': 4.0, 'yield_2y': 4.0, 'date': '2026-09-04',
+             'source': 'US Treasury nominal 2Y constant maturity', 'source_url': xml_url},
+            'FRESH', (self.now - timedelta(minutes=30)).isoformat())
+        html = {'value': 4.37, 'observation_date': '2026-09-04',
+                'source': 'US Treasury nominal 2Y constant maturity (TextView)'}
+        _, row = self.collect_case(previous=previous, observation=html)
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertIn('widersprechen', row['reason'])
+        self.assertFalse(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
+
+    def test_same_day_matching_textview_refreshes_with_true_provenance(self):
+        xml_url = ('https://home.treasury.gov/resource-center/data-chart-center/'
+                   'interest-rates/pages/xml?data=daily_treasury_yield_curve')
+        previous = live.build_record('Geldpolitik', 10,
+            {'policy_rate': 4.0, 'yield_2y': 4.37, 'date': '2026-09-04',
+             'source': 'US Treasury nominal 2Y constant maturity', 'source_url': xml_url},
+            'FRESH', (self.now - timedelta(minutes=30)).isoformat())
+        html = {'value': 4.37, 'observation_date': '2026-09-04',
+                'source': 'US Treasury nominal 2Y constant maturity (TextView)'}
+        _, row = self.collect_case(previous=previous, observation=html)
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertIn('TextView?', row['observation']['source_url'])
+        self.assertEqual(row['observation']['series_id'], 'BC_2YEAR (FRED equivalent DGS2)')
+        self.assertTrue(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
 
     def test_historical_usd_keeps_existing_fred_route(self):
         self.fred.side_effect = None

@@ -181,6 +181,7 @@ def public_observation(observation):
                 "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/namq_10_gdp",
                 "https://apps.bea.gov/national/Release/XLS/Survey/Section1All_xls.xlsx",
                 "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve",
+                "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve",
                 "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028701",
                 "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3610010401",
                 "https://data.api.abs.gov.au/rest/data/LF/M13.3.1599.20.AUS.M",
@@ -341,6 +342,21 @@ def collect(app, path=PATH):
                     if contract is not True:
                         validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
                         reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Rendite-Metadaten nicht bestätigt"
+                if currency == "USD" and source.startswith("US Treasury"):
+                    old = prior_records.get(factor)
+                    old_obs = old.get("observation", {}) if isinstance(old, dict) else {}
+                    official_urls = {
+                        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve",
+                        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve",
+                    }
+                    if (isinstance(old_obs, dict) and old_obs.get("source_url") in official_urls
+                            and observation.get("source_url") in official_urls
+                            and old_obs.get("source_url") != observation.get("source_url")
+                            and old_obs.get("date") == observation.get("date")
+                            and number(old_obs.get("yield_2y")) is not None
+                            and number(observation.get("yield_2y")) is not None
+                            and number(old_obs["yield_2y"]) != number(observation["yield_2y"])):
+                        validation, reason = "UNVERIFIED", "Amtliche Treasury-Ausgaben widersprechen sich für denselben Tag"
                 # Policy verification must also have succeeded during this run.
                 policy = app.get_verified_policy_rate(currency)
                 proofs = policy.get("verification_evidence", [])

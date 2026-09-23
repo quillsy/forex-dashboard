@@ -5335,9 +5335,12 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
             yield_2y = finite_number(yield_2y)
             freshness["Geldpolitik"] = observation_freshness(observed, dt_str, 5, 15) if policy_rate is not None and yield_2y is not None else "UNAVAILABLE"
             observations["Geldpolitik"] = {"policy_rate": policy_rate, "yield_2y": yield_2y, "date": str(observed) if observed is not None else None, "source": source}
-            if source == "US Treasury nominal 2Y constant maturity":
+            if source in {"US Treasury nominal 2Y constant maturity",
+                          "US Treasury nominal 2Y constant maturity (TextView)"}:
                 observations["Geldpolitik"].update(series_id="BC_2YEAR (FRED equivalent DGS2)",
-                    source_url="https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve")
+                    source_url=("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve"
+                        if source.endswith("(TextView)") else
+                        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve"))
             if freshness["Geldpolitik"] in ("FRESH", "AGING"):
                 gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
                 gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
