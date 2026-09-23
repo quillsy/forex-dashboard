@@ -226,25 +226,44 @@
     "secondary_source": null,
     "verification_evidence": [],
     "verification_status": "🔴 OFFICIAL SOURCE UNAVAILABLE",
-    "last_attempt_at": "2026-09-23T23:00:15.896820+00:00",
+    "last_attempt_at": "2026-09-23T23:03:48.553198+00:00",
     "last_attempt_error": "RequestException"
   },
   "JPY": {
     "currency": "JPY",
-    "rate": null,
+    "rate": 1.25,
     "previous_rate": null,
     "upper_bound": null,
     "instrument": "Short-Term Policy Interest Rate",
     "central_bank": "Bank of Japan",
-    "rate_effective_date": null,
-    "last_policy_decision_date": null,
-    "verified_at": null,
-    "primary_source": null,
-    "secondary_source": null,
-    "verification_evidence": [],
-    "verification_status": "🔴 UNVERIFIED CHANGE",
-    "last_attempt_at": "2026-09-23T23:00:15.914946+00:00",
-    "last_attempt_error": "ValueError",
-    "candidate_rate": 1.0
+    "rate_effective_date": "2026-09-24",
+    "last_policy_decision_date": "2026-09-18",
+    "verified_at": "2026-09-23T23:03:48.571916+00:00",
+    "primary_source": "https://www.boj.or.jp/en/",
+    "secondary_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
+    "verification_evidence": [
+      {
+        "currency": "JPY",
+        "instrument": "Short-Term Policy Interest Rate",
+        "source_url": "https://www.boj.or.jp/en/",
+        "rate": 1.25,
+        "retrieved_at": "2026-09-23T23:03:50.065237+00:00",
+        "superseded_terms_source": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
+        "superseded_terms_rate": 1.0,
+        "superseded_terms_revision_date": "2026-06-16",
+        "rate_effective_date": "2026-09-24",
+        "effective_date_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf"
+      },
+      {
+        "currency": "JPY",
+        "instrument": "Short-Term Policy Interest Rate",
+        "source_url": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
+        "rate": 1.25,
+        "retrieved_at": "2026-09-23T23:03:49.777156+00:00",
+        "last_policy_decision_date": "2026-09-18"
+      }
+    ],
+    "verification_status": "🟢 VERIFIED",
+    "last_attempt_at": "2026-09-23T23:03:48.571916+00:00"
   }
 }
