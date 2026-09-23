@@ -309,6 +309,28 @@ class StatcanLabourTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):fetch_statcan_labour(now=NOW,session=session)
         session.post.assert_called_once()
 
+    def test_official_html_outage_is_transport_failure_but_other_html_is_not(self):
+        for body, unavailable in [
+            ("<html><title>Statistics Canada - We're sorry! The website is currently unavailable / Statistique Canada</title></html>", True),
+            ("<html><title>Unexpected upstream page</title></html>", False),
+        ]:
+            with self.subTest(unavailable=unavailable):
+                response = requests.Response()
+                response.status_code = 200
+                response.headers['Content-Type'] = 'text/html; charset=UTF-8'
+                response._content = body.encode()
+                session = Mock()
+                session.post.return_value = response
+                if unavailable:
+                    with self.assertRaisesRegex(requests.RequestException, 'STATCAN_OFFICIAL_OUTAGE'):
+                        fetch_statcan_labour(now=NOW, session=session)
+                    session.note_official_outage.assert_called_once_with('www150.statcan.gc.ca')
+                else:
+                    with self.assertRaises(requests.exceptions.JSONDecodeError):
+                        fetch_statcan_labour(now=NOW, session=session)
+                    session.note_official_outage.assert_not_called()
+                session.post.assert_called_once()
+
 
 if __name__ == '__main__': unittest.main()
 
@@ -516,6 +538,18 @@ class StatCanGDPTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception,requests.RequestException)
         session=Mock();session.post.side_effect=requests.Timeout('offline')
         with self.assertRaises(requests.Timeout):fetch_statcan_gdp(now=NOW,session=session)
+
+    def test_gdp_official_html_outage_is_distinct_from_bad_json(self):
+        response = requests.Response()
+        response.status_code = 200
+        response.headers['Content-Type'] = 'text/html'
+        response._content = b"<title>Statistics Canada - We're sorry! The website is currently unavailable</title>"
+        session = Mock()
+        session.post.return_value = response
+        with self.assertRaisesRegex(requests.RequestException, 'STATCAN_OFFICIAL_OUTAGE'):
+            fetch_statcan_gdp(now=NOW, session=session)
+        session.note_official_outage.assert_called_once_with('www150.statcan.gc.ca')
+        session.post.assert_called_once()
 
     def test_confirmed_next_release_blocks_at_eastern_day_boundary(self):
         before = datetime(2026, 11, 30, 4, 59, tzinfo=timezone.utc)

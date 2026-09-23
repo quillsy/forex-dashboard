@@ -379,6 +379,27 @@ STATCAN_LABOUR_COORD = '1.7.1.1.1.1.0.0.0.0'
 STATCAN_LABOUR_TITLE = 'Canada;Unemployment rate;Total - Gender;15 years and over;Estimate;Seasonally adjusted'
 
 
+def _statcan_response_json(response, client):
+    """Distinguish StatCan's official HTTP-200 outage page from bad WDS JSON.
+
+    Only the exact public outage notice is a source failure. Unknown HTML or
+    malformed JSON remains a contract failure, so it cannot keep a prior value.
+    """
+    from collections.abc import Mapping
+    headers = getattr(response, 'headers', None)
+    content_type = headers.get('Content-Type', '') if isinstance(headers, Mapping) else ''
+    body = getattr(response, 'text', None)
+    if isinstance(content_type, str) and content_type.split(';', 1)[0].strip().lower() == 'text/html' and isinstance(body, str):
+        title = re.search(r'<title\b[^>]*>(.*?)</title\s*>', body[:8192], re.I | re.S)
+        normalized = re.sub(r'\s+', ' ', title.group(1)).strip().lower() if title else ''
+        if normalized.startswith("statistics canada - we're sorry! the website is currently unavailable"):
+            mark = getattr(client, 'note_official_outage', None)
+            if callable(mark):
+                mark('www150.statcan.gc.ca')
+            raise requests.RequestException('STATCAN_OFFICIAL_OUTAGE')
+    return response.json()
+
+
 def _statcan_object(payload):
     if (not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict)
             or payload[0].get('status') != 'SUCCESS'):
@@ -491,7 +512,7 @@ def fetch_statcan_labour(*, now=None, session=None):
                          ('getCubeMetadata', [{'productId': 14100287}])]:
         response = client.post(STATCAN_BASE + method, json=body, timeout=20)
         response.raise_for_status()
-        payloads.append(response.json())
+        payloads.append(_statcan_response_json(response, client))
     return parse_statcan_labour(*payloads, now=checked)
 
 
@@ -833,7 +854,7 @@ def fetch_statcan_gdp(*, now=None, session=None):
         response = client.post(STATCAN_BASE + method, json=body, timeout=20)
         response.raise_for_status()
         try:
-            payloads.append(response.json())
+            payloads.append(_statcan_response_json(response, client))
         except ValueError as exc:
             raise ValueError('STATCAN_GDP_JSON_INVALID') from exc
     return parse_statcan_gdp(*payloads, now=checked)
