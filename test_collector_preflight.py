@@ -54,6 +54,32 @@ class CollectorPreflightTests(unittest.TestCase):
         self.assertEqual(json.loads(marker.read_text())["last_daily_attempt_slot_utc"],
                          "2026-09-23T22:00:00.000Z")
 
+    def test_hourly_schedule_recovers_missing_daily_slot_after_cooldown(self):
+        slot = "7,17,27,37,47,57 * * * *"
+        marker = self.root / "daily_collection_status.json"
+        update_daily_markers("2026-09-23T22:07:00Z", {}, True, marker,
+                             reserve_provider_attempt=True)
+        self.assertEqual(preflight_decision("schedule", slot, "", self.root,
+                                            datetime(2026, 9, 23, 22, 17, tzinfo=timezone.utc)),
+                         (False, "daily"))
+        self.assertEqual(preflight_decision("schedule", slot, "", self.root,
+                                            datetime(2026, 9, 23, 22, 37, tzinfo=timezone.utc)),
+                         (True, "daily"))
+        update_daily_markers("2026-09-23T22:37:00Z", {}, False, marker,
+                             reserve_provider_attempt=True)
+        self.assertEqual(preflight_decision("schedule", slot, "", self.root,
+                                            datetime(2026, 9, 23, 23, 7, tzinfo=timezone.utc)),
+                         (True, "live"))
+        self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root,
+                                            datetime(2026, 9, 23, 23, 7, tzinfo=timezone.utc)),
+                         (False, "daily"))
+
+    def test_hourly_schedule_does_not_backdate_late_daily_snapshot(self):
+        slot = "7,17,27,37,47,57 * * * *"
+        self.assertEqual(preflight_decision("schedule", slot, "", self.root,
+                                            datetime(2026, 9, 23, 23, 31, tzinfo=timezone.utc)),
+                         (True, "live"))
+
     def test_collector_marker_update_preserves_reserved_attempt(self):
         marker = self.root / "daily_collection_status.json"
         update_daily_markers("2026-09-23T22:12:00Z", {}, False, marker,
