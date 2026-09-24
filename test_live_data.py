@@ -321,6 +321,11 @@ class LiveDataTests(unittest.TestCase):
             'https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M',
             'https://api.statistiken.bundesbank.de/rest/data/BBSSY/D.REN.EUR.A610.000000WT0202.A',
             'https://www.bankofcanada.ca/valet/observations/BD.CDN.2YR.DQ.YLD/json',
+            'https://fred.stlouisfed.org/series/CPIAUCNS',
+            'https://fred.stlouisfed.org/series/UNRATE',
+            'https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv',
+            'https://www.e-stat.go.jp/en/stat-search/database?layout=dataset&statdisp_id=0004052037',
+            'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401',
         )
         for url in urls:
             with self.subTest(url=url):

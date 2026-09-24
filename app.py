@@ -5095,6 +5095,8 @@ def get_macro_observation_details(curr, category, target_date=None):
                 valid_range = value is not None and (0 <= value <= 25 if category == "Arbeitsmarkt" else abs(value) <= 25)
                 result.update(date=age_observed.strftime("%Y-%m-%d"), source="FRED" if is_live else "Demo",
                               freshness=freshness if valid_range else "FAILED")
+                if curr == "USD" and category == "Arbeitsmarkt" and series_id == "UNRATE" and is_live:
+                    result["source_url"] = "https://fred.stlouisfed.org/series/UNRATE"
                 if valid_range and freshness in ("FRESH", "AGING"):
                     result["value"] = value
                 return result
@@ -5486,6 +5488,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                 observations["Geldpolitik"]["source_url"] = "https://api.statistiken.bundesbank.de/rest/data/BBSSY/D.REN.EUR.A610.000000WT0202.A"
             elif curr == "CAD" and source == "Bank of Canada (2Y benchmark; BD.CDN.2YR.DQ.YLD)":
                 observations["Geldpolitik"]["source_url"] = "https://www.bankofcanada.ca/valet/observations/BD.CDN.2YR.DQ.YLD/json"
+            elif curr == "JPY" and source == "Japan MOF 2Y constant maturity":
+                observations["Geldpolitik"]["source_url"] = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
             if freshness["Geldpolitik"] in ("FRESH", "AGING"):
                 gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
                 gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
@@ -5499,6 +5503,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
             cpi = finite_number(cpi)
             freshness["Inflation"] = status
             observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+            if curr == "USD" and source == "FRED / BLS" and series_id == "CPIAUCNS":
+                observations["Inflation"]["source_url"] = "https://fred.stlouisfed.org/series/CPIAUCNS"
             if status == "SOURCE_UNAVAILABLE":
                 observations["Inflation"].update(_validation="SOURCE_UNAVAILABLE",
                                                   _reason="Inflationsquelle vorübergehend nicht erreichbar")
@@ -5522,6 +5528,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                         release = matching.iloc[-1]
                         if curr == "GBP" and series_id == "D7G7":
                             observations["Inflation"]["source_url"] = "https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data"
+                        if curr == "CAD" and series_id == "v41690973":
+                            observations["Inflation"]["source_url"] = "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401"
                         if curr == "NZD":
                             for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
                                 if isinstance(release.get(field), str):
