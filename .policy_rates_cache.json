@@ -226,7 +226,7 @@
     "secondary_source": null,
     "verification_evidence": [],
     "verification_status": "🔴 OFFICIAL SOURCE UNAVAILABLE",
-    "last_attempt_at": "2026-09-23T23:28:23.258756+00:00",
+    "last_attempt_at": "2026-09-24T00:09:34.783388+00:00",
     "last_attempt_error": "RequestException"
   },
   "JPY": {
@@ -238,19 +238,16 @@
     "central_bank": "Bank of Japan",
     "rate_effective_date": "2026-09-24",
     "last_policy_decision_date": "2026-09-18",
-    "verified_at": "2026-09-23T23:03:48.571916+00:00",
-    "primary_source": "https://www.boj.or.jp/en/",
+    "verified_at": "2026-09-24T00:09:34.808837+00:00",
+    "primary_source": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
     "secondary_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
     "verification_evidence": [
       {
         "currency": "JPY",
         "instrument": "Short-Term Policy Interest Rate",
-        "source_url": "https://www.boj.or.jp/en/",
+        "source_url": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
         "rate": 1.25,
-        "retrieved_at": "2026-09-23T23:03:50.065237+00:00",
-        "superseded_terms_source": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
-        "superseded_terms_rate": 1.0,
-        "superseded_terms_revision_date": "2026-06-16",
+        "retrieved_at": "2026-09-24T00:09:35.294296+00:00",
         "rate_effective_date": "2026-09-24",
         "effective_date_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf"
       },
@@ -259,11 +256,11 @@
         "instrument": "Short-Term Policy Interest Rate",
         "source_url": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
         "rate": 1.25,
-        "retrieved_at": "2026-09-23T23:03:49.777156+00:00",
+        "retrieved_at": "2026-09-24T00:09:36.570539+00:00",
         "last_policy_decision_date": "2026-09-18"
       }
     ],
-    "verification_status": "🟢 VERIFIED",
-    "last_attempt_at": "2026-09-23T23:03:48.571916+00:00"
+    "verification_status": "🟢 VERIFIED_UNCHANGED",
+    "last_attempt_at": "2026-09-24T00:09:34.808837+00:00"
   }
 }
