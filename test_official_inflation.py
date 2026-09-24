@@ -74,7 +74,10 @@ class OfficialInflationTests(unittest.TestCase):
 
     def test_transport_injection_and_no_legacy_fallback(self):
         client = Mock(); client.get.return_value.json.return_value = estat()
-        self.assertEqual(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)["value"], 1.9)
+        result = fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)
+        self.assertEqual(result["value"], 1.9)
+        self.assertEqual(result["source_url"],
+                         "https://www.e-stat.go.jp/en/stat-search/database?layout=dataset&statdisp_id=0004052037")
         self.assertEqual(client.get.call_args.kwargs["params"]["statsDataId"], "0004052037")
         client.get.reset_mock(); client.get.return_value.raise_for_status.side_effect = requests.HTTPError()
         self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW))
