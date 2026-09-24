@@ -139,7 +139,8 @@ class LiveDataTests(unittest.TestCase):
 
     def test_failed_fetch_keeps_original_check_and_value(self):
         row = self.record()
-        updated = live.build_record('GDP', None, {}, 'UNAVAILABLE', (NOW + timedelta(minutes=30)).isoformat(), row)
+        updated = live.build_record('GDP', None, {}, 'UNAVAILABLE', (NOW + timedelta(minutes=30)).isoformat(),
+                                    row, 'SOURCE_UNAVAILABLE', 'Transport unavailable')
         self.assertEqual(updated['checked_at'], row['checked_at'])
         self.assertEqual(updated['score'], 20)
         self.assertIn('last_error', updated)
@@ -179,8 +180,99 @@ class LiveDataTests(unittest.TestCase):
 
     def test_failed_fetch_projects_previous_public_record(self):
         row=self.record();row['api_key']='private';row['observation']['secret']='private'
-        out=live.build_record('GDP',None,{},'UNAVAILABLE',NOW.isoformat(),row)
+        out=live.build_record('GDP',None,{},'UNAVAILABLE',NOW.isoformat(),row,
+                              'SOURCE_UNAVAILABLE', 'Transport unavailable')
         self.assertNotIn('private',str(out))
+
+    def test_missing_score_does_not_masquerade_as_transport_outage(self):
+        previous = live.build_record('Geldpolitik', 20,
+            {'policy_rate': 3.75, 'yield_2y': 3.8, 'date': '2026-09-05',
+             'source': 'Previously verified benchmark'}, 'FRESH', NOW.isoformat())
+        missing = live.build_record('Geldpolitik', None,
+            {'policy_rate': 3.75, 'yield_2y': None, 'date': None}, 'UNAVAILABLE',
+            (NOW + timedelta(minutes=20)).isoformat(), previous, 'VALID',
+            'Keine aktuell geprüfte 2J-Rendite mit passender Definition verfügbar')
+        self.assertEqual(missing['validation'], 'UNVERIFIED')
+        self.assertIsNone(missing['score'])
+        self.assertNotIn('last_error', missing)
+        self.assertFalse(live.eligible(missing, NOW + timedelta(minutes=20),
+                                       factor='Geldpolitik', currency='GBP')[0])
+
+    def test_new_observation_during_outage_cannot_keep_old_score(self):
+        previous = self.record()
+        for incoming_score, observation in (
+                (None, {'date': '2026-09-01', 'value': 2.1}),
+                (None, {'date': previous['observation']['date'], 'value': 2.1}),
+                (25, dict(previous['observation']))):
+            with self.subTest(score=incoming_score, observation=observation):
+                row = live.build_record('GDP', incoming_score, observation, 'UNAVAILABLE',
+                                        (NOW + timedelta(minutes=10)).isoformat(), previous,
+                                        'SOURCE_UNAVAILABLE', 'Metadatenquelle vorübergehend nicht erreichbar')
+                self.assertEqual(row['validation'], 'UNVERIFIED')
+                self.assertIsNone(row['score'])
+                self.assertNotIn('last_error', row)
+        same = live.build_record('GDP', previous['score'], dict(previous['observation']),
+                                 'FRESH', (NOW + timedelta(minutes=10)).isoformat(),
+                                 previous, 'SOURCE_UNAVAILABLE', 'Metadatenquelle vorübergehend nicht erreichbar')
+        self.assertEqual(same['score'], previous['score'])
+        self.assertEqual(same['checked_at'], previous['checked_at'])
+        self.assertEqual(same['last_error'], 'SOURCE_UNAVAILABLE')
+
+    def test_retained_monthly_labour_badge_ages_without_new_source_check(self):
+        checked = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+        viewed = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+        row = live.build_record('Arbeitsmarkt', 20,
+            {'value': 3.0, 'date': '2026-07-31', 'reference_period': '2026-07',
+             'source': 'Statistics Bureau of Japan', 'frequency': 'monthly',
+             'next_due_at': '2026-10-01T15:00:00+00:00'}, 'FRESH', checked.isoformat())
+        data = {'model_version': live.MODEL, 'completed_at': checked.isoformat(),
+                'currencies': {'JPY': {'Arbeitsmarkt': row}}}
+        self.assertEqual(row['freshness'], 'FRESH')
+        self.assertTrue(live.eligible(row, viewed, factor='Arbeitsmarkt', currency='JPY')[0])
+        result = live.details('JPY', viewed, data)
+        self.assertEqual(result['Arbeitsmarkt'], 20)
+        self.assertEqual(result['_freshness']['Arbeitsmarkt'], 'AGING')
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=data), patch.object(live, 'now_utc', return_value=viewed):
+            live.render_status(st)
+        rows = st.dataframe.call_args_list[1].args[0]
+        item = next(item for item in rows if item['Währung'] == 'JPY' and item['Faktor'] == 'Arbeitsmarkt')
+        self.assertEqual(item['Aktualität'], 'AGING')
+
+    def test_monthly_reference_uses_period_end_for_current_badge(self):
+        viewed = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+        row = live.build_record('Inflation', 20,
+            {'value': 2.0, 'date': '2026-08-01', 'frequency': 'monthly'},
+            'FRESH', viewed.isoformat())
+        self.assertEqual(live.current_freshness(row, viewed, 'Inflation'), 'FRESH')
+
+    def test_collector_revokes_old_policy_score_when_2y_yield_disappears(self):
+        checked = NOW + timedelta(minutes=20)
+        previous = live.build_record('Geldpolitik', 20,
+            {'policy_rate': 3.75, 'yield_2y': 3.8, 'date': '2026-09-05',
+             'source': 'Previously verified benchmark'}, 'FRESH', NOW.isoformat())
+        app = Mock()
+        app.compute_currency_details.return_value = {
+            'Geldpolitik': None,
+            '_observations': {'Geldpolitik': {'policy_rate': 3.75, 'yield_2y': None,
+                                              'date': None, 'source': ''}},
+            '_freshness': {'Geldpolitik': 'UNAVAILABLE'}}
+        app.get_verified_policy_rate.return_value = {'verification_timestamp': checked.isoformat()}
+        app.policy_rate_is_usable.return_value = True
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'GBP': {'Geldpolitik': previous}}}, path)
+            with patch.object(live, 'CURRENCIES', ('GBP',)), \
+                 patch.object(live, 'FACTORS', {'Geldpolitik': 35}), \
+                 patch.object(live, 'now_utc', return_value=checked):
+                live.collect(app, path)
+                result = live.load(path)['currencies']['GBP']['Geldpolitik']
+        self.assertEqual(result['validation'], 'UNVERIFIED')
+        self.assertIsNone(result['score'])
+        self.assertNotIn('last_error', result)
+        self.assertIn('2J-Rendite', result['reason'])
+        self.assertFalse(live.eligible(result, checked, factor='Geldpolitik', currency='GBP')[0])
 
     def test_cache_restarts_do_not_renew_check(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,7 +422,7 @@ class LiveDataTests(unittest.TestCase):
             data['completed_at'] = timestamp
             self.assertFalse(live.details('EUR', NOW, data)['_live_checked'])
 
-    def test_collector_metadata_outage_retains_but_conflict_invalidates(self):
+    def test_collector_metadata_outage_cannot_hide_new_raw_score(self):
         previous = self.record()
         previous['factor'] = 'Arbeitsmarkt'
         previous['observation']['series_id'] = 'TEST_GDP'
@@ -346,23 +438,62 @@ class LiveDataTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / 'live.json'
                 live.save({'model_version': live.MODEL, 'currencies': {'USD': {'Arbeitsmarkt': previous}}}, path)
-                app.requests.get.side_effect = requests.RequestException('unavailable') if outage is True else None
+                app.requests.get.side_effect = requests.exceptions.Timeout('unavailable') if outage is True else None
                 app.requests.get.return_value = Mock()
                 if outage == "invalid_json":
                     app.requests.get.return_value.json.side_effect = requests.exceptions.JSONDecodeError("bad", "invalid", 0)
                 with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), patch('source_contracts.validate_fred_metadata', return_value=False):
                     live.collect(app, path)
                 result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
-                if outage is True:
-                    self.assertEqual(result['checked_at'], previous['checked_at'])
-                    self.assertEqual(result['score'], previous['score'])
-                    self.assertEqual(result['last_error'], 'SOURCE_UNAVAILABLE')
-                    self.assertTrue(live.eligible(result, NOW + timedelta(minutes=30))[0])
-                    self.assertFalse(live.eligible(result, NOW + timedelta(hours=1))[0])
-                    self.assertFalse(live.eligible(result, NOW + timedelta(days=1))[0])
-                else:
-                    self.assertEqual(result['validation'], 'UNVERIFIED')
-                    self.assertFalse(live.eligible(result, NOW)[0])
+                self.assertEqual(result['validation'], 'UNVERIFIED')
+                self.assertIsNone(result['score'])
+                self.assertFalse(live.eligible(result, NOW)[0])
+
+        # A parser/schema failure must not be reclassified by a concurrent
+        # failure of the separate metadata endpoint.
+        app.compute_currency_details.return_value = {
+            'Arbeitsmarkt': None,
+            '_observations': {'Arbeitsmarkt': {**previous['observation'], '_validation': 'UNVERIFIED'}},
+            '_freshness': {'Arbeitsmarkt': 'UNAVAILABLE'}}
+        app.requests.get.side_effect = requests.exceptions.Timeout('metadata offline')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL, 'currencies': {'USD': {'Arbeitsmarkt': previous}}}, path)
+            with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)):
+                live.collect(app, path)
+            result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
+            self.assertEqual(result['validation'], 'UNVERIFIED')
+            self.assertIsNone(result['score'])
+
+    def test_fred_missing_key_or_permanent_http_error_cannot_retain_old_score(self):
+        previous = self.record()
+        previous['factor'] = 'Arbeitsmarkt'
+        previous['observation']['series_id'] = 'TEST_LABOUR'
+        app = Mock()
+        app.compute_currency_details.return_value = {
+            'Arbeitsmarkt': 99,
+            '_observations': {'Arbeitsmarkt': dict(previous['observation'])},
+            '_freshness': {'Arbeitsmarkt': 'FRESH'}}
+        response = requests.Response()
+        response.status_code = 401
+        response.url = 'https://api.stlouisfed.org'
+        with self.assertRaises(requests.exceptions.HTTPError) as caught:
+            response.raise_for_status()
+        for missing_key in (True, False):
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'live.json'
+                live.save({'model_version': live.MODEL,
+                           'currencies': {'USD': {'Arbeitsmarkt': previous}}}, path)
+                app.FRED_KEY = None if missing_key else 'test-only'
+                app.requests.get.side_effect = None if missing_key else caught.exception
+                with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=20)), \
+                     patch.object(live, 'CURRENCIES', ('USD',)), \
+                     patch.object(live, 'FACTORS', {'Arbeitsmarkt': 20}):
+                    live.collect(app, path)
+                    result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
+                self.assertEqual(result['validation'], 'UNVERIFIED')
+                self.assertIsNone(result['score'])
+                self.assertNotIn('last_error', result)
 
     def test_runtime_path_is_stable_per_checkout_and_does_not_create_directory(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(live.tempfile, 'gettempdir', return_value=tmp):
@@ -437,6 +568,179 @@ class LiveDataTests(unittest.TestCase):
             self.assertEqual(row['reason'], 'No verified 2Y yield')
             self.assertNotIn('last_error', row)
             self.assertFalse(live.eligible(row, NOW)[0])
+
+
+class DirectMacroFailureClassificationTests(unittest.TestCase):
+    def test_ons_and_quarterly_labour_only_classify_transport_as_outage(self):
+        import ast
+        from test_core_regressions import load_core
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name == 'get_macro_observation_details')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<macro-route>', 'exec'), core)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+        core.update(datetime=Clock, requests=requests)
+        cases = (('GBP', 'GDP', 'official_ons.fetch_ons_gdp'),
+                 ('GBP', 'Arbeitsmarkt', 'official_ons.fetch_ons_labour'),
+                 ('CHF', 'Arbeitsmarkt', 'official_quarterly_labour.fetch_quarterly_labour'),
+                 ('NZD', 'Arbeitsmarkt', 'official_quarterly_labour.fetch_quarterly_labour'))
+        for currency, factor, target in cases:
+            for failure, expected in ((requests.exceptions.Timeout('offline'), 'SOURCE_UNAVAILABLE'),
+                                      (requests.RequestException('unspecified'), 'UNVERIFIED'),
+                                      (requests.exceptions.JSONDecodeError('bad', '{', 0), 'UNVERIFIED'),
+                                      (ValueError('schema conflict'), 'UNVERIFIED')):
+                with self.subTest(currency=currency, factor=factor, expected=expected), \
+                     patch(target, side_effect=failure):
+                    result = core['get_macro_observation_details'](currency, factor, NOW.date().isoformat())
+                    self.assertIsNone(result['value'])
+                    self.assertEqual(result['_validation'], expected)
+
+
+class CpiTransportClassificationTests(unittest.TestCase):
+    def test_only_temporary_http_and_network_failures_allow_cache_reuse(self):
+        for status, expected in ((503, True), (429, True), (404, False), (401, False)):
+            response = requests.Response()
+            response.status_code = status
+            response.url = 'https://official.example'
+            with self.subTest(status=status):
+                with self.assertRaises(requests.exceptions.HTTPError) as caught:
+                    response.raise_for_status()
+                self.assertEqual(live.temporary_source_outage(caught.exception), expected)
+        self.assertTrue(live.temporary_source_outage(requests.exceptions.Timeout('offline')))
+        self.assertFalse(live.temporary_source_outage(requests.exceptions.SSLError('certificate')))
+        self.assertFalse(live.temporary_source_outage(requests.RequestException('unknown')))
+        self.assertFalse(live.temporary_source_outage(
+            requests.exceptions.JSONDecodeError('bad', '{', 0)))
+
+    def test_cpi_loaders_propagate_only_confirmed_transport_failures(self):
+        import ast
+        import pandas as pd
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        names = {'get_ons_cpi_data', 'get_statcan_cpi_data', 'get_statsnz_cpi_data', 'get_fred_data'}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        for node in nodes:
+            node.decorator_list = []
+        transport = Mock(exceptions=requests.exceptions, RequestException=requests.RequestException)
+        ns = {'requests': transport, 'live_data': live, 'pd': pd, 'datetime': datetime,
+              'check_demo_active': lambda: False,
+              'fetch_fred_live': Mock(side_effect=requests.exceptions.Timeout('offline')),
+              'parse_statsnz_cpi_release': Mock(return_value=None)}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<cpi-loaders>', 'exec'), ns)
+        transport.get.side_effect = requests.exceptions.Timeout('offline')
+        transport.post.side_effect = requests.exceptions.Timeout('offline')
+        for name, args in (('get_ons_cpi_data', ()), ('get_statcan_cpi_data', ()),
+                           ('get_statsnz_cpi_data', ()), ('get_fred_data', ('CPIAUCNS', 'test-only'))):
+            with self.subTest(loader=name):
+                with self.assertRaises(requests.exceptions.Timeout):
+                    ns[name](*args, propagate_transport=True)
+                self.assertFalse(ns[name](*args, propagate_transport=False)[-1])
+        transport.get.side_effect = None
+        for status in (401, 503):
+            response = requests.Response()
+            response.status_code = status
+            response.url = 'https://www.ons.gov.uk'
+            transport.get.return_value = response
+            with self.subTest(ons_status=status):
+                if status == 503:
+                    with self.assertRaises(requests.exceptions.HTTPError):
+                        ns['get_ons_cpi_data'](propagate_transport=True)
+                else:
+                    self.assertFalse(ns['get_ons_cpi_data'](propagate_transport=True)[-1])
+        malformed = requests.Response()
+        malformed.status_code = 200
+        malformed._content = b'{invalid-json'
+        transport.get.return_value = malformed
+        self.assertFalse(ns['get_ons_cpi_data'](propagate_transport=True)[-1])
+
+        outage = requests.Response()
+        outage.status_code = 200
+        outage.headers['Content-Type'] = 'text/html'
+        outage._content = b"<html><title>Statistics Canada - We're sorry! The website is currently unavailable</title></html>"
+        transport.post.side_effect = None
+        transport.post.return_value = outage
+        with self.assertRaisesRegex(requests.RequestException, 'STATCAN_OFFICIAL_OUTAGE'):
+            ns['get_statcan_cpi_data'](propagate_transport=True)
+
+        unknown_html = requests.Response()
+        unknown_html.status_code = 200
+        unknown_html.headers['Content-Type'] = 'text/html'
+        unknown_html._content = b'<html><title>Unexpected response</title></html>'
+        transport.post.return_value = unknown_html
+        self.assertFalse(ns['get_statcan_cpi_data'](propagate_transport=True)[-1])
+
+    def test_stats_nz_older_quarter_cannot_override_unchecked_newer_quarter(self):
+        import ast
+        import pandas as pd
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        loader = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == 'get_statsnz_cpi_data')
+        loader.decorator_list = []
+        transport = Mock(exceptions=requests.exceptions, RequestException=requests.RequestException)
+        responses = []
+        for status in (503, 200, 404):
+            response = requests.Response()
+            response.status_code = status
+            response.url = 'https://www.stats.govt.nz'
+            response._content = b'official CPI page' if status == 200 else b''
+            responses.append(response)
+        transport.get.side_effect = responses
+        parser = Mock(return_value={'date': pd.Timestamp('2026-03-31'), 'value': 2.8})
+        ns = {'requests': transport, 'live_data': live, 'pd': pd, 'datetime': datetime,
+              'parse_statsnz_cpi_release': parser}
+        exec(compile(ast.Module(body=[loader], type_ignores=[]), '<stats-nz-cpi>', 'exec'), ns)
+        with self.assertRaises(requests.exceptions.Timeout):
+            ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertEqual(parser.call_count, 1)
+
+        denied = requests.Response()
+        denied.status_code = 403
+        denied.url = 'https://www.stats.govt.nz'
+        denied._content = b'access denied'
+        transport.get.side_effect = [denied, responses[1], responses[2]]
+        result = ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertIsNone(result[0])
+        self.assertFalse(result[-1])
+        transport.get.side_effect = [responses[2], responses[1]]
+        result = ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertTrue(result[-1])
+
+    def test_current_cpi_transport_status_reaches_collector_validation(self):
+        import ast
+        import pandas as pd
+        from test_core_regressions import load_core
+        checked = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == 'get_cpi_yoy_details')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<cpi-route>', 'exec'), core)
+        core.update(datetime=Clock, pd=pd, requests=requests, FRED_KEY='test-only',
+                    get_ons_cpi_data=Mock(side_effect=requests.exceptions.Timeout('offline')),
+                    get_statcan_cpi_data=Mock(side_effect=requests.exceptions.Timeout('offline')),
+                    get_statsnz_cpi_data=Mock(side_effect=requests.exceptions.Timeout('offline')),
+                    get_fred_data=Mock(side_effect=requests.exceptions.Timeout('offline')))
+        with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+            for currency in ('GBP', 'CAD', 'NZD', 'USD'):
+                with self.subTest(currency=currency):
+                    result = core['get_cpi_yoy_details'](currency, checked.date().isoformat())
+                    self.assertIsNone(result[0])
+                    self.assertEqual(result[5], 'SOURCE_UNAVAILABLE')
+                    detail = core['compute_currency_details'](
+                        currency, checked.date().isoformat(), include_context=False,
+                        factors_to_refresh=('Inflation',))
+                    self.assertEqual(detail['_observations']['Inflation']['_validation'], 'SOURCE_UNAVAILABLE')
 
 
 class ReleaseAwareCollectionTests(unittest.TestCase):
@@ -639,7 +943,7 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
         for currency, factor in (('AUD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('JPY', 'Arbeitsmarkt'),
                                  ('NZD', 'GDP'), ('CAD', 'Arbeitsmarkt'), ('CAD', 'GDP'), ('USD', 'GDP'), ('CHF', 'GDP'), ('JPY', 'GDP')):
             with self.subTest(currency=currency, factor=factor):
-                previous, row = self.collect_case(currency, factor, requests.RequestException('offline'))
+                previous, row = self.collect_case(currency, factor, requests.exceptions.Timeout('offline'))
                 for field in ('score', 'checked_at', 'expires_at', 'next_due_at'):
                     self.assertEqual(row[field], previous[field])
                 self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
@@ -727,7 +1031,7 @@ class SwissHicpCollectorIntegrationTests(unittest.TestCase):
         self.assertFalse(live.eligible(row, self.now, factor='Inflation', currency='CHF')[0])
 
     def test_swiss_hicp_transport_failure_keeps_original_freshness_deadlines(self):
-        previous, row = self.collect_case(requests.RequestException('offline'))
+        previous, row = self.collect_case(requests.exceptions.Timeout('offline'))
         for field in ('score', 'observation', 'checked_at', 'next_due_at', 'expires_at'):
             self.assertEqual(row[field], previous[field])
         self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
@@ -797,7 +1101,7 @@ class TreasuryCollectorIntegrationTests(unittest.TestCase):
         self.assertTrue(live.eligible(row, self.now, factor='Geldpolitik', currency='USD')[0])
 
     def test_treasury_transport_failure_preserves_only_original_deadlines(self):
-        previous, row = self.collect_case(requests.RequestException('offline'))
+        previous, row = self.collect_case(requests.exceptions.Timeout('offline'))
         for field in ('score', 'checked_at', 'expires_at', 'next_due_at', 'observation'):
             self.assertEqual(row[field], previous[field])
         self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')

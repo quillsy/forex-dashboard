@@ -9,6 +9,8 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import requests as http
+
 MODEL = "CORE_V2_8_2026_09"
 PATH = Path("live_core_data.json")
 FACTORS = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
@@ -39,6 +41,53 @@ def number(value):
         return val if math.isfinite(val) else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def temporary_source_outage(error):
+    """Only confirmed temporary transport failures permit bounded cache reuse."""
+    if isinstance(error, http.exceptions.JSONDecodeError):
+        return False
+    if isinstance(error, http.exceptions.HTTPError):
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        return type(status) is int and (status in (408, 425, 429) or 500 <= status < 600)
+    if isinstance(error, http.exceptions.SSLError):
+        return False
+    if isinstance(error, (http.exceptions.Timeout, http.exceptions.ConnectionError,
+                          http.exceptions.ChunkedEncodingError)):
+        return True
+    return (isinstance(error, http.exceptions.RequestException)
+            and error.args == ("STATCAN_OFFICIAL_OUTAGE",))
+
+
+def current_freshness(record, now, factor):
+    """Age the displayed badge without treating time passing as a new check."""
+    if not isinstance(record, dict) or record.get("freshness") not in ("FRESH", "AGING"):
+        return "UNAVAILABLE"
+    observation = record.get("observation")
+    if not isinstance(observation, dict):
+        return "UNAVAILABLE"
+    try:
+        reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return "UNAVAILABLE"
+    quarterly = observation.get("frequency") == "quarterly"
+    if factor in ("Inflation", "Arbeitsmarkt", "PMI") and not quarterly:
+        import calendar
+        reference = reference.replace(day=calendar.monthrange(reference.year, reference.month)[1])
+    if factor == "Geldpolitik":
+        fresh_days, max_days = 5, 15
+    elif factor == "GDP" or (factor == "Arbeitsmarkt" and quarterly):
+        fresh_days, max_days = 120, 180
+    elif factor == "Inflation" and quarterly:
+        fresh_days, max_days = 90, 180
+    else:
+        fresh_days, max_days = 45, 90
+    age = (now.date() - reference).days
+    if age < 0:
+        return "UNAVAILABLE"
+    if age > max_days:
+        return "STALE"
+    return "AGING" if age > fresh_days or record["freshness"] == "AGING" else "FRESH"
 
 
 def runtime_directory():
@@ -155,7 +204,7 @@ def details(currency, now=None, data=None):
         record = record if isinstance(record, dict) else {}
         valid, reason = eligible(record, now, factor=factor, currency=currency)
         result[factor] = number(record.get("score")) if valid else None
-        result["_freshness"][factor] = record.get("freshness", "FRESH") if valid else "UNAVAILABLE"
+        result["_freshness"][factor] = current_freshness(record, now, factor) if valid else "UNAVAILABLE"
         result["_observations"][factor] = copy.deepcopy(record.get("observation", {}))
         result["_live_reasons"][factor] = reason
         result["_blocking_reasons"][factor] = None if valid else reason
@@ -219,16 +268,33 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
     valid_score = number(score)
     # An unsuccessful check must not advance the last good check timestamp.
     if valid_score is None or validation != "VALID":
+        prior_observation = previous.get("observation", {}) if isinstance(previous, dict) else {}
+        prior_observation = prior_observation if isinstance(prior_observation, dict) else {}
+        prior_score = number(previous.get("score")) if isinstance(previous, dict) else None
+        newly_observed = ((valid_score is not None and
+                           (valid_score != prior_score or observation.get("date") is None or
+                            any(observation.get(key) != prior_observation.get(key)
+                                for key in ("series_id", "source")))) or
+                          (observation.get("date") is not None and
+                           observation.get("date") != prior_observation.get("date")) or
+                          any(number(observation.get(key)) is not None and
+                              number(observation.get(key)) != number(prior_observation.get(key))
+                              for key in ("value", "policy_rate", "yield_2y")))
         if (isinstance(previous, dict) and previous.get("validation") == "VALID"
                 and number(previous.get("score")) is not None
-                and validation in ("VALID", "SOURCE_UNAVAILABLE")):
+                and validation == "SOURCE_UNAVAILABLE" and not newly_observed):
             record = {key: copy.deepcopy(previous.get(key)) for key in
                       ("factor", "score", "validation", "reason", "freshness", "checked_at", "published_at", "next_due_at", "expires_at")}
             record["observation"] = public_observation(previous.get("observation", {}))
             record["last_error"] = "SOURCE_UNAVAILABLE"
             record["last_attempt_at"] = checked_at
             return record
-        return {"score": None, "validation": validation, "reason": reason or "Daten fehlen",
+        # A missing score alone does not prove a transport outage. In
+        # particular, a disappeared 2Y yield or a swallowed parser error must
+        # revoke the old score instead of being relabelled SOURCE_UNAVAILABLE.
+        return {"score": None, "validation": "UNVERIFIED" if validation == "VALID" or newly_observed else validation,
+                "reason": "Neu beobachteter Wert oder Referenzperiode ungeprüft" if newly_observed and validation == "SOURCE_UNAVAILABLE"
+                          else reason or "Daten fehlen oder Berechnung nicht bestätigt",
                 "last_attempt_at": checked_at, "observation": public_observation(observation)}
     observed = observation.get("date")
     try:
@@ -276,7 +342,7 @@ def collect(app, path=PATH):
         if not series:
             return False
         if not app.FRED_KEY:
-            return None
+            return False
         try:
             if series not in metadata:
                 response = app.requests.get("https://api.stlouisfed.org/fred/series",
@@ -286,8 +352,10 @@ def collect(app, path=PATH):
         except (ValueError, TypeError):
             # Invalid JSON is a contract failure, not a confirmed transport outage.
             return False
+        except http.exceptions.RequestException as error:
+            return None if temporary_source_outage(error) else False
         except Exception:
-            return None
+            return False
         # A transport failure cannot prove a definition conflict.
         return validate_fred_metadata(metadata[series], series, category)
 
@@ -321,13 +389,13 @@ def collect(app, path=PATH):
             elif factor in ("Arbeitsmarkt", "GDP") and currency not in ("EUR", "GBP") and not (factor == "Arbeitsmarkt" and currency in ("CHF", "NZD", "JPY", "CAD")) and currency not in ("AUD", "JPY", "CAD") and not (factor == "GDP" and currency in ("CHF", "USD", "NZD")):
                 contract = fred_contract(observation.get("series_id"), factor)
                 if contract is not True:
-                    validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
-                    reason = "Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Amtliche Serien-Metadaten fehlen oder passen nicht"
+                    validation = "SOURCE_UNAVAILABLE" if contract is None and validation == "VALID" and number(raw.get(factor)) is not None else "UNVERIFIED"
+                    reason = "Metadatenquelle vorübergehend nicht erreichbar" if validation == "SOURCE_UNAVAILABLE" else "Amtliche Daten oder Serien-Metadaten nicht bestätigt"
             elif factor == "Inflation" and currency == "USD":
                 contract = fred_contract("CPIAUCNS", factor)
                 if contract is not True:
-                    validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
-                    reason = "CPI-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "CPI-Metadaten nicht bestätigt"
+                    validation = "SOURCE_UNAVAILABLE" if contract is None and validation == "VALID" and number(raw.get(factor)) is not None else "UNVERIFIED"
+                    reason = "CPI-Metadatenquelle vorübergehend nicht erreichbar" if validation == "SOURCE_UNAVAILABLE" else "CPI-Rohdaten oder Metadaten nicht bestätigt"
             elif factor == "Geldpolitik":
                 source = observation.get("source") or ""
                 if "EODHD" in source:
@@ -340,8 +408,8 @@ def collect(app, path=PATH):
                 elif currency == "USD":
                     contract = fred_contract("DGS2", factor)
                     if contract is not True:
-                        validation = "SOURCE_UNAVAILABLE" if contract is None else "UNVERIFIED"
-                        reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if contract is None else "Rendite-Metadaten nicht bestätigt"
+                        validation = "SOURCE_UNAVAILABLE" if contract is None and validation == "VALID" and number(raw.get(factor)) is not None else "UNVERIFIED"
+                        reason = "Rendite-Metadatenquelle vorübergehend nicht erreichbar" if validation == "SOURCE_UNAVAILABLE" else "Rendite-Rohdaten oder Metadaten nicht bestätigt"
                 if currency == "USD" and source.startswith("US Treasury"):
                     old = prior_records.get(factor)
                     old_obs = old.get("observation", {}) if isinstance(old, dict) else {}
@@ -427,6 +495,7 @@ def render_status(st, authorized=False):
             observation = record.get("observation", {})
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
+                         "Aktualität": current_freshness(record, now, factor) if valid else "UNAVAILABLE",
                          "Letzter Abruf": ("Fehlgeschlagen; letzter geprüfter Wert" if number(record.get("score")) is not None else "Fehlgeschlagen; kein geprüfter Wert") if record.get("last_error") else "Siehe Prüfzeit",
                          "Wert": observation.get("yield_2y") if factor == "Geldpolitik" else observation.get("value"),
                          "Leitzins (%)": observation.get("policy_rate") if factor == "Geldpolitik" else None,

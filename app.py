@@ -2161,7 +2161,7 @@ def is_data_valid(val, is_live):
 
 # ----------------- 2. CACHED API LOADERS (Zero-Overlap & TTLs) -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_ons_cpi_data():
+def get_ons_cpi_data(*, propagate_transport=False):
     """
     Fetches the Consumer Price Index (CPI) 12-month rate (series D7G7) from the ONS timeseries API.
     Returns: (df, last_update_time, is_live)
@@ -2171,6 +2171,8 @@ def get_ons_cpi_data():
         url = "https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data"
         res = requests.get(url, timeout=15)
         if res.status_code != 200:
+            if res.status_code >= 400:
+                res.raise_for_status()
             raise ValueError(f"ONS HTTP Error {res.status_code}")
         
         data = res.json()
@@ -2224,7 +2226,9 @@ def get_ons_cpi_data():
             
         df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
         return df, datetime.now(), True
-    except Exception:
+    except Exception as error:
+        if propagate_transport and live_data.temporary_source_outage(error):
+            raise
         if check_demo_active():
             # Generate clean mock data
             mock_records = []
@@ -2241,7 +2245,7 @@ def get_ons_cpi_data():
         return None, datetime.now(), False
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_statcan_cpi_data():
+def get_statcan_cpi_data(*, propagate_transport=False):
     """
     Fetches CPI index levels (series v41690973) from Statistics Canada WDS API.
     Returns: (df, last_update_time, is_live)
@@ -2252,9 +2256,12 @@ def get_statcan_cpi_data():
         url = "https://www150.statcan.gc.ca/t1/wds/rest/getDataFromVectorsAndLatestNPeriods"
         res = requests.post(url, json=[{"vectorId": 41690973, "latestN": 300}], timeout=15)
         if res.status_code != 200:
+            if res.status_code >= 400:
+                res.raise_for_status()
             raise ValueError(f"StatCan HTTP Error {res.status_code}")
         
-        data = res.json()
+        from official_macro import _statcan_response_json
+        data = _statcan_response_json(res, requests)
         if not data or data[0].get("status") != "SUCCESS":
             raise ValueError(f"StatCan API status: {data[0].get('status') if data else 'Empty'}")
             
@@ -2287,7 +2294,9 @@ def get_statcan_cpi_data():
             
         df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
         return df, datetime.now(), True
-    except Exception:
+    except Exception as error:
+        if propagate_transport and live_data.temporary_source_outage(error):
+            raise
         if check_demo_active():
             mock_records = []
             now = datetime.now()
@@ -2503,7 +2512,7 @@ def parse_statsnz_cpi_release(html, expected_period):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_statsnz_cpi_data():
+def get_statsnz_cpi_data(*, propagate_transport=False):
     """Fetch the latest published quarter from Stats NZ without an API key.
 
     Release title, quarter, annual all-groups series and publication timestamp
@@ -2511,6 +2520,8 @@ def get_statsnz_cpi_data():
     Only the observed release is returned; historical vintages are not invented.
     """
     completed = pd.Timestamp.now(tz="UTC").tz_localize(None).to_period("Q") - 1
+    transient_failure = False
+    unverified_newer_page = False
     for offset in range(3):
         period = completed - offset
         slug = period.end_time.strftime("%B-%Y").lower()
@@ -2518,18 +2529,40 @@ def get_statsnz_cpi_data():
         try:
             response = requests.get(url, timeout=12)
             if response.status_code != 200:
+                if response.status_code == 404:
+                    continue
+                if propagate_transport and response.status_code >= 400:
+                    try:
+                        response.raise_for_status()
+                    except requests.exceptions.RequestException as error:
+                        if live_data.temporary_source_outage(error):
+                            transient_failure = True
+                        else:
+                            unverified_newer_page = True
+                    else:
+                        unverified_newer_page = True
+                elif propagate_transport:
+                    unverified_newer_page = True
                 continue
             record = parse_statsnz_cpi_release(response.text, str(period))
             if record is not None:
+                if propagate_transport and (transient_failure or unverified_newer_page):
+                    # An older page cannot establish that an unchecked newer
+                    # quarter has not been released.
+                    continue
                 record["source_url"] = url
                 return pd.DataFrame([record]), datetime.now(), True
-        except requests.RequestException:
+            unverified_newer_page = True
+        except requests.RequestException as error:
+            transient_failure |= live_data.temporary_source_outage(error)
             continue
+    if propagate_transport and transient_failure and not unverified_newer_page:
+        raise requests.exceptions.Timeout("STATS_NZ_CPI_TRANSPORT_UNAVAILABLE")
     return None, datetime.now(), False
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_fred_data(series_id, key, units=None):
+def get_fred_data(series_id, key, units=None, *, propagate_transport=False):
     if not key:
         if check_demo_active():
             return generate_mock_fred(series_id), datetime.now(), False
@@ -2537,7 +2570,9 @@ def get_fred_data(series_id, key, units=None):
     try:
         df = fetch_fred_live(series_id, key, units=units)
         return df, datetime.now(), True
-    except Exception:
+    except Exception as error:
+        if propagate_transport and live_data.temporary_source_outage(error):
+            raise
         if check_demo_active():
             return generate_mock_fred(series_id), datetime.now(), False
         return None, datetime.now(), False
@@ -3310,11 +3345,12 @@ def get_genuine_2y_yield_historical(curr, target_date, fred_key=FRED_KEY, eodhd_
             observation = fetch_treasury_2y(target_date, client=requests)
             if observation and observation_freshness(observation["observation_date"], target_date, 5, 15) in {"FRESH", "AGING"}:
                 return observation["value"], observation["observation_date"], observation["source"]
-        except requests.exceptions.RequestException:
-            return None, None, "US Treasury: SOURCE_UNAVAILABLE"
+        except requests.exceptions.RequestException as error:
+            return (None, None, "US Treasury: SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error)
+                    else "US Treasury: SOURCE_CONFLICT")
         except Exception:
             return None, None, "US Treasury: SOURCE_CONFLICT"
-        return None, None, "US Treasury: SOURCE_UNAVAILABLE"
+        return None, None, "US Treasury: NO_CURRENT_YIELD"
     # Historical USD paths retain FRED DGS2.
     if curr == "USD":
         if fred_key:
@@ -4450,8 +4486,8 @@ def get_current_official_cpi(curr):
             return result
     except requests.exceptions.JSONDecodeError:
         validation = "UNVERIFIED"
-    except requests.exceptions.RequestException:
-        validation = "SOURCE_UNAVAILABLE"
+    except requests.exceptions.RequestException as error:
+        validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
     except Exception:
         validation = "UNVERIFIED"
     else:
@@ -4469,6 +4505,8 @@ def get_cpi_yoy_details(curr: str, target_date=None):
         return (observation.get("value") if detail.get("Inflation") is not None else None,
                 observation.get("date"), "HICP_YOY" if curr in ("EUR", "CHF") else "CPI_YOY", observation.get("source", "UNAVAILABLE"),
                 observation.get("series_id"), detail["_freshness"].get("Inflation", "UNAVAILABLE"))
+    collector_current = (os.environ.get("FX_COLLECTOR") == "1" and
+                         (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()))
     if curr in ("EUR", "CHF", "JPY", "AUD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         observation = get_current_official_cpi(curr)
         if not observation:
@@ -4500,7 +4538,11 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             source = "ONS"
             series_id = "D7G7"
             
-            res_ons = get_ons_cpi_data()
+            try:
+                res_ons = get_ons_cpi_data(propagate_transport=collector_current)
+            except requests.exceptions.RequestException as error:
+                status = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNAVAILABLE"
+                return None, None, metric_type, source, series_id, status
             if res_ons is not None:
                 df, _, is_live = res_ons
                 if df is not None and not df.empty:
@@ -4543,7 +4585,11 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             source = "Statistics Canada"
             series_id = "v41690973"
             
-            res_statcan = get_statcan_cpi_data()
+            try:
+                res_statcan = get_statcan_cpi_data(propagate_transport=collector_current)
+            except requests.exceptions.RequestException as error:
+                status = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNAVAILABLE"
+                return None, None, metric_type, source, series_id, status
             if res_statcan is not None:
                 df, _, is_live = res_statcan
                 if df is not None and not df.empty:
@@ -4695,7 +4741,11 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             source = "Stats NZ"
             series_id = "CPIQ.SE9A"
             
-            res_statsnz = get_statsnz_cpi_data()
+            try:
+                res_statsnz = get_statsnz_cpi_data(propagate_transport=collector_current)
+            except requests.exceptions.RequestException as error:
+                status = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNAVAILABLE"
+                return None, None, metric_type, source, series_id, status
             if res_statsnz is not None:
                 df, _, is_live = res_statsnz
                 if df is not None and not df.empty:
@@ -4740,7 +4790,12 @@ def get_cpi_yoy_details(curr: str, target_date=None):
             
         if series_id and fred_key:
             units_param = "pc1" if curr == "USD" else None
-            df, _, is_live = get_fred_data(series_id, fred_key, units=units_param)
+            try:
+                df, _, is_live = get_fred_data(series_id, fred_key, units=units_param,
+                                               propagate_transport=collector_current and curr == "USD")
+            except requests.exceptions.RequestException as error:
+                status = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNAVAILABLE"
+                return None, None, metric_type, source, series_id, status
             if df is not None and not df.empty:
                 if not is_live and not check_demo_active():
                     pass
@@ -4891,7 +4946,7 @@ def get_macro_observation_details(curr, category, target_date=None):
     if (curr in ("AUD", "JPY", "CAD") or (curr in ("USD", "NZD") and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_macro import fetch_abs_observation, fetch_statcan_labour, fetch_statcan_gdp, fetch_japan_gdp, fetch_bea_gdp, fetch_nz_gdp
         from official_quarterly_labour import fetch_japan_labour
-        validation = "SOURCE_UNAVAILABLE"
+        validation = "UNVERIFIED"
         try:
             result = (fetch_abs_observation(category, session=requests) if curr == "AUD"
                       else (fetch_statcan_labour if category == "Arbeitsmarkt" else fetch_statcan_gdp)(session=requests) if curr == "CAD"
@@ -4908,8 +4963,8 @@ def get_macro_observation_details(curr, category, target_date=None):
                 return result
         except requests.exceptions.JSONDecodeError:
             validation = "UNVERIFIED"
-        except requests.exceptions.RequestException:
-            pass
+        except requests.exceptions.RequestException as error:
+            validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
         except Exception:
             validation = "UNVERIFIED"
         return {"value": None, "date": None, "source": {"NZD": "Stats NZ GDP expenditure", "USD": "BEA", "AUD": "ABS", "CAD": "Statistics Canada", "JPY": "Cabinet Office ESRI" if category == "GDP" else "Statistics Bureau of Japan"}[curr],
@@ -4918,6 +4973,7 @@ def get_macro_observation_details(curr, category, target_date=None):
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
     if curr == "GBP" and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_ons import fetch_ons_gdp, fetch_ons_labour
+        validation = "UNVERIFIED"
         try:
             result = (fetch_ons_gdp if category == "GDP" else fetch_ons_labour)(session=requests)
             if result:
@@ -4928,13 +4984,20 @@ def get_macro_observation_details(curr, category, target_date=None):
                 if result["freshness"] not in ("FRESH", "AGING"):
                     result["value"] = None
                 return result
+        except requests.exceptions.JSONDecodeError:
+            pass
+        except requests.exceptions.RequestException as error:
+            validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
         except Exception:
             pass
         return {"value": None, "date": None, "source": "ONS", "series_id": None,
-                "frequency": "quarterly" if category == "GDP" else "rolling_three_month_monthly_release", "freshness": "UNAVAILABLE"}
+                "frequency": "quarterly" if category == "GDP" else "rolling_three_month_monthly_release", "freshness": "UNAVAILABLE",
+                "_validation": validation,
+                "_reason": "ONS-Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED"
+                           else "ONS-Quelle vorübergehend nicht erreichbar"}
     if (curr == "EUR" or (curr == "CHF" and category == "GDP")) and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_macro import fetch_eurostat_observation
-        validation = "SOURCE_UNAVAILABLE"
+        validation = "UNVERIFIED"
         try:
             result = fetch_eurostat_observation(category, geo="CH" if curr == "CHF" else "EA21", session=requests)
             if result:
@@ -4945,8 +5008,8 @@ def get_macro_observation_details(curr, category, target_date=None):
                 return result
         except requests.exceptions.JSONDecodeError:
             validation = "UNVERIFIED"
-        except requests.exceptions.RequestException:
-            pass
+        except requests.exceptions.RequestException as error:
+            validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
         except Exception:
             validation = "UNVERIFIED"
         return {"value": None, "date": None, "source": "Eurostat", "series_id": None,
@@ -4954,6 +5017,7 @@ def get_macro_observation_details(curr, category, target_date=None):
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
     if category == "Arbeitsmarkt" and curr in ("CHF", "NZD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
         from official_quarterly_labour import fetch_quarterly_labour
+        validation = "UNVERIFIED"
         try:
             result = fetch_quarterly_labour(curr, session=requests)
             if result:
@@ -4962,10 +5026,16 @@ def get_macro_observation_details(curr, category, target_date=None):
                 if result["freshness"] not in ("FRESH", "AGING"):
                     result["value"] = None
                 return result
+        except requests.exceptions.JSONDecodeError:
+            pass
+        except requests.exceptions.RequestException as error:
+            validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
         except Exception:
             pass
         return {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": None,
-                "frequency": "quarterly", "freshness": "UNAVAILABLE"}
+                "frequency": "quarterly", "freshness": "UNAVAILABLE", "_validation": validation,
+                "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED"
+                           else "Amtliche Quelle vorübergehend nicht erreichbar"}
     series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
     result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
               "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
@@ -5394,6 +5464,9 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
             cpi = finite_number(cpi)
             freshness["Inflation"] = status
             observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
+            if status == "SOURCE_UNAVAILABLE":
+                observations["Inflation"].update(_validation="SOURCE_UNAVAILABLE",
+                                                  _reason="Inflationsquelle vorübergehend nicht erreichbar")
             if pd.Timestamp(dt_str).date() == datetime.now().date():
                 observations["Inflation"].update({"frequency": "quarterly" if curr == "NZD" else "monthly",
                     "unit": "annual percent change", "seasonal_adjustment": "NSA"})
@@ -5406,7 +5479,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     observations["Inflation"].update(official)
             if curr in ("NZD", "GBP", "CAD") and observed is not None:
                 loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
-                release_frame, _, _ = loader()
+                release_frame, _, _ = loader(propagate_transport=(os.environ.get("FX_COLLECTOR") == "1" and
+                                                              pd.Timestamp(dt_str).date() == datetime.now().date()))
                 if release_frame is not None:
                     matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
                     if not matching.empty:
