@@ -488,13 +488,32 @@ def parse_statcan_labour(series_payload, data_payload, cube_payload, *, now=None
     value, end, published = observations[period]
     if period != cube.get('cubeEndDate') or published != cube_release:
         raise ValueError('StatCan vector lags latest cube publication')
+    # Official 2026-2027 LFS release calendar (reference month -> next release):
+    # https://www150.statcan.gc.ca/n1/release-diffusion/2026-eng.pdf
+    # The Daily's release time is 08:30 Eastern:
+    # https://www150.statcan.gc.ca/n1/dai-quo/cal2-eng.htm
+    # If the calendar does not cover a later period, retain hourly checks.
+    release_days = {
+        '2026-07-01': '2026-09-04', '2026-08-01': '2026-10-09',
+        '2026-09-01': '2026-11-06', '2026-10-01': '2026-12-04',
+        '2026-11-01': '2027-01-08', '2026-12-01': '2027-02-05',
+        '2027-01-01': '2027-03-12',
+    }
+    next_day = release_days.get(period)
+    due = (datetime.strptime(next_day, '%Y-%m-%d').replace(
+        hour=8, minute=30, tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        if next_day else None)
+    if due is not None and checked >= due:
+        raise ValueError('Scheduled StatCan labour release not confirmed')
     return {'value': value, 'date': end.isoformat(), 'reference_period': period[:7],
             'source': 'Statistics Canada', 'source_url': 'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1410028701',
             'series_id': 'v2062815', 'frequency': 'monthly', 'unit': 'percent of labour force',
             'seasonal_adjustment': 'SA', 'geography': 'Canada excluding territories',
             'published_at': published.isoformat(), 'publication_basis': 'current WDS publication/revision time',
             'release_date_known': published.astimezone(ZoneInfo('America/Toronto')).date().isoformat(),
-            'checked_at': checked.isoformat(), 'next_due_at': None, 'needs_hourly_check': True,
+            'checked_at': checked.isoformat(), 'next_due_at': due.isoformat() if due else None,
+            'next_due_precision': 'official_0830_CA_Eastern' if due else None,
+            'needs_hourly_check': due is None,
             'reuse_terms': 'https://www.statcan.gc.ca/en/terms-conditions/open-licence'}
 
 
