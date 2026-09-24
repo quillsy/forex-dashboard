@@ -176,6 +176,8 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
             elif isinstance(status, str) and re.fullmatch(r"[0-9]{1,4}", status):
                 diagnostic["provider_status"] = int(status)
         result = parser(payload, now=now)
+        if result is not None and currency == "AUD":
+            result["source_url"] = ABS_URL
         diagnostic["code"] = "OK" if result is not None else "NO_ELIGIBLE_OBSERVATION"
         return result
     except requests.RequestException:

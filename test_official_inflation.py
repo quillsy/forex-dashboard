@@ -82,6 +82,12 @@ class OfficialInflationTests(unittest.TestCase):
         client.get.reset_mock()
         self.assertIsNone(fetch_official_cpi("JPY", client=client, now=NOW)); client.get.assert_not_called()
 
+    def test_abs_validated_result_carries_keyless_source_endpoint(self):
+        client = Mock(); client.get.return_value.json.return_value = abs_data()
+        result = fetch_official_cpi("AUD", client=client, now=NOW)
+        self.assertEqual(result['source_url'], 'https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M')
+        self.assertEqual(result['series_id'], 'CPI/3.10001.10.50.M')
+
     def test_safe_diagnostics_success_api_rejection_and_schema(self):
         client = Mock(); client.get.return_value.json.return_value = estat()
         diagnostics = {"old_field": "old"}
