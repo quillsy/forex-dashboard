@@ -77,7 +77,10 @@ class CollectorPreflightTests(unittest.TestCase):
     def test_hourly_schedule_does_not_backdate_late_daily_snapshot(self):
         slot = "7,17,27,37,47,57 * * * *"
         self.assertEqual(preflight_decision("schedule", slot, "", self.root,
-                                            datetime(2026, 9, 23, 23, 31, tzinfo=timezone.utc)),
+                                            datetime(2026, 9, 23, 23, 37, tzinfo=timezone.utc)),
+                         (True, "daily"))
+        self.assertEqual(preflight_decision("schedule", slot, "", self.root,
+                                            datetime(2026, 9, 23, 23, 45, tzinfo=timezone.utc)),
                          (True, "live"))
 
     def test_collector_marker_update_preserves_reserved_attempt(self):
@@ -106,13 +109,29 @@ class CollectorPreflightTests(unittest.TestCase):
         self.write_time("live_core_data.json", "completed_at", -1)
         self.assertTrue(self.decision())
 
-    def test_manual_push_and_daily_run_bypass_throttle(self):
+    def test_manual_and_primary_daily_run_bypass_provider_cooldown(self):
         self.write_time("live_core_data.json", "completed_at", 1)
         self.assertTrue(should_collect("workflow_dispatch", "", self.root, self.now,
                                        dispatch_mode="manual"))
-        self.assertTrue(self.decision("push"))
+        self.assertFalse(self.decision("push"))
         self.assertTrue(should_collect("schedule", "0 22 * * *", self.root,
             datetime(2026, 9, 23, 22, 0, tzinfo=timezone.utc)))
+
+    def test_push_obeys_cooldown_and_can_recover_daily_slot(self):
+        now = datetime(2026, 9, 23, 23, 7, tzinfo=timezone.utc)
+        marker = self.root / "daily_collection_status.json"
+        update_daily_markers("2026-09-23T22:58:00Z", {}, True, marker,
+                             reserve_provider_attempt=True)
+        self.assertEqual(preflight_decision("push", "", "", self.root, now),
+                         (False, "daily"))
+        after_cooldown = datetime(2026, 9, 23, 23, 37, tzinfo=timezone.utc)
+        self.assertEqual(preflight_decision("push", "", "", self.root, after_cooldown),
+                         (True, "daily"))
+        update_daily_markers("2026-09-23T23:37:00Z", {}, False, marker,
+                             reserve_provider_attempt=True)
+        self.assertEqual(preflight_decision("push", "", "", self.root,
+                                            datetime(2026, 9, 23, 23, 44, tzinfo=timezone.utc)),
+                         (False, "live"))
 
     def test_watchdog_hourly_slot_is_validated_and_respects_cooldown(self):
         slot = "2026-09-23T11:47:00.000Z"

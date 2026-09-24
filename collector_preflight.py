@@ -12,7 +12,9 @@ DAILY_SCHEDULE = "0 22 * * *"
 HOURLY_MINUTES = {7, 17, 27, 37, 47, 57}
 WATCHDOG_GRACE = timedelta(minutes=10)
 MAX_WATCHDOG_HOURLY_DELAY = timedelta(minutes=90)
-MAX_WATCHDOG_DAILY_DELAY = timedelta(minutes=90)
+# Leave at least 16 minutes before UTC midnight for the 15-minute job limit.
+# This also gives a 23:37 hourly attempt room to recover a missed 22:00 run.
+MAX_WATCHDOG_DAILY_DELAY = timedelta(minutes=104)
 
 
 def _timestamp(path, field):
@@ -85,6 +87,11 @@ def _daily_attempted(root, slot, now):
         return False
 
 
+def _daily_due(root, now):
+    slot = _daily_slot(now)
+    return now - slot <= MAX_WATCHDOG_DAILY_DELAY and not _daily_attempted(root, slot, now)
+
+
 def _watchdog_slot(raw, now):
     if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z", raw):
         return None
@@ -119,6 +126,11 @@ def preflight_decision(event, schedule, watchdog_slot="", root=Path("."), now=No
             # original 22:00 schedule retains its separate Daily priority.
             return not _daily_attempted(root, slot, now) and not _recent_attempt(root, now), "daily"
         return not _recent_attempt(root, now), "live"
+    if event == "push":
+        # A code merge is not a reason to spend another provider request only
+        # minutes after a successful run. The hourly schedule still refreshes
+        # within the normal 30-minute budget window.
+        return not _recent_attempt(root, now), "daily" if _daily_due(root, now) else "live"
     if event != "schedule":
         return True, "live"
     if schedule == DAILY_SCHEDULE:
@@ -132,9 +144,7 @@ def preflight_decision(event, schedule, watchdog_slot="", root=Path("."), now=No
     # attempt within the same daily window fill the missing snapshot slot.
     # It still obeys the provider cooldown and records a durable daily attempt
     # before any requests, so a late 22:00 event cannot duplicate collection.
-    slot = _daily_slot(now)
-    daily_due = now - slot <= MAX_WATCHDOG_DAILY_DELAY and not _daily_attempted(root, slot, now)
-    return not _recent_attempt(root, now), "daily" if daily_due else "live"
+    return not _recent_attempt(root, now), "daily" if _daily_due(root, now) else "live"
 
 
 def should_collect(event, schedule, root=Path("."), now=None, watchdog_slot="",
