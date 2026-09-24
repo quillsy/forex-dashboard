@@ -128,7 +128,13 @@ def preflight_decision(event, schedule, watchdog_slot="", root=Path("."), now=No
         if now - slot > MAX_WATCHDOG_DAILY_DELAY:
             return not _recent_attempt(root, now), "live"
         return not _daily_attempted(root, slot, now), "daily"
-    return not _recent_attempt(root, now), "live"
+    # GitHub can omit the 22:00 event entirely. Let the first eligible hourly
+    # attempt within the same daily window fill the missing snapshot slot.
+    # It still obeys the provider cooldown and records a durable daily attempt
+    # before any requests, so a late 22:00 event cannot duplicate collection.
+    slot = _daily_slot(now)
+    daily_due = now - slot <= MAX_WATCHDOG_DAILY_DELAY and not _daily_attempted(root, slot, now)
+    return not _recent_attempt(root, now), "daily" if daily_due else "live"
 
 
 def should_collect(event, schedule, root=Path("."), now=None, watchdog_slot="",
