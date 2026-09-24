@@ -264,9 +264,43 @@ class StatcanLabourTests(unittest.TestCase):
         result=parse_statcan_labour(*statcan_fixture(),now=NOW)
         self.assertEqual((result['value'],result['reference_period']), (6.4,'2026-08'))
         self.assertEqual(result['published_at'],'2026-09-04T12:30:00+00:00')
-        self.assertTrue(result['needs_hourly_check'])
-        self.assertIsNone(result['next_due_at'])
+        self.assertFalse(result['needs_hourly_check'])
+        self.assertEqual(result['next_due_at'],'2026-10-09T12:30:00+00:00')
         self.assertEqual(result['frequency'],'monthly')
+
+    def test_cached_observation_survives_outage_until_next_official_release(self):
+        import live_data
+        observation = parse_statcan_labour(*statcan_fixture(), now=NOW)
+        first = live_data.build_record('Arbeitsmarkt', 50.0, observation, 'FRESH', NOW.isoformat())
+        outage_time = datetime(2026, 9, 24, 0, 10, tzinfo=timezone.utc)
+        retained = live_data.build_record('Arbeitsmarkt', None, {}, 'UNAVAILABLE',
+                                          outage_time.isoformat(), first, 'SOURCE_UNAVAILABLE')
+        import json
+        retained = json.loads(json.dumps(retained))  # persisted record after a process restart
+        self.assertEqual(retained['checked_at'], first['checked_at'])
+        self.assertTrue(live_data.eligible(retained, now=outage_time,
+                                           factor='Arbeitsmarkt', currency='CAD')[0])
+        self.assertTrue(live_data.record_not_due(retained, 'CAD', 'Arbeitsmarkt', outage_time))
+        due = datetime(2026, 10, 9, 12, 30, tzinfo=timezone.utc)
+        self.assertFalse(live_data.eligible(retained, now=due,
+                                            factor='Arbeitsmarkt', currency='CAD')[0])
+        self.assertFalse(live_data.record_not_due(retained, 'CAD', 'Arbeitsmarkt', due))
+        with self.assertRaisesRegex(ValueError, 'Scheduled StatCan labour release'):
+            parse_statcan_labour(*statcan_fixture(), now=due)
+
+    def test_next_month_uses_its_own_deadline_and_unknown_calendar_fails_hourly(self):
+        data = statcan_fixture()
+        data[1][0]['object']['vectorDataPoint'][0].update(
+            refPer='2026-09-01', releaseTime='2026-10-09T08:30')
+        data[2][0]['object'].update(cubeEndDate='2026-09-01', releaseTime='2026-10-09T08:30')
+        result = parse_statcan_labour(*data, now=datetime(2026, 10, 9, 13, tzinfo=timezone.utc))
+        self.assertEqual(result['next_due_at'], '2026-11-06T13:30:00+00:00')
+        data[1][0]['object']['vectorDataPoint'][0].update(
+            refPer='2027-02-01', releaseTime='2027-03-12T08:30')
+        data[2][0]['object'].update(cubeEndDate='2027-02-01', releaseTime='2027-03-12T08:30')
+        result = parse_statcan_labour(*data, now=datetime(2027, 3, 12, 14, tzinfo=timezone.utc))
+        self.assertIsNone(result['next_due_at'])
+        self.assertTrue(result['needs_hourly_check'])
 
     def test_wrong_series_units_and_dimension_are_rejected(self):
         for key,value in [('vectorId',1),('coordinate','1.7.1.1.1.3.0.0.0.0'),('memberUomCode',428),('scalarFactorCode',3),('frequencyCode',9),('SeriesTitleEn','Other'),('terminated',1)]:
