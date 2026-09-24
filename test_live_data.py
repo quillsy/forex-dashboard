@@ -308,6 +308,9 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(live.public_observation({'source_url':url})['source_url'], url)
         for bad in (url+'?token=private',url+'#private',url.replace('www.stats.govt.nz','evil.example'),url.replace('https:','http:')):
             self.assertNotIn('source_url', live.public_observation({'source_url':bad}))
+        cpi='https://www.stats.govt.nz/information-releases/consumers-price-index-june-2026-quarter/'
+        self.assertEqual(live.public_observation({'source_url':cpi})['source_url'], cpi)
+        self.assertNotIn('source_url', live.public_observation({'source_url':cpi+'?api_key=private'}))
 
     def test_source_table_shows_both_policy_and_yield_when_value_is_null(self):
         record=live.build_record('Geldpolitik',20,{'value':None,'yield_2y':4.34,'policy_rate':4.25,
@@ -690,7 +693,8 @@ class CpiTransportClassificationTests(unittest.TestCase):
             response._content = b'official CPI page' if status == 200 else b''
             responses.append(response)
         transport.get.side_effect = responses
-        parser = Mock(return_value={'date': pd.Timestamp('2026-03-31'), 'value': 2.8})
+        parser = Mock(return_value={'date': pd.Timestamp('2026-03-31'), 'value': 2.8,
+                                    'next_due_at': '2026-10-21T11:00:00+00:00'})
         ns = {'requests': transport, 'live_data': live, 'pd': pd, 'datetime': datetime,
               'parse_statsnz_cpi_release': parser}
         exec(compile(ast.Module(body=[loader], type_ignores=[]), '<stats-nz-cpi>', 'exec'), ns)
@@ -707,6 +711,13 @@ class CpiTransportClassificationTests(unittest.TestCase):
         self.assertIsNone(result[0])
         self.assertFalse(result[-1])
         transport.get.side_effect = [responses[2], responses[1]]
+        result = ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertTrue(result[-1])
+        parser.return_value = {'date': pd.Timestamp('2026-03-31'), 'value': 2.8}
+        transport.get.side_effect = [responses[2], responses[1], responses[2]]
+        result = ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertFalse(result[-1])
+        transport.get.side_effect = [responses[1]]
         result = ns['get_statsnz_cpi_data'](propagate_transport=True)
         self.assertTrue(result[-1])
 
@@ -741,6 +752,39 @@ class CpiTransportClassificationTests(unittest.TestCase):
                         currency, checked.date().isoformat(), include_context=False,
                         factors_to_refresh=('Inflation',))
                     self.assertEqual(detail['_observations']['Inflation']['_validation'], 'SOURCE_UNAVAILABLE')
+
+    def test_nz_release_date_and_source_reach_collector_observation(self):
+        import pandas as pd
+        from test_core_regressions import load_core
+        checked = datetime(2026, 9, 24, 22, tzinfo=timezone.utc)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+
+        source_url = 'https://www.stats.govt.nz/information-releases/consumers-price-index-june-2026-quarter/'
+        frame = pd.DataFrame([{
+            'date': pd.Timestamp('2026-06-30'), 'value': 4.1,
+            'next_due_at': '2026-10-21T11:00:00+00:00',
+            'next_due_precision': 'date_only_start_of_NZ_day',
+            'source_url': source_url,
+            'source_title': 'Consumers price index: June 2026 quarter',
+            'is_pit_limited': True,
+        }])
+        core = load_core()
+        core.update(datetime=Clock,
+                    get_cpi_yoy_details=lambda *args: (4.1, '2026-06-30', 'CPI_YOY', 'Stats NZ', 'CPIQ.SE9A', '🟡 AGING'),
+                    get_statsnz_cpi_data=Mock(return_value=(frame, checked, True)),
+                    get_ons_cpi_data=Mock(), get_statcan_cpi_data=Mock())
+        with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+            result = core['compute_currency_details']('NZD', checked.date().isoformat(),
+                                                      include_context=False, factors_to_refresh=('Inflation',))
+        observation = result['_observations']['Inflation']
+        self.assertEqual(observation['next_due_at'], '2026-10-21T11:00:00+00:00')
+        self.assertEqual(observation['next_due_precision'], 'date_only_start_of_NZ_day')
+        self.assertEqual(observation['source_url'], source_url)
+        self.assertEqual(observation['source_title'], 'Consumers price index: June 2026 quarter')
 
 
 class ReleaseAwareCollectionTests(unittest.TestCase):

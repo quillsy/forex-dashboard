@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 import requests
+import live_data
 
 NAMES = {'fetch_fcs_history_live', 'parse_statsnz_cpi_release', 'get_statsnz_cpi_data', 'get_official_2y_data',
          'get_genuine_2y_yield_historical', 'finite_number', 'observation_freshness',
@@ -40,6 +41,20 @@ def nz_release(series='CPI all groups (annual)', published='2025-07-21 10:45:00'
     return '<div data-value="1"></div><div data-value="'+html.escape(json.dumps(payload), quote=True)+'"></div>'
 
 
+def nz_release_with_confirmed_next_date(duplicate=False):
+    next_date_block = {'ClassName': 'TextBlock',
+        'Title': 'Consumers price index: June 2026 quarter – next release date',
+        'Content': '<h2>Next release</h2><p><em>Consumers price index: September 2026 quarter</em> will be released on 22 October 2026.</p>'}
+    payload = {
+        'Title': 'Consumers price index: June 2026 quarter',
+        'DateTaxonomyTerm': {'PublicationDate': '2026-07-21 10:45:00'},
+        'FeaturedMedia': {'SeriesData': [{'GraphCsvData':
+            'Quarter,Mar-26,Jun-26\r\nCPI all groups (annual),3.1,4.1\r\n'}]},
+        'PageBlocks': [next_date_block] * (2 if duplicate else 1),
+    }
+    return '<div data-value="'+html.escape(json.dumps(payload), quote=True)+'"></div>'
+
+
 class FreeSources(unittest.TestCase):
     def setUp(self):
         self.n = load_sources()
@@ -51,6 +66,29 @@ class FreeSources(unittest.TestCase):
         self.assertEqual(row['release_date'], pd.Timestamp('2025-07-20 22:45'))
         self.assertIsNone(row['index_level'])
         self.assertIsNone(self.n['parse_statsnz_cpi_release']('{"status":"OK"}', '2025Q2'))
+
+    def test_nz_official_date_only_release_blocks_prior_quarter(self):
+        row = self.n['parse_statsnz_cpi_release'](nz_release_with_confirmed_next_date(), '2026Q2')
+        self.assertEqual(row['value'], 4.1)
+        self.assertEqual(row['next_due_at'], '2026-10-21T11:00:00+00:00')
+        self.assertEqual(row['next_due_precision'], 'date_only_start_of_NZ_day')
+        repeated = self.n['parse_statsnz_cpi_release'](nz_release_with_confirmed_next_date(duplicate=True), '2026Q2')
+        self.assertEqual(repeated['next_due_at'], row['next_due_at'])
+        record = live_data.build_record('Inflation', 100,
+            {'value': row['value'], 'date': '2026-06-30', 'frequency': 'quarterly',
+             'next_due_at': row['next_due_at'], 'next_due_precision': row['next_due_precision']},
+            'AGING', '2026-09-24T22:00:00+00:00')
+        before = datetime.fromisoformat('2026-10-21T10:59:59+00:00')
+        due = datetime.fromisoformat(row['next_due_at'])
+        self.assertTrue(live_data.eligible(record, before, factor='Inflation', currency='NZD')[0])
+        self.assertFalse(live_data.eligible(record, due, factor='Inflation', currency='NZD')[0])
+
+    def test_nz_wrong_next_quarter_or_ambiguous_date_is_not_used(self):
+        original = nz_release_with_confirmed_next_date()
+        for changed in (original.replace('September 2026 quarter', 'December 2026 quarter'),
+                        original.replace('22 October 2026', '22 October 2099')):
+            row = self.n['parse_statsnz_cpi_release'](changed, '2026Q2')
+            self.assertNotIn('next_due_at', row)
 
     def test_nz_wrong_period_quarterly_series_and_future_release_rejected(self):
         for payload, period in [(nz_release(),'2025Q1'),

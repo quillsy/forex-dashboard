@@ -251,7 +251,7 @@ def public_observation(observation):
                 result[key] = value
                 continue
             if isinstance(value, str) and len(value) <= 400 and re.fullmatch(
-                r"https://(?:www\.stats\.govt\.nz/information-releases/(?:labour-market-statistics-[a-z]+|gross-domestic-product-(?:march|june|september|december))-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
+                r"https://(?:www\.stats\.govt\.nz/information-releases/(?:labour-market-statistics-[a-z]+|gross-domestic-product-(?:march|june|september|december)|consumers-price-index-(?:march|june|september|december))-\d{4}-quarter/?|opendata\.swiss/(?:en/)?dataset/erwerbslosenquote-gemass-ilo-[a-z0-9-]+/?)", value):
                 result[key] = value
             continue
         if value is None or isinstance(value, (bool, int, float)):

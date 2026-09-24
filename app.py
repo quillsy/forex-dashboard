@@ -2492,6 +2492,29 @@ def parse_statsnz_cpi_release(html, expected_period):
             release = release.tz_localize("Pacific/Auckland").tz_convert("UTC").tz_localize(None)
             if release > pd.Timestamp.now(tz="UTC").tz_localize(None) or release < period.end_time.normalize():
                 continue
+            next_period = period + 1
+            next_title = f"Consumers price index: {next_period.end_time.strftime('%B %Y')} quarter"
+            due_dates = []
+            for block in payload.get("PageBlocks", []):
+                if not isinstance(block, dict) or block.get("ClassName") != "TextBlock" or \
+                        block.get("Title") != expected_title + " – next release date":
+                    continue
+                content = block.get("Content")
+                if not isinstance(content, str) or len(content) > 5000:
+                    continue
+                announcement = " ".join(BeautifulSoup(content, "html.parser").get_text(" ", strip=True).split())
+                prefix = f"Next release {next_title} will be released on "
+                if not announcement.startswith(prefix) or not announcement.endswith("."):
+                    continue
+                try:
+                    due_day = datetime.strptime(announcement[len(prefix):-1], "%d %B %Y").date()
+                except ValueError:
+                    continue
+                if next_period.end_time.date() <= due_day <= (next_period.end_time + pd.Timedelta(days=90)).date():
+                    due_dates.append(due_day)
+            unique_due_dates = set(due_dates)
+            next_due = (pd.Timestamp(next(iter(unique_due_dates))).tz_localize("Pacific/Auckland").tz_convert("UTC").isoformat()
+                        if len(unique_due_dates) == 1 else None)
             for series in payload.get("FeaturedMedia", {}).get("SeriesData", []):
                 rows = list(csv.reader(io.StringIO(series.get("GraphCsvData", "").lstrip("\ufeff"))))
                 if not rows or rows[0][0] != "Quarter":
@@ -2503,9 +2526,14 @@ def parse_statsnz_cpi_release(html, expected_period):
                         observed = pd.to_datetime(label.replace("Sept-", "Sep-"), format="%b-%y").to_period("Q")
                         value = finite_number(raw)
                         if observed == period and value is not None and abs(value) <= 25:
-                            return {"date": period.end_time.normalize(), "value": value,
-                                    "index_level": None, "derived_yoy": None,
-                                    "release_date": release, "is_pit_limited": True}
+                            result = {"date": period.end_time.normalize(), "value": value,
+                                      "index_level": None, "derived_yoy": None,
+                                      "release_date": release, "is_pit_limited": True,
+                                      "source_title": expected_title}
+                            if next_due:
+                                result.update(next_due_at=next_due,
+                                              next_due_precision="date_only_start_of_NZ_day")
+                            return result
         except (ValueError, TypeError, KeyError, IndexError):
             continue
     return None
@@ -2546,6 +2574,9 @@ def get_statsnz_cpi_data(*, propagate_transport=False):
                 continue
             record = parse_statsnz_cpi_release(response.text, str(period))
             if record is not None:
+                if propagate_transport and offset > 0 and not record.get("next_due_at"):
+                    unverified_newer_page = True
+                    continue
                 if propagate_transport and (transient_failure or unverified_newer_page):
                     # An older page cannot establish that an unchecked newer
                     # quarter has not been released.
@@ -5485,6 +5516,10 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
                     if not matching.empty:
                         release = matching.iloc[-1]
+                        if curr == "NZD":
+                            for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
+                                if isinstance(release.get(field), str):
+                                    observations["Inflation"][field] = release[field]
                         if not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
                             published = pd.Timestamp(release["release_date"])
                             published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")
