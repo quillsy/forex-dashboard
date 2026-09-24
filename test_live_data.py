@@ -714,8 +714,9 @@ class CpiTransportClassificationTests(unittest.TestCase):
             response._content = b'official CPI page' if status == 200 else b''
             responses.append(response)
         transport.get.side_effect = responses
+        future_due = (pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=1)).isoformat()
         parser = Mock(return_value={'date': pd.Timestamp('2026-03-31'), 'value': 2.8,
-                                    'next_due_at': '2026-10-21T11:00:00+00:00'})
+                                    'next_due_at': future_due})
         ns = {'requests': transport, 'live_data': live, 'pd': pd, 'datetime': datetime,
               'parse_statsnz_cpi_release': parser}
         exec(compile(ast.Module(body=[loader], type_ignores=[]), '<stats-nz-cpi>', 'exec'), ns)
@@ -734,6 +735,11 @@ class CpiTransportClassificationTests(unittest.TestCase):
         transport.get.side_effect = [responses[2], responses[1]]
         result = ns['get_statsnz_cpi_data'](propagate_transport=True)
         self.assertTrue(result[-1])
+        parser.return_value = {'date': pd.Timestamp('2026-03-31'), 'value': 2.8,
+                               'next_due_at': (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=1)).isoformat()}
+        transport.get.side_effect = [responses[2], responses[1], responses[2]]
+        result = ns['get_statsnz_cpi_data'](propagate_transport=True)
+        self.assertFalse(result[-1])
         parser.return_value = {'date': pd.Timestamp('2026-03-31'), 'value': 2.8}
         transport.get.side_effect = [responses[2], responses[1], responses[2]]
         result = ns['get_statsnz_cpi_data'](propagate_transport=True)
