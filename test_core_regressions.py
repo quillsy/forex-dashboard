@@ -4,6 +4,7 @@ No API requests, UI rendering, cache writes or snapshot mutation are performed.
 """
 import ast
 import copy
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import live_data
 
 FUNCTIONS = {
     'finite_number', 'normalized_freshness', 'observation_freshness',
@@ -33,6 +35,7 @@ def load_core():
         elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in CONSTANTS for t in node.targets):
             nodes.append(node)
     ns = {'np': np, 'pd': pd, 'datetime': datetime, 'FRED_KEY': None, 'EODHD_KEY': None,
+          'live_data': live_data, 'os': os,
           'st': SimpleNamespace(session_state={}), 'df_cal': None}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), '<isolated-core>', 'exec'), ns)
     ns.update({
