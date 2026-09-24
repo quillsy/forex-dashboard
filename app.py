@@ -2574,9 +2574,11 @@ def get_statsnz_cpi_data(*, propagate_transport=False):
                 continue
             record = parse_statsnz_cpi_release(response.text, str(period))
             if record is not None:
-                if propagate_transport and offset > 0 and not record.get("next_due_at"):
-                    unverified_newer_page = True
-                    continue
+                if propagate_transport and offset > 0:
+                    due = live_data.timestamp(record.get("next_due_at"))
+                    if due is None or due <= pd.Timestamp.now(tz="UTC").to_pydatetime():
+                        unverified_newer_page = True
+                        continue
                 if propagate_transport and (transient_failure or unverified_newer_page):
                     # An older page cannot establish that an unchecked newer
                     # quarter has not been released.
