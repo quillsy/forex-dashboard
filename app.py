@@ -5482,6 +5482,10 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     source_url=("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve"
                         if source.endswith("(TextView)") else
                         "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve"))
+            elif curr == "EUR" and source == "Bundesbank (Germany 2Y benchmark; BBSSY.D.REN.EUR.A610.000000WT0202.A)":
+                observations["Geldpolitik"]["source_url"] = "https://api.statistiken.bundesbank.de/rest/data/BBSSY/D.REN.EUR.A610.000000WT0202.A"
+            elif curr == "CAD" and source == "Bank of Canada (2Y benchmark; BD.CDN.2YR.DQ.YLD)":
+                observations["Geldpolitik"]["source_url"] = "https://www.bankofcanada.ca/valet/observations/BD.CDN.2YR.DQ.YLD/json"
             if freshness["Geldpolitik"] in ("FRESH", "AGING"):
                 gp_nominal_score = (policy_rate - 3.0) / 3.0 * 100.0
                 gp_market_score = (yield_2y - 3.0) / 3.0 * 100.0
@@ -5516,6 +5520,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
                     if not matching.empty:
                         release = matching.iloc[-1]
+                        if curr == "GBP" and series_id == "D7G7":
+                            observations["Inflation"]["source_url"] = "https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data"
                         if curr == "NZD":
                             for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
                                 if isinstance(release.get(field), str):

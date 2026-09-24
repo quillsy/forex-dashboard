@@ -312,6 +312,22 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(live.public_observation({'source_url':cpi})['source_url'], cpi)
         self.assertNotIn('source_url', live.public_observation({'source_url':cpi+'?api_key=private'}))
 
+    def test_new_official_source_links_allow_exact_keyless_endpoints_only(self):
+        urls = (
+            'https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_minr',
+            'https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/une_rt_m',
+            'https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data',
+            'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data',
+            'https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M',
+            'https://api.statistiken.bundesbank.de/rest/data/BBSSY/D.REN.EUR.A610.000000WT0202.A',
+            'https://www.bankofcanada.ca/valet/observations/BD.CDN.2YR.DQ.YLD/json',
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(live.public_observation({'source_url': url})['source_url'], url)
+                for bad in (url + '?api_key=private', url + '#private', url.replace('https:', 'http:')):
+                    self.assertNotIn('source_url', live.public_observation({'source_url': bad}))
+
     def test_source_table_shows_both_policy_and_yield_when_value_is_null(self):
         record=live.build_record('Geldpolitik',20,{'value':None,'yield_2y':4.34,'policy_rate':4.25,
             'date':'2026-09-04','source':'FRED'},'FRESH',NOW.isoformat())
