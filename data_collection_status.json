@@ -1,16 +1,11 @@
 {
-  "last_run_timestamp": "2026-09-25T19:30:28Z",
+  "last_run_timestamp": "2026-09-25T22:45:23Z",
   "last_run_status": "PARTIAL",
   "last_run_error": "One or more collection components are incomplete; see components.",
   "total_successful_runs": 45,
-  "total_partial_runs": 177,
+  "total_partial_runs": 178,
   "total_failed_runs": 0,
   "history": [
-    {
-      "timestamp": "2026-09-20T23:35:17Z",
-      "status": "PARTIAL",
-      "error": "One or more collection components are incomplete; see components."
-    },
     {
       "timestamp": "2026-09-20T23:45:26Z",
       "status": "PARTIAL",
@@ -255,6 +250,11 @@
       "timestamp": "2026-09-25T19:30:28Z",
       "status": "PARTIAL",
       "error": "One or more collection components are incomplete; see components."
+    },
+    {
+      "timestamp": "2026-09-25T22:45:23Z",
+      "status": "PARTIAL",
+      "error": "One or more collection components are incomplete; see components."
     }
   ],
   "components": {
@@ -275,23 +275,59 @@
       "status": "PARTIAL",
       "eligible_factors": 28,
       "total_factors": 40
+    },
+    "snapshots": {
+      "status": "SUCCESS",
+      "attempted": 18,
+      "written": 8,
+      "updated": 0,
+      "skipped": 10,
+      "errors": 0,
+      "issues": [],
+      "currencies": {
+        "status": "SUCCESS",
+        "attempted": 8,
+        "written": 8,
+        "updated": 0,
+        "skipped": 0,
+        "errors": 0,
+        "issues": []
+      },
+      "pairs": {
+        "status": "SUCCESS",
+        "attempted": 10,
+        "written": 0,
+        "updated": 0,
+        "skipped": 10,
+        "errors": 0,
+        "issues": []
+      }
+    },
+    "outcomes": {
+      "status": "SUCCESS",
+      "attempted": 0,
+      "written": 0,
+      "updated": 0,
+      "skipped": 0,
+      "errors": 0,
+      "issues": []
     }
   },
-  "mode": "live",
+  "mode": "daily",
   "providers": {
     "api.stlouisfed.org": {
-      "requests_this_run": 5,
+      "requests_this_run": 12,
       "status": "SUCCESS",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
       "outcomes_this_run": {
-        "SUCCESS": 5
+        "SUCCESS": 12
       },
-      "last_attempt_at": "2026-09-25T19:31:26.107038+00:00",
-      "last_checked_at": "2026-09-25T19:31:29.146027+00:00",
-      "requests_observed_utc_day": 29,
+      "last_attempt_at": "2026-09-25T22:46:30.666451+00:00",
+      "last_checked_at": "2026-09-25T22:46:31.050410+00:00",
+      "requests_observed_utc_day": 41,
       "counted_day_utc": "2026-09-25"
     },
     "www.federalreserve.gov": {
@@ -304,9 +340,9 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-09-25T19:30:40.859657+00:00",
-      "last_checked_at": "2026-09-25T19:30:40.933079+00:00",
-      "requests_observed_utc_day": 10,
+      "last_attempt_at": "2026-09-25T22:45:26.720139+00:00",
+      "last_checked_at": "2026-09-25T22:45:26.877862+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-09-25"
     },
     "data-api.ecb.europa.eu": {
@@ -319,9 +355,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:30:40.989712+00:00",
-      "last_checked_at": "2026-09-25T19:30:41.492167+00:00",
-      "requests_observed_utc_day": 5,
+      "last_attempt_at": "2026-09-25T22:45:26.904563+00:00",
+      "last_checked_at": "2026-09-25T22:45:28.052285+00:00",
+      "requests_observed_utc_day": 6,
       "counted_day_utc": "2026-09-25"
     },
     "www.ecb.europa.eu": {
@@ -334,9 +370,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:30:43.460979+00:00",
-      "last_checked_at": "2026-09-25T19:30:44.038464+00:00",
-      "requests_observed_utc_day": 20,
+      "last_attempt_at": "2026-09-25T22:45:31.289748+00:00",
+      "last_checked_at": "2026-09-25T22:45:32.348308+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-09-25"
     },
     "www.bankofengland.co.uk": {
@@ -349,9 +385,9 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-09-25T19:30:44.761172+00:00",
-      "last_checked_at": "2026-09-25T19:30:44.901095+00:00",
-      "requests_observed_utc_day": 10,
+      "last_attempt_at": "2026-09-25T22:45:33.360223+00:00",
+      "last_checked_at": "2026-09-25T22:45:33.438943+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-09-25"
     },
     "www.bankofcanada.ca": {
@@ -364,9 +400,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:47.598652+00:00",
-      "last_checked_at": "2026-09-25T19:31:47.927989+00:00",
-      "requests_observed_utc_day": 21,
+      "last_attempt_at": "2026-09-25T22:46:20.449847+00:00",
+      "last_checked_at": "2026-09-25T22:46:20.613826+00:00",
+      "requests_observed_utc_day": 25,
       "counted_day_utc": "2026-09-25"
     },
     "www.snb.ch": {
@@ -379,9 +415,9 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-09-25T19:30:50.201372+00:00",
-      "last_checked_at": "2026-09-25T19:30:50.816208+00:00",
-      "requests_observed_utc_day": 15,
+      "last_attempt_at": "2026-09-25T22:45:37.185707+00:00",
+      "last_checked_at": "2026-09-25T22:45:38.011805+00:00",
+      "requests_observed_utc_day": 18,
       "counted_day_utc": "2026-09-25"
     },
     "www.rba.gov.au": {
@@ -394,9 +430,9 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-09-25T19:30:52.030185+00:00",
-      "last_checked_at": "2026-09-25T19:30:52.292046+00:00",
-      "requests_observed_utc_day": 10,
+      "last_attempt_at": "2026-09-25T22:45:38.717817+00:00",
+      "last_checked_at": "2026-09-25T22:45:38.961794+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-09-25"
     },
     "www.rbnz.govt.nz": {
@@ -422,9 +458,9 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-09-25T19:30:53.339462+00:00",
-      "last_checked_at": "2026-09-25T19:30:53.568675+00:00",
-      "requests_observed_utc_day": 15,
+      "last_attempt_at": "2026-09-25T22:45:39.798524+00:00",
+      "last_checked_at": "2026-09-25T22:45:40.009423+00:00",
+      "requests_observed_utc_day": 18,
       "counted_day_utc": "2026-09-25"
     },
     "api.statistiken.bundesbank.de": {
@@ -437,9 +473,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:31:29.154896+00:00",
-      "last_checked_at": "2026-09-25T19:31:29.906111+00:00",
-      "requests_observed_utc_day": 6,
+      "last_attempt_at": "2026-09-25T22:46:02.192032+00:00",
+      "last_checked_at": "2026-09-25T22:46:03.381465+00:00",
+      "requests_observed_utc_day": 7,
       "counted_day_utc": "2026-09-25"
     },
     "ec.europa.eu": {
@@ -452,9 +488,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:47.258724+00:00",
-      "last_checked_at": "2026-09-25T19:31:47.581487+00:00",
-      "requests_observed_utc_day": 24,
+      "last_attempt_at": "2026-09-25T22:46:19.926210+00:00",
+      "last_checked_at": "2026-09-25T22:46:20.440992+00:00",
+      "requests_observed_utc_day": 28,
       "counted_day_utc": "2026-09-25"
     },
     "www.ons.gov.uk": {
@@ -467,9 +503,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:31.809168+00:00",
-      "last_checked_at": "2026-09-25T19:31:31.979763+00:00",
-      "requests_observed_utc_day": 24,
+      "last_attempt_at": "2026-09-25T22:46:05.616625+00:00",
+      "last_checked_at": "2026-09-25T22:46:05.683943+00:00",
+      "requests_observed_utc_day": 28,
       "counted_day_utc": "2026-09-25"
     },
     "www.mof.go.jp": {
@@ -482,26 +518,26 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:31:31.998278+00:00",
-      "last_checked_at": "2026-09-25T19:31:32.958978+00:00",
-      "requests_observed_utc_day": 6,
+      "last_attempt_at": "2026-09-25T22:46:05.693097+00:00",
+      "last_checked_at": "2026-09-25T22:46:06.240435+00:00",
+      "requests_observed_utc_day": 7,
       "counted_day_utc": "2026-09-25"
     },
     "api.e-stat.go.jp": {
-      "requests_this_run": 1,
+      "requests_this_run": 3,
       "status": "SUCCESS",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
       "outcomes_this_run": {
-        "SUCCESS": 1
+        "SUCCESS": 3
       },
-      "last_attempt_at": "2026-09-25T19:31:32.964245+00:00",
-      "last_checked_at": "2026-09-25T19:31:33.998723+00:00",
+      "last_attempt_at": "2026-09-25T22:46:33.523645+00:00",
+      "last_checked_at": "2026-09-25T22:46:34.814563+00:00",
       "data_status": "OK",
       "provider_response_status": 0,
-      "requests_observed_utc_day": 6,
+      "requests_observed_utc_day": 9,
       "counted_day_utc": "2026-09-25"
     },
     "www150.statcan.gc.ca": {
@@ -514,41 +550,42 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:49.329967+00:00",
-      "last_checked_at": "2026-09-25T19:31:49.570333+00:00",
-      "requests_observed_utc_day": 24,
+      "last_attempt_at": "2026-09-25T22:46:22.651843+00:00",
+      "last_checked_at": "2026-09-25T22:46:23.089872+00:00",
+      "requests_observed_utc_day": 28,
       "counted_day_utc": "2026-09-25"
     },
     "data.api.abs.gov.au": {
-      "requests_this_run": 3,
+      "requests_this_run": 4,
       "status": "SUCCESS",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
       "outcomes_this_run": {
-        "SUCCESS": 3
+        "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:51.303889+00:00",
-      "last_checked_at": "2026-09-25T19:31:51.594001+00:00",
+      "last_attempt_at": "2026-09-25T22:46:28.711260+00:00",
+      "last_checked_at": "2026-09-25T22:46:30.661405+00:00",
       "data_status": "OK",
       "provider_response_status": null,
-      "requests_observed_utc_day": 18,
+      "requests_observed_utc_day": 22,
       "counted_day_utc": "2026-09-25"
     },
     "www.stats.govt.nz": {
-      "requests_this_run": 0,
-      "status": "NOT_REQUESTED",
+      "requests_this_run": 1,
+      "status": "SUCCESS",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
-      "outcomes_this_run": {},
-      "last_attempt_at": "2026-09-24T22:32:15.794802+00:00",
-      "last_checked_at": "2026-09-24T22:32:17.247681+00:00",
-      "requests_observed_utc_day": 0,
-      "counted_day_utc": "2026-09-25",
-      "last_failure_at": null
+      "outcomes_this_run": {
+        "SUCCESS": 1
+      },
+      "last_attempt_at": "2026-09-25T22:46:31.255767+00:00",
+      "last_checked_at": "2026-09-25T22:46:32.068143+00:00",
+      "requests_observed_utc_day": 1,
+      "counted_day_utc": "2026-09-25"
     },
     "opendata.swiss": {
       "requests_this_run": 1,
@@ -560,9 +597,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:31:44.031821+00:00",
-      "last_checked_at": "2026-09-25T19:31:46.256110+00:00",
-      "requests_observed_utc_day": 6,
+      "last_attempt_at": "2026-09-25T22:46:15.934968+00:00",
+      "last_checked_at": "2026-09-25T22:46:18.266751+00:00",
+      "requests_observed_utc_day": 7,
       "counted_day_utc": "2026-09-25"
     },
     "dam-api.bfs.admin.ch": {
@@ -575,9 +612,9 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-09-25T19:31:46.257091+00:00",
-      "last_checked_at": "2026-09-25T19:31:47.239362+00:00",
-      "requests_observed_utc_day": 18,
+      "last_attempt_at": "2026-09-25T22:46:18.267533+00:00",
+      "last_checked_at": "2026-09-25T22:46:19.747800+00:00",
+      "requests_observed_utc_day": 21,
       "counted_day_utc": "2026-09-25"
     },
     "www.stat.go.jp": {
@@ -616,9 +653,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:51.842711+00:00",
-      "last_checked_at": "2026-09-25T19:31:52.110223+00:00",
-      "requests_observed_utc_day": 24,
+      "last_attempt_at": "2026-09-25T22:46:25.096708+00:00",
+      "last_checked_at": "2026-09-25T22:46:25.309307+00:00",
+      "requests_observed_utc_day": 28,
       "counted_day_utc": "2026-09-25"
     },
     "home.treasury.gov": {
@@ -631,9 +668,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:30:54.015778+00:00",
-      "last_checked_at": "2026-09-25T19:31:13.262369+00:00",
-      "requests_observed_utc_day": 7,
+      "last_attempt_at": "2026-09-25T22:45:40.344106+00:00",
+      "last_checked_at": "2026-09-25T22:45:57.573877+00:00",
+      "requests_observed_utc_day": 8,
       "counted_day_utc": "2026-09-25"
     },
     "www.esri.cao.go.jp": {
@@ -646,9 +683,9 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-09-25T19:31:36.269227+00:00",
-      "last_checked_at": "2026-09-25T19:31:36.937773+00:00",
-      "requests_observed_utc_day": 24,
+      "last_attempt_at": "2026-09-25T22:46:08.869931+00:00",
+      "last_checked_at": "2026-09-25T22:46:09.273506+00:00",
+      "requests_observed_utc_day": 28,
       "counted_day_utc": "2026-09-25"
     },
     "www.bfs.admin.ch": {
@@ -661,9 +698,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:31:36.982247+00:00",
-      "last_checked_at": "2026-09-25T19:31:41.918121+00:00",
-      "requests_observed_utc_day": 6,
+      "last_attempt_at": "2026-09-25T22:46:09.378896+00:00",
+      "last_checked_at": "2026-09-25T22:46:11.385738+00:00",
+      "requests_observed_utc_day": 7,
       "counted_day_utc": "2026-09-25"
     },
     "www.bea.gov": {
@@ -676,9 +713,9 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-09-25T19:31:20.996723+00:00",
-      "last_checked_at": "2026-09-25T19:31:21.438808+00:00",
-      "requests_observed_utc_day": 12,
+      "last_attempt_at": "2026-09-25T22:45:59.301601+00:00",
+      "last_checked_at": "2026-09-25T22:45:59.686585+00:00",
+      "requests_observed_utc_day": 14,
       "counted_day_utc": "2026-09-25"
     },
     "apps.bea.gov": {
@@ -691,9 +728,9 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-09-25T19:31:21.452483+00:00",
-      "last_checked_at": "2026-09-25T19:31:21.571626+00:00",
-      "requests_observed_utc_day": 6,
+      "last_attempt_at": "2026-09-25T22:45:59.692087+00:00",
+      "last_checked_at": "2026-09-25T22:46:00.510320+00:00",
+      "requests_observed_utc_day": 7,
       "counted_day_utc": "2026-09-25"
     },
     "tradingeconomics.com": {
