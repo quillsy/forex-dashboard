@@ -571,6 +571,26 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertEqual(data["bls_provider_status"]["Inflation"]["dol"],
                          "PRIOR_HTTP_403_COOLDOWN")
 
+    def test_operator_quota_separates_bls_official_limit_from_local_attempts(self):
+        st = MagicMock()
+        data = {"completed_at": NOW.isoformat(), "currencies": {},
+                "bls_api_attempts": {"Arbeitsmarkt": NOW.isoformat(),
+                                     "Inflation": (NOW - timedelta(days=1)).isoformat()}}
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "data_collection_status.json").write_text(
+                '{"providers":{"api.bls.gov":{"status":"SUCCESS","requests_this_run":1}}}')
+            with patch.object(live_data, "load", return_value=data), \
+                 patch.object(live_data, "now_utc", return_value=NOW), \
+                 patch.object(live_data, "selected_live_directory", return_value=folder):
+                live_data.render_status(st, authorized=True)
+        provider_rows = st.dataframe.call_args_list[-1].args[0]
+        self.assertEqual(provider_rows[0]["Limit"], "25 Anfragen/Tag (BLS API v1 ohne Registrierung)")
+        self.assertEqual(provider_rows[0]["Restkontingent"], "Unbekannt")
+        captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
+        self.assertIn("1/2 lokal gespeicherte Faktorversuche", captions)
+        self.assertIn("Prozessabbruch", captions)
+
 
 if __name__ == "__main__":
     unittest.main()

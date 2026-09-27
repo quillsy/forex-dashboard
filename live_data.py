@@ -888,7 +888,19 @@ def render_status(st, authorized=False):
                            "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
                            "Anfragen im letzten Lauf": item.get("requests_this_run"),
                            "Heute gezählt (UTC)": item.get("requests_observed_utc_day"),
-                           "Restkontingent": "Unbekannt", "Limit": "Unbekannt", "Rücksetzung": "Unbekannt",
-                           "Nachweis": "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"}
+                           "Restkontingent": "Unbekannt",
+                           "Limit": "25 Anfragen/Tag (BLS API v1 ohne Registrierung)" if host == "api.bls.gov" else "Unbekannt",
+                           "Rücksetzung": "Unbekannt",
+                           "Nachweis": "BLS API FAQ; Restbudget nicht bestätigt" if host == "api.bls.gov" else "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"}
                           for host, item in providers.items()], hide_index=True, use_container_width=True)
+            api_attempts = data.get("bls_api_attempts", {})
+            api_attempts = api_attempts if isinstance(api_attempts, dict) else {}
+            counted = sum(timestamp(api_attempts.get(factor)) is not None and
+                          timestamp(api_attempts.get(factor)).date() == now.date()
+                          for factor in ("Arbeitsmarkt", "Inflation"))
+            st.caption(f"BLS API v1: {counted}/2 lokal gespeicherte Faktorversuche am heutigen UTC-Tag "
+                       "(höchstens einer je Faktor in abgeschlossenen Collector-Läufen). "
+                       "Das offizielle Limit ohne Registrierung beträgt 25 Anfragen/Tag; das Restbudget ist unbekannt. "
+                       "Ein Prozessabbruch vor der Datensatzspeicherung kann lokale Versuche auslassen. "
+                       "[BLS API FAQ](https://www.bls.gov/developers/api_FAQs.htm).")
             st.caption("Andere Anwendungen können denselben Schlüssel verwenden. Lokale Zähler sind daher kein Nachweis des gesamten Kontoverbrauchs.")
