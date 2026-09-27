@@ -195,6 +195,27 @@ def eligible(record, now=None, factor=None, currency=None):
     checked = timestamp(record.get("checked_at"))
     if checked is None or checked > now:
         return False, "Erfolgreiche Aktualitätsprüfung fehlt"
+    if currency == "GBP" and factor == "GDP":
+        from official_ons import Q2_2026_END, Q2_2026_REVISION_DATE, Q2_2026_REVISION_DUE
+        if reference.date().isoformat() <= Q2_2026_END:
+            vintage = observation.get("release_date_known")
+            try:
+                vintage_day = (datetime.strptime(vintage, "%Y-%m-%d").date().isoformat()
+                               if isinstance(vintage, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", vintage)
+                               else None)
+            except ValueError:
+                vintage_day = None
+            if vintage is not None and vintage_day is None:
+                return False, "ONS-Veröffentlichungsdatum ungültig"
+            revised = (observation.get("source") == "ONS"
+                       and observation.get("series_id") == "IHYR/QNA"
+                       and observation.get("date") == Q2_2026_END
+                       and observation.get("source_url") == "https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/qna"
+                       and vintage_day is not None and vintage_day >= Q2_2026_REVISION_DATE)
+            if now < Q2_2026_REVISION_DUE and vintage_day is not None and vintage_day >= Q2_2026_REVISION_DATE:
+                return False, "ONS-Q2-Revision vor dem amtlichen Veröffentlichungstermin"
+            if now >= Q2_2026_REVISION_DUE and (not revised or checked < Q2_2026_REVISION_DUE):
+                return False, "ONS-Q2-Revision fällig; aktueller QNA-Stand nicht bestätigt"
     published = timestamp(record.get("published_at"))
     if published and published > now:
         return False, "Veröffentlichung liegt in der Zukunft"

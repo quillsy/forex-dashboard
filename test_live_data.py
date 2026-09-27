@@ -13,6 +13,44 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_gbp_q2_gdp_revision_read_time_gate_survives_restart_and_outage(self):
+        due = datetime(2026, 9, 30, 6, tzinfo=timezone.utc)
+        before = due - timedelta(seconds=1)
+        pn2 = live.build_record('GDP', -20, {
+            'value': 1.2, 'date': '2026-06-30', 'reference_period': '2026-Q2',
+            'source': 'ONS', 'source_url': 'https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/pn2',
+            'series_id': 'IHYR/PN2', 'release_date_known': '2026-08-13',
+            'frequency': 'quarterly'}, 'FRESH', before.isoformat())
+        self.assertTrue(live.eligible(pn2, before, factor='GDP', currency='GBP')[0])
+        allowed, reason = live.eligible(pn2, due, factor='GDP', currency='GBP')
+        self.assertFalse(allowed)
+        self.assertIn('QNA', reason)
+        pn2['checked_at'] = (due + timedelta(minutes=1)).isoformat()
+        self.assertFalse(live.eligible(pn2, due + timedelta(minutes=1), factor='GDP', currency='GBP')[0])
+        pn2['checked_at'] = before.isoformat()
+
+        early_qna = copy.deepcopy(pn2)
+        early_qna['observation'].update(
+            source_url='https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/qna',
+            series_id='IHYR/QNA', release_date_known='2026-09-30')
+        self.assertFalse(live.eligible(early_qna, before, factor='GDP', currency='GBP')[0])
+        self.assertFalse(live.eligible(early_qna, due, factor='GDP', currency='GBP')[0])
+        early_qna['checked_at'] = due.isoformat()
+        self.assertTrue(live.eligible(early_qna, due, factor='GDP', currency='GBP')[0])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            data = {'model_version': live.MODEL, 'completed_at': before.isoformat(),
+                    'currencies': {'GBP': {'GDP': pn2}}}
+            live.save(data, path)
+            restored = live.load(path)
+        self.assertIsNone(live.details('GBP', due, restored)['GDP'])
+
+        outage = live.build_record('GDP', None, {}, 'UNAVAILABLE', due.isoformat(),
+            pn2, 'SOURCE_UNAVAILABLE', 'ONS vorübergehend nicht erreichbar')
+        self.assertEqual(outage['last_error'], 'SOURCE_UNAVAILABLE')
+        self.assertFalse(live.eligible(outage, due, factor='GDP', currency='GBP')[0])
+
     def test_aud_collector_reuses_one_official_cpi_check_and_blocks_release_lag(self):
         import ast
         import pandas as pd

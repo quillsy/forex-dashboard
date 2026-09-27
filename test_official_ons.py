@@ -23,6 +23,12 @@ def session_for(*payloads):
 
 
 class ONSTests(unittest.TestCase):
+    @staticmethod
+    def qna_q1():
+        previous = fixture('QNA', '0.9', '2026-06-29T23:00:00Z')
+        previous['quarters'][0].update(date='2026 Q1', label='2026 Q1', quarter='Q1')
+        return previous
+
     def test_date_not_fake_publication_timestamp(self):
         result = parse_ons_gdp(fixture(), 'PN2', now=NOW)
         self.assertEqual(result['value'], 1.2)
@@ -51,6 +57,49 @@ class ONSTests(unittest.TestCase):
         self.assertIsNone(parse_ons_gdp(data, 'PN2', now=NOW))
         data = fixture(); row = dict(data['quarters'][0], value='9'); data['quarters'].append(row)
         with self.assertRaises(ValueError): parse_ons_gdp(data, 'PN2', now=NOW)
+
+    def test_q2_revision_due_requires_qna_vintage_not_a_changed_value(self):
+        before = datetime(2026, 9, 30, 5, 59, 59, tzinfo=timezone.utc)
+        due = datetime(2026, 9, 30, 6, tzinfo=timezone.utc)
+        old_qna = self.qna_q1()
+        self.assertEqual(fetch_ons_gdp(now=before, session=session_for(fixture(), old_qna))['series_id'], 'IHYR/PN2')
+        self.assertIsNone(fetch_ons_gdp(now=due, session=session_for(fixture(), old_qna)))
+
+        for value in ('1.2', '1.3'):
+            with self.subTest(value=value):
+                revised = fixture('QNA', value, '2026-09-29T23:00:00Z')
+                result = fetch_ons_gdp(now=due, session=session_for(fixture(), revised))
+                self.assertEqual(result['series_id'], 'IHYR/QNA')
+                self.assertEqual(result['date'], '2026-06-30')
+                self.assertEqual(result['value'], float(value))
+                self.assertEqual(result['release_date_known'], '2026-09-30')
+                self.assertIsNone(result['published_at'])
+                self.assertNotIn('next_due_at', result)
+
+        # A new envelope date is insufficient if QNA still contains only Q1.
+        lagging = self.qna_q1()
+        lagging['description']['releaseDate'] = '2026-09-29T23:00:00Z'
+        self.assertIsNone(fetch_ons_gdp(now=due, session=session_for(fixture(), lagging)))
+        # PN2 updating first cannot stand in for the quarterly-accounts vintage.
+        new_pn2 = fixture(release='2026-09-29T23:00:00Z')
+        self.assertIsNone(fetch_ons_gdp(now=due, session=session_for(new_pn2, old_qna)))
+        matching_qna = fixture('QNA', '1.2', '2026-09-29T23:00:00Z')
+        self.assertEqual(fetch_ons_gdp(now=due, session=session_for(new_pn2, matching_qna))['series_id'], 'IHYR/QNA')
+        later_pn2 = fixture(value='1.4', release='2026-09-30T23:00:00Z')
+        self.assertIsNone(fetch_ons_gdp(now=datetime(2026, 10, 1, 6, tzinfo=timezone.utc),
+            session=session_for(later_pn2, matching_qna)))
+
+    def test_q2_revision_calendar_date_is_not_a_midnight_publication(self):
+        early = datetime(2026, 9, 30, 5, 59, 59, tzinfo=timezone.utc)
+        for dataset in ('PN2', 'QNA'):
+            with self.subTest(dataset=dataset):
+                preloaded = fixture(dataset, release='2026-09-29T23:00:00Z')
+                with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+                    parse_ons_gdp(preloaded, dataset, now=early)
+        # The same releaseDate is usable only when its row and family qualify.
+        confirmed = fixture('QNA', '1.2', '2026-09-29T23:00:00Z')
+        self.assertEqual(parse_ons_gdp(confirmed, 'QNA',
+            now=datetime(2026, 9, 30, 6, tzinfo=timezone.utc))['value'], 1.2)
 
 
 class ONSFallbackTests(unittest.TestCase):
