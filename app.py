@@ -3482,6 +3482,9 @@ def get_yield_series(curr):
 
 
 def get_yield_trends(curr, target_date=None):
+    if use_live_core_cache(target_date):
+        # Live trend history is not part of the validated collector snapshot.
+        return {}
     if target_date is None:
         target_date = datetime.now()
     target_dt = pd.to_datetime(target_date)
@@ -5157,7 +5160,10 @@ def get_composite_pmi_score(curr: str, target_date=None):
         pass
     return None, None, None, "N/A"
 
-def get_series_trend_points(series_id: str, target_date=None, reverse=False) -> float:
+def get_series_trend_points(series_id: str, target_date=None, reverse=False):
+    if use_live_core_cache(target_date):
+        # A current UI rerun must not request an unverified FRED series.
+        return None
     try:
         fred_key = FRED_KEY
         if target_date is None:
@@ -5472,6 +5478,20 @@ def use_live_core_cache(target_date=None):
         return False
     live_date = target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()
     return live_date and (os.environ.get("FX_COLLECTOR") != "1" or os.environ.get("FX_READ_CORE_CACHE") == "1")
+
+
+def live_core_observation_for_display(details, factor):
+    """Keep provenance visible, but never present a blocked observation as usable."""
+    raw = details.get("_observations", {}).get(factor, {})
+    observation = dict(raw) if isinstance(raw, dict) else {}
+    if details.get(factor) is None:
+        for key in ("value", "policy_rate", "yield_2y"):
+            observation[key] = None
+        reason = details.get("_blocking_reasons", {}).get(factor) or "CORE-Faktor nicht freigegeben"
+        observation["_display_status"] = f"Gesperrt: {reason}"
+    else:
+        observation["_display_status"] = "Geprüft"
+    return observation
 
 
 def compute_currency_details(curr: str, target_date=None, include_context=True, factors_to_refresh=None) -> dict:
@@ -6643,6 +6663,10 @@ def get_yield_details(curr, series_map=None, fred_key=None):
         fred_key = FRED_KEY
     is_2y = (series_map == YIELD_2Y_SERIES)
     is_5y = (series_map == YIELD_5Y_SERIES)
+
+    if use_live_core_cache() and not is_2y:
+        # Only the validated 2Y observation is available in the live cache.
+        return None
     
     val_now, val_1w, val_1m = None, None, None
     source = "FRED"
@@ -6844,6 +6868,11 @@ def get_inflation_expectations_data(curr, target_date=None):
             dt_str = datetime.now().strftime("%Y-%m-%d")
             
     cpi_val, obs_date_cur, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, dt_str)
+
+    if use_live_core_cache(target_date):
+        return {"actual_cpi": cpi_val, "cpi_trend": None,
+                "oecd_expectation": None, "market_breakeven": None,
+                "date": dt_str, "source": source}
     
     cpi_trend = None
     if cpi_val is not None:
@@ -7878,6 +7907,10 @@ if not getattr(st, "_mock_mode", False):
         with col_deep1:
             st.subheader("📋 BASE CORE: Rohdaten & Indikatoren")
             observations = details_f.get("_observations", {})
+            if use_live_core_cache():
+                observations = {factor: live_core_observation_for_display(details_f, factor)
+                                for factor in CORE_FACTOR_WEIGHTS}
+                st.caption("Gesperrte Live-Werte bleiben ausgeblendet. Quelle und Bezugsdatum dienen nur der Diagnose; der Sperrgrund steht in der Statusspalte.")
             rate_val = observations.get("Geldpolitik", {}).get("policy_rate")
             y2_val = observations.get("Geldpolitik", {}).get("yield_2y")
             cpi_val = observations.get("Inflation", {}).get("value")
@@ -7897,6 +7930,7 @@ if not getattr(st, "_mock_mode", False):
                 observation = observations.get(factor, {})
                 row["Quelle"] = observation.get("source") or "N/A"
                 row["Bezugsdatum"] = str(observation.get("date") or "N/A")
+                row["Status"] = observation.get("_display_status") or "Historische Berechnung"
                 if factor == "PMI":
                     row["Quelle"] = " / ".join(str(observation.get(f"{c}_src") or "N/A") for c in ("m", "s"))
                     row["Bezugsdatum"] = " / ".join(str(observation.get(f"{c}_ref") or "N/A") for c in ("m", "s"))
@@ -7907,6 +7941,8 @@ if not getattr(st, "_mock_mode", False):
             st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
     
             st.subheader("📈 TREND & MOMENTUM CONTEXT")
+            if use_live_core_cache():
+                st.caption("Für den Live-Betrieb liegen keine zentral geprüften Trend-Zeitreihen vor. Fehlende Trends sind keine Nullwerte.")
             y_trends = get_yield_trends(sel_curr_fund)
             cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), datetime.now().strftime("%Y-%m-%d"))
             unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), datetime.now().strftime("%Y-%m-%d"), reverse=True)
@@ -7917,11 +7953,11 @@ if not getattr(st, "_mock_mode", False):
                 {"Faktor": "2Y Sovereign Yield (1W Change)", "Wert": f"{y_trends.get('chg_1w', 0.0):+.3f}%" if y_trends.get('chg_1w') is not None else "N/A"},
                 {"Faktor": "2Y Sovereign Yield (1M Change)", "Wert": f"{y_trends.get('chg_1m', 0.0):+.3f}%" if y_trends.get('chg_1m') is not None else "N/A"},
                 {"Faktor": "2Y Sovereign Yield (3M Change)", "Wert": f"{y_trends.get('chg_3m', 0.0):+.3f}%" if y_trends.get('chg_3m') is not None else "N/A"},
-                {"Faktor": "Inflation (CPI Trend Points)", "Wert": f"{cpi_trend_pts:+.1f} pts"},
-                {"Faktor": "Arbeitsmarkt (Unemp Trend Points)", "Wert": f"{unemp_trend_pts:+.1f} pts"},
-                {"Faktor": "PMI Trend Points", "Wert": f"{pmi_trend_pts:+.1f} pts"},
-                {"Faktor": "GDP Trend Points", "Wert": f"{gdp_trend_pts:+.1f} pts"},
-                {"Faktor": "Gesamte Trend-Korrektur (Trend Score)", "Wert": f"{details_f.get('_trend_score', 0.0):+.2f}"}
+                {"Faktor": "Inflation (CPI Trend Points)", "Wert": f"{cpi_trend_pts:+.1f} pts" if cpi_trend_pts is not None else "N/A"},
+                {"Faktor": "Arbeitsmarkt (Unemp Trend Points)", "Wert": f"{unemp_trend_pts:+.1f} pts" if unemp_trend_pts is not None else "N/A"},
+                {"Faktor": "PMI Trend Points", "Wert": f"{pmi_trend_pts:+.1f} pts" if pmi_trend_pts is not None else "N/A"},
+                {"Faktor": "GDP Trend Points", "Wert": f"{gdp_trend_pts:+.1f} pts" if gdp_trend_pts is not None else "N/A"},
+                {"Faktor": "Gesamte Trend-Korrektur (Trend Score)", "Wert": f"{details_f['_trend_score']:+.2f}" if details_f.get('_trend_score') is not None and details_f.get('_context_status') != "NOT_COLLECTED" else "N/A"}
             ]
             st.dataframe(pd.DataFrame(trend_metrics), hide_index=True, use_container_width=True)
             
@@ -7931,9 +7967,10 @@ if not getattr(st, "_mock_mode", False):
             core_str = f"{core_d:+.1f}" if core_d is not None else "N/A"
             st.write(f"- **Gesamt-Score (Final Score):** `{f_score_str}`")
             st.write(f"- **BASE CORE Score:** `{core_str}`")
-            st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f.get('_trend_score', 0.0):+.1f}`" if details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
-            st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f.get('_surprise_score', 0.0):+.1f}`" if details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
-            st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
+            context_checked = details_f.get("_context_status") != "NOT_COLLECTED"
+            st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f['_trend_score']:+.1f}`" if context_checked and details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
+            st.write(f"- **Surprise-Faktoren (Surprise Score):** `{details_f['_surprise_score']:+.1f}`" if context_checked and details_f.get('_surprise_score') is not None else "- **Surprise-Faktoren (Surprise Score):** `N/A`")
+            st.write(f"- **Positionierungs- & Context-Score:** `{corr_d:+.1f}`" if context_checked and corr_d is not None else "- **Positionierungs- & Context-Score:** `N/A`")
             st.write(f"- **Markt-Regime:** `{reg_d}`")
             st.write(f"- **Model Version:** `{CURRENT_MODEL_VERSION}` (Schema: `2.0`)")
             
@@ -7964,6 +8001,8 @@ if not getattr(st, "_mock_mode", False):
     with tab3:
         st.header("🏦 Interest Rates & 2Y Government Bond Yields")
         st.caption("Vergleichende Analyse von Zentralbank-Leitzinsen, 2Y-Benchmark-Renditen und Zinskurven für alle 8 G8-Währungen.")
+        if use_live_core_cache():
+            st.caption("5Y/10Y und historische Renditeänderungen sind derzeit nicht zentral geprüft und erscheinen als N/A.")
         
         rates_data = {}
         for curr, info in CURRENCIES.items():
@@ -8046,6 +8085,8 @@ if not getattr(st, "_mock_mode", False):
     with tab4:
         st.header("📈 Inflation & CPI Hub")
         st.caption("Verbraucherpreisindizes (CPI YoY), Inflationstrends und OECD Consumer Inflation Expectations für alle 8 G8-Währungen.")
+        if use_live_core_cache():
+            st.caption("Live werden nur zentral geprüfte CPI-Werte angezeigt. Trend und Erwartungen sind derzeit nicht gesammelt und erscheinen als N/A.")
         
         today_s = datetime.now().strftime("%Y-%m-%d")
         cpi_rows = []
@@ -8109,7 +8150,17 @@ if not getattr(st, "_mock_mode", False):
                 })
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
         else:
-            st.info("PMI Daten zur Zeit nicht geladen.")
+            if use_live_core_cache():
+                st.info("PMI-Werte sind für den Live-CORE derzeit gesperrt, bis Datenidentität und öffentliche Nutzungsrechte bestätigt sind.")
+                pmi_rows = []
+                for curr, info in CURRENCIES.items():
+                    detail = live_data.details(curr)
+                    pmi_rows.append({"Währung": f"{info['flag']} {curr}",
+                                     "Status": "Geprüft" if detail.get("PMI") is not None else "Gesperrt",
+                                     "Grund": detail.get("_blocking_reasons", {}).get("PMI") or "—"})
+                st.dataframe(pd.DataFrame(pmi_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("PMI Daten zur Zeit nicht geladen.")
     
     # ----------------- TAB 7: GDP GROWTH -----------------
     with tab7:
@@ -8119,12 +8170,15 @@ if not getattr(st, "_mock_mode", False):
         today_s = datetime.now().strftime("%Y-%m-%d")
         gdp_rows = []
         for curr, info in CURRENCIES.items():
-            g_val = get_gdp_yoy_value(curr, today_s)
+            gdp_observation = get_macro_observation_details(curr, "GDP", today_s)
+            g_val = finite_number(gdp_observation.get("value"))
             gdp_rows.append({
                 "Währung": f"{info['flag']} {curr}",
                 "Reales BIP-Wachstum (YoY)": f"{g_val:.2f}%" if g_val is not None else "N/A",
-                "Klassifikation": "🟢 Starkes Wachstum" if (g_val and g_val > 2.0) else "🟡 Moderat" if (g_val and g_val > 0.5) else "🔴 Schwäche",
-                "Quelle": "FRED / World Bank"
+                "Klassifikation": "N/A" if g_val is None else "🟢 Starkes Wachstum" if g_val > 2.0 else "🟡 Moderat" if g_val > 0.5 else "🔴 Schwäche",
+                "Quelle": gdp_observation.get("source") or "Nicht verfügbar",
+                "Referenzperiode": gdp_observation.get("reference_period") or gdp_observation.get("date") or "Unbekannt",
+                "Aktualität": gdp_observation.get("freshness") or "UNAVAILABLE",
             })
         st.dataframe(pd.DataFrame(gdp_rows), hide_index=True, use_container_width=True)
     
