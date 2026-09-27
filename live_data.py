@@ -672,6 +672,9 @@ def render_status(st, authorized=False):
                 valid, reason = False, "Kein abgeschlossener Live-Datensatz"
             observation = record.get("observation", {})
             rights_hold = (currency, factor) in PUBLIC_RIGHTS_HOLDS
+            bls_embargo = (observation.get("bls_embargo_ends_at") or record.get("published_at")
+                           if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt")
+                           and observation.get("bls_release_url") else None)
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
                          "Aktualität": current_freshness(record, now, factor) if valid else "UNAVAILABLE",
@@ -685,8 +688,8 @@ def render_status(st, authorized=False):
                          "Prüfbasis": observation.get("publication_basis"),
                          "Messzeitraum": observation.get("period_label") or observation.get("frequency"),
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if observation.get("is_estimate") is True or any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
-                         "Veröffentlicht": ((str(observation["bls_embargo_ends_at"]) + " (Embargo-Ende; Uploadzeit unbekannt)")
-                                           if observation.get("bls_embargo_ends_at") else record.get("published_at")
+                         "Veröffentlicht": ((str(bls_embargo) + " (Embargo-Ende; Uploadzeit unbekannt)")
+                                           if bls_embargo else record.get("published_at")
                                            or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt")),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
                          "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)", "date_only_start_of_EU_day": "Luxemburg"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day", "date_only_start_of_EU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})

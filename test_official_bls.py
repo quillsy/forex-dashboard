@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
@@ -188,6 +188,25 @@ class BlsBulletinTests(unittest.TestCase):
         state = fetch_release_state("Arbeitsmarkt", session=client, now=NOW, previous_state=old)
         self.assertEqual(state["embargo_ends_at"], old["published_at"])
         client.get.assert_not_called()
+
+    def test_legacy_bls_publication_is_labeled_as_embargo_not_upload(self):
+        state = states()["Arbeitsmarkt"]
+        record = live_data.build_record("Arbeitsmarkt", 30, {
+            "value": 4.1, "date": "2026-08-01", "series_id": "UNRATE",
+            "bls_release_period": state["period"],
+            "bls_release_url": state["release_url"],
+            "published_at": state["embargo_ends_at"],
+            "next_due_at": state["next_due_at"],
+        }, "FRESH", NOW.isoformat())
+        st = MagicMock()
+        data = {"completed_at": NOW.isoformat(), "currencies": {"USD": {"Arbeitsmarkt": record}}}
+        with patch.object(live_data, "load", return_value=data), \
+             patch.object(live_data, "now_utc", return_value=NOW):
+            live_data.render_status(st)
+        rows = st.dataframe.call_args_list[1].args[0]
+        labor = next(row for row in rows if row["Währung"] == "USD" and row["Faktor"] == "Arbeitsmarkt")
+        self.assertEqual(labor["Veröffentlicht"],
+                         state["embargo_ends_at"] + " (Embargo-Ende; Uploadzeit unbekannt)")
 
 
 class BlsCollectorTests(unittest.TestCase):
