@@ -1,4 +1,6 @@
 """Offline tests of USD BLS publication proof and read-time CORE gating."""
+import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -9,6 +11,7 @@ import requests
 
 import live_data
 from official_bls import BlsInvalid, fetch_release_state, parse_api_latest, parse_pdf_release, parse_schedule
+from provider_transport import CollectorTransport
 
 NOW = datetime(2026, 9, 27, 19, tzinfo=timezone.utc)
 
@@ -79,6 +82,16 @@ class BlsSourceTests(unittest.TestCase):
             with self.assertRaises(BlsInvalid):
                 parse_api_latest(payload, "Arbeitsmarkt")
 
+    def test_official_provider_quota_has_fixed_error_without_raw_message(self):
+        payload = {"status": "REQUEST_NOT_PROCESSED", "message": [
+            "Request could not be serviced, as the daily threshold for total number of "
+            "requests allocated to the user with registration key  has been reached."]}
+        with self.assertRaisesRegex(BlsInvalid, "^BLS_PROVIDER_LIMIT$"):
+            parse_api_latest(payload, "Arbeitsmarkt")
+        payload["message"] = ["unrecognized provider response with private content"]
+        with self.assertRaisesRegex(BlsInvalid, "^BLS_API_STATUS_INVALID$"):
+            parse_api_latest(payload, "Arbeitsmarkt")
+
     def test_cache_reused_before_due_without_api_and_cooldown_after_due(self):
         prior = states()["Arbeitsmarkt"]
         client = Mock()
@@ -127,6 +140,25 @@ class BlsSourceTests(unittest.TestCase):
                                 now=due + timedelta(minutes=29),
                                 confirmed_period="2026-08", previous_state=prior,
                                 last_api_attempt=due)
+        self.assertEqual(client.get.call_count, 1)
+
+    def test_late_release_rechecks_hourly_on_following_day(self):
+        prior = states()["Arbeitsmarkt"]
+        client = Mock()
+        client.get.return_value = Mock(json=Mock(return_value=api("Arbeitsmarkt")),
+                                       raise_for_status=Mock())
+        last_attempt = datetime(2026, 10, 3, 12, 1, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(BlsInvalid, "BLS_API_RECHECK_COOLDOWN"):
+            fetch_release_state("Arbeitsmarkt", session=client,
+                                now=last_attempt + timedelta(minutes=59),
+                                confirmed_period="2026-08", previous_state=prior,
+                                last_api_attempt=last_attempt)
+        client.get.assert_not_called()
+        with self.assertRaisesRegex(BlsInvalid, "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED"):
+            fetch_release_state("Arbeitsmarkt", session=client,
+                                now=last_attempt + timedelta(hours=1),
+                                confirmed_period="2026-08", previous_state=prior,
+                                last_api_attempt=last_attempt)
         self.assertEqual(client.get.call_count, 1)
 
     def test_api_pdf_conflict_and_transport_failure_block(self):
@@ -238,6 +270,20 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertFalse(live_data.eligible(rows["Arbeitsmarkt"], due,
                                             factor="Arbeitsmarkt", currency="USD")[0])
 
+    def test_provider_daily_limit_preserves_only_pre_due_proof(self):
+        old = self.record("Arbeitsmarkt", NOW, states()["Arbeitsmarkt"]["next_due_at"])
+        observations = {"Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01",
+                                          "series_id": "UNRATE", "source": "FRED"}}
+        reports = {**states(), "Arbeitsmarkt": BlsInvalid("BLS_PROVIDER_LIMIT")}
+        before, _ = self.run_collector(reports, observations, previous={"Arbeitsmarkt": old})
+        self.assertEqual(before["Arbeitsmarkt"]["validation"], "VALID")
+        due = datetime.fromisoformat(old["next_due_at"])
+        after, _ = self.run_collector(reports, observations,
+                                      previous={"Arbeitsmarkt": old}, at=due)
+        self.assertEqual(after["Arbeitsmarkt"]["validation"], "UNVERIFIED")
+        self.assertIsNone(after["Arbeitsmarkt"]["score"])
+        self.assertIn("BLS-Tageslimit", after["Arbeitsmarkt"]["reason"])
+
     def test_local_api_count_persists_across_collector_restart(self):
         observations = {"Inflation": {"value": 3.4, "date": "2026-08-01",
                                       "series_id": "CPIAUCNS", "source": "FRED / BLS"},
@@ -297,6 +343,66 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertEqual(self.source_calls["Arbeitsmarkt"]["release_attempts"], 0)
         self.assertEqual(self.last_dataset["bls_api_budget"]["local_attempts"], 0)
         self.assertEqual(self.last_dataset["bls_api_budget"]["rolling_24h_attempts"], 20)
+
+    def test_retry_after_blocks_without_count_then_recovers_on_real_request(self):
+        def response(status, body=b"", headers=None):
+            item = requests.Response()
+            item.status_code = status
+            item._content = body
+            item.headers.update(headers or {})
+            item.url = "https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000"
+            return item
+
+        client = Mock()
+        bls_responses = iter([
+            response(429, headers={"Retry-After": "7200"}),
+            response(200, json.dumps(api("Arbeitsmarkt")).encode(),
+                     {"Content-Type": "application/json"}),
+            response(200, b"%PDF-1.7 test", {"Content-Type": "application/pdf"}),
+        ])
+        client.get.side_effect = lambda url, **kwargs: (
+            next(bls_responses) if url.startswith(("https://api.bls.gov/", "https://www.dol.gov/"))
+            else response(200, b"{}", {"Content-Type": "application/json"}))
+        current = [NOW]
+        app = Mock(FRED_KEY="test")
+        app.compute_currency_details.return_value = {
+            "Arbeitsmarkt": 30, "_freshness": {"Arbeitsmarkt": "FRESH"},
+            "_observations": {"Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01",
+                                               "series_id": "UNRATE", "source": "FRED"}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            live_path = Path(directory) / "live.json"
+            status_path = Path(directory) / "status.json"
+            with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), \
+                 patch.object(live_data, "CURRENCIES", ("USD",)), \
+                 patch.object(live_data, "FACTORS", {"Arbeitsmarkt": 20}), \
+                 patch.object(live_data, "now_utc", side_effect=lambda: current[0]), \
+                 patch("source_contracts.validate_fred_metadata", return_value=True), \
+                 patch("official_bls._pdf_text", return_value=bulletin("Arbeitsmarkt")):
+                for instant, expected_api_calls, expected_attempts in (
+                    (NOW, 1, 1),
+                    (NOW + timedelta(hours=1, minutes=1), 1, 1),
+                    (NOW + timedelta(hours=1, minutes=31), 1, 1),
+                    (NOW + timedelta(hours=2, minutes=1), 2, 2),
+                ):
+                    current[0] = instant
+                    app.requests = CollectorTransport(client=client, status_path=status_path,
+                                                      clock=lambda: current[0])
+                    live_data.collect(app, live_path)
+                    status_path.write_text(json.dumps({"providers": app.requests.usage}))
+                    dataset = live_data.load(live_path)
+                    api_calls = sum(call.args[0].startswith("https://api.bls.gov/")
+                                    for call in client.get.call_args_list)
+                    self.assertEqual(api_calls, expected_api_calls,
+                                     (instant.isoformat(), app.requests.usage))
+                    self.assertEqual(dataset["bls_api_budget"]["local_attempts"], expected_attempts)
+                    self.assertEqual(dataset["bls_api_budget"]["rolling_24h_attempts"], expected_attempts)
+                    if expected_api_calls == 1:
+                        self.assertEqual(dataset["bls_api_attempts"]["Arbeitsmarkt"], NOW.isoformat())
+                record = dataset["currencies"]["USD"]["Arbeitsmarkt"]
+                self.assertEqual(record["validation"], "VALID")
+                self.assertTrue(live_data.eligible(record, current[0],
+                                                   factor="Arbeitsmarkt", currency="USD")[0])
 
 
 if __name__ == "__main__":

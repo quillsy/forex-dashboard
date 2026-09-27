@@ -145,6 +145,15 @@ def parse_api_latest(payload, factor):
     """Validate the keyless BLS API response; no release time is inferred."""
     report = REPORTS[factor]
     try:
+        messages = payload.get("message")
+        if (payload.get("status") == "REQUEST_NOT_PROCESSED"
+                and isinstance(messages, list) and len(messages) == 1
+                and isinstance(messages[0], str)
+                and re.fullmatch(
+                    r"Request could not be serviced, as the daily threshold for total number of requests "
+                    r"allocated to the user with registration key\s+.*\s+has been reached\.",
+                    messages[0])):
+            raise BlsInvalid("BLS_PROVIDER_LIMIT")
         if payload["status"] != "REQUEST_SUCCEEDED" or payload.get("message"):
             raise BlsInvalid("BLS_API_STATUS_INVALID")
         rows = payload["Results"]["series"]
@@ -247,7 +256,7 @@ def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=
                  and previous_state.get("period") == confirmed_period
                  and prior_deadline is not None and now >= prior_deadline)
     minimum_interval = (timedelta(minutes=30) if after_due and prior_deadline.date() == now.date()
-                        else timedelta(hours=2) if after_due
+                        else timedelta(hours=1) if after_due
                         else timedelta(hours=24) if reusable else timedelta(hours=1))
     if (last_api_attempt is not None and
             minimum_interval > now - last_api_attempt >= timedelta(0)):
@@ -260,12 +269,20 @@ def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=
         raise BlsInvalid("BLS_LOCAL_API_BUDGET_EXHAUSTED")
     if after_due and (not isinstance(release_attempts, int) or release_attempts >= RELEASE_WINDOW_CAP):
         raise BlsInvalid("BLS_RELEASE_WINDOW_EXHAUSTED")
-    if isinstance(diagnostics, dict):
-        diagnostics["api_attempted"] = True
-        if after_due:
-            diagnostics["release_window_due"] = previous_state["next_due_at"]
     headers = {"User-Agent": USER_AGENT}
-    response = session.get(report["api"], headers=headers, timeout=15)
+    usage = getattr(session, "usage", None)
+    before = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)
+              if isinstance(usage, dict) else None)
+    try:
+        response = session.get(report["api"], headers=headers, timeout=15)
+    finally:
+        after = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)
+                 if isinstance(usage, dict) else None)
+        attempted = after > before if isinstance(before, int) and isinstance(after, int) else True
+        if attempted and isinstance(diagnostics, dict):
+            diagnostics["api_attempted"] = True
+            if after_due:
+                diagnostics["release_window_due"] = previous_state["next_due_at"]
     response.raise_for_status()
     period = parse_api_latest(response.json(), factor)
     if after_due and period == confirmed_period:

@@ -476,13 +476,18 @@ def collect(app, path=PATH):
                           if temporary else "BLS-Veröffentlichungsquelle nicht bestätigt",
             }
         except (BlsInvalid, ValueError, TypeError, KeyError) as error:
+            provider_limit = str(error) == "BLS_PROVIDER_LIMIT"
+            known_due = timestamp(prior.get("next_due_at"))
+            cached_before_due = (provider_limit and prior.get("validation") == "VALID"
+                                 and known_due is not None and timestamp(checked_at) < known_due)
             reason = {
+                "BLS_PROVIDER_LIMIT": "BLS-Tageslimit erreicht; amtliche Aktualitätsprüfung ausstehend",
                 "BLS_LOCAL_API_BUDGET_EXHAUSTED": "BLS-API-Abfragebudget erschöpft; neue Ausgabe nicht bestätigt",
                 "BLS_RELEASE_WINDOW_EXHAUSTED": "BLS-Folgeperiode nach begrenzten Prüfungen nicht bestätigt",
                 "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED": "BLS-Folgeperiode fällig, aber amtlich noch nicht bestätigt",
                 "BLS_API_RECHECK_COOLDOWN": "BLS-Folgeprüfung noch nicht fällig",
             }.get(str(error), "BLS-Kalender oder veröffentlichte Ausgabe nicht eindeutig")
-            bls_states[factor] = {"validation": "UNVERIFIED",
+            bls_states[factor] = {"validation": "SOURCE_UNAVAILABLE" if cached_before_due else "UNVERIFIED",
                                   "reason": reason}
         finally:
             if diagnostic.get("api_attempted"):
