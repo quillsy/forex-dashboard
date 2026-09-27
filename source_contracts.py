@@ -141,6 +141,6 @@ SCHEDULED_RELEASES = {
         "minimum_period_start": "2026-09-01",
         "release_date_known": "2026-10-02",
         "due_at": "2026-10-01T22:00:00+00:00",
-        "next_due_precision": "date_only_conservative",
+        "next_due_precision": "date_only_start_of_EU_day",
     },
 }

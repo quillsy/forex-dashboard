@@ -19,7 +19,7 @@ class HICPTests(unittest.TestCase):
         self.assertEqual(result['provider_status'], 'e')
         self.assertIsNone(result['published_at'])
         self.assertEqual(result['next_due_at'], '2026-10-01T22:00:00+00:00')
-        self.assertEqual(result['next_due_precision'], 'date_only_conservative')
+        self.assertEqual(result['next_due_precision'], 'date_only_start_of_EU_day')
         self.assertTrue(result['needs_hourly_check'])
         self.assertEqual(datetime(2026, 10, 2, tzinfo=ZoneInfo('Europe/Luxembourg')).astimezone(timezone.utc).isoformat(),
                          result['next_due_at'])
