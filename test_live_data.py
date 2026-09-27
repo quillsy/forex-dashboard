@@ -45,6 +45,32 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(cad['observation'], {})
         self.assertIn('Weiterverwendung', cad['reason'])
 
+    def test_live_source_credits_include_terms_and_current_statcan_periods(self):
+        inflation = live.build_record('Inflation', 20, {
+            'value': 3.0, 'date': '2026-08-01', 'reference_period': '2026-08',
+            'source': 'Statistics Canada',
+        }, 'FRESH', NOW.isoformat())
+        gdp = live.build_record('GDP', 5, {
+            'value': 1.1, 'date': '2026-06-30', 'reference_period': '2026-Q2',
+            'source': 'Statistics Canada',
+        }, 'FRESH', NOW.isoformat())
+        data = {'completed_at': NOW.isoformat(), 'currencies': {
+            'CAD': {'Inflation': inflation, 'GDP': gdp},
+        }}
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=data), patch.object(live, 'now_utc', return_value=NOW):
+            live.render_status(st)
+        infos = [call.args[0] for call in st.info.call_args_list]
+        captions = [call.args[0] for call in st.caption.call_args_list]
+        self.assertIn('This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis.', infos)
+        self.assertTrue(any('FRED® API Terms of Use' in text and 'Mit der Nutzung' in text for text in captions))
+        self.assertTrue(any('This service uses API functions from e-Stat, however its contents are not guaranteed by government.' in text for text in captions))
+        self.assertTrue(any('Adapted from Statistics Canada, Consumer Price Index, monthly, not seasonally adjusted, 2026-08.' in text for text in captions))
+        self.assertTrue(any('Adapted from Statistics Canada, Gross domestic product, expenditure-based, Canada, quarterly, 2026-Q2.' in text for text in captions))
+        self.assertFalse(any('Adapted from Statistics Canada, Labour force' in text for text in captions))
+        self.assertTrue(any('Australian Bureau of Statistics (ABS)' in text and 'CC BY 4.0' in text for text in captions))
+        self.assertTrue(any('This work is based on/includes Stats NZ’s data' in text for text in captions))
+
     def test_ons_gdp_provenance_exact_allowlist(self):
         url = 'https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2'
         self.assertEqual(live.public_observation({'source_url': url})['source_url'], url)
