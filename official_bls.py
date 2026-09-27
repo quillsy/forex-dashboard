@@ -56,7 +56,7 @@ PINNED_DUES = {
 }
 USER_AGENT = "Mozilla/5.0 fx-dashboard-source-verification/1.0"
 LOCAL_ROLLING_API_CAP = 20  # BLS keyless limit is 25/day; external use is unknown.
-RELEASE_WINDOW_CAP = 12
+RELEASE_FAST_WINDOW_CAP = 12
 _MONTH = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
 _ROW = re.compile(
     rf"{_MONTH}\s+(\d{{4}})\s+([A-Z][a-z]{{2,8}})\.?\s+(\d{{1,2}}),\s+"
@@ -233,7 +233,8 @@ def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=
 
     BLS HTML and feeds return 403 from GitHub runners. Existing qualified proof
     is reusable between daily API checks only before its exact successor
-    deadline. At/after due, check every 30 minutes within a bounded window.
+    deadline. At/after due, check every 30 minutes for the first 12 actual
+    attempts that UTC day, then hourly while rolling budget remains.
     """
     report = REPORTS[factor]
     now = now or datetime.now(timezone.utc)
@@ -255,7 +256,10 @@ def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=
     after_due = (confirmed_period is not None and isinstance(previous_state, dict)
                  and previous_state.get("period") == confirmed_period
                  and prior_deadline is not None and now >= prior_deadline)
+    if after_due and (type(release_attempts) is not int or release_attempts < 0):
+        raise BlsInvalid("BLS_RELEASE_WINDOW_INVALID")
     minimum_interval = (timedelta(minutes=30) if after_due and prior_deadline.date() == now.date()
+                        and release_attempts < RELEASE_FAST_WINDOW_CAP
                         else timedelta(hours=1) if after_due
                         else timedelta(hours=24) if reusable else timedelta(hours=1))
     if (last_api_attempt is not None and
@@ -267,8 +271,6 @@ def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=
         if reusable and not after_due:
             return previous_state
         raise BlsInvalid("BLS_LOCAL_API_BUDGET_EXHAUSTED")
-    if after_due and (not isinstance(release_attempts, int) or release_attempts >= RELEASE_WINDOW_CAP):
-        raise BlsInvalid("BLS_RELEASE_WINDOW_EXHAUSTED")
     headers = {"User-Agent": USER_AGENT}
     usage = getattr(session, "usage", None)
     before = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)

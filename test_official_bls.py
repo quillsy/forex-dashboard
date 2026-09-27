@@ -122,10 +122,10 @@ class BlsSourceTests(unittest.TestCase):
             fetch_release_state("Arbeitsmarkt", session=client, now=due,
                                 confirmed_period="2026-08", previous_state=prior,
                                 rolling_attempts=20)
-        with self.assertRaises(BlsInvalid):
+        with self.assertRaisesRegex(BlsInvalid, "BLS_RELEASE_WINDOW_INVALID"):
             fetch_release_state("Arbeitsmarkt", session=client, now=due,
                                 confirmed_period="2026-08", previous_state=prior,
-                                release_attempts=12)
+                                release_attempts=-1)
         client.get.assert_not_called()
         client.get.return_value = Mock(json=Mock(return_value=api("Arbeitsmarkt")), raise_for_status=Mock())
         diagnostic = {}
@@ -140,6 +140,34 @@ class BlsSourceTests(unittest.TestCase):
                                 now=due + timedelta(minutes=29),
                                 confirmed_period="2026-08", previous_state=prior,
                                 last_api_attempt=due)
+        self.assertEqual(client.get.call_count, 1)
+
+    def test_twelve_fast_attempts_continue_hourly_while_rolling_cap_allows(self):
+        prior = states()["Arbeitsmarkt"]
+        last = datetime(2026, 10, 2, 18, 30, tzinfo=timezone.utc)
+        client = Mock()
+        client.get.return_value = Mock(json=Mock(return_value=api("Arbeitsmarkt")),
+                                       raise_for_status=Mock())
+        with self.assertRaisesRegex(BlsInvalid, "BLS_API_RECHECK_COOLDOWN"):
+            fetch_release_state("Arbeitsmarkt", session=client,
+                                now=last + timedelta(minutes=59),
+                                confirmed_period="2026-08", previous_state=prior,
+                                last_api_attempt=last, release_attempts=12,
+                                rolling_attempts=12)
+        client.get.assert_not_called()
+        with self.assertRaisesRegex(BlsInvalid, "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED"):
+            fetch_release_state("Arbeitsmarkt", session=client,
+                                now=last + timedelta(hours=1),
+                                confirmed_period="2026-08", previous_state=prior,
+                                last_api_attempt=last, release_attempts=12,
+                                rolling_attempts=12)
+        self.assertEqual(client.get.call_count, 1)
+        with self.assertRaisesRegex(BlsInvalid, "BLS_LOCAL_API_BUDGET_EXHAUSTED"):
+            fetch_release_state("Arbeitsmarkt", session=client,
+                                now=last + timedelta(hours=2),
+                                confirmed_period="2026-08", previous_state=prior,
+                                last_api_attempt=last, release_attempts=13,
+                                rolling_attempts=20)
         self.assertEqual(client.get.call_count, 1)
 
     def test_late_release_rechecks_hourly_on_following_day(self):

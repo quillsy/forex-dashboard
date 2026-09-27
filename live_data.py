@@ -483,7 +483,7 @@ def collect(app, path=PATH):
             reason = {
                 "BLS_PROVIDER_LIMIT": "BLS-Tageslimit erreicht; amtliche Aktualitätsprüfung ausstehend",
                 "BLS_LOCAL_API_BUDGET_EXHAUSTED": "BLS-API-Abfragebudget erschöpft; neue Ausgabe nicht bestätigt",
-                "BLS_RELEASE_WINDOW_EXHAUSTED": "BLS-Folgeperiode nach begrenzten Prüfungen nicht bestätigt",
+                "BLS_RELEASE_WINDOW_INVALID": "BLS-Abrufzähler ungültig; Folgeperiode nicht bestätigt",
                 "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED": "BLS-Folgeperiode fällig, aber amtlich noch nicht bestätigt",
                 "BLS_API_RECHECK_COOLDOWN": "BLS-Folgeprüfung noch nicht fällig",
             }.get(str(error), "BLS-Kalender oder veröffentlichte Ausgabe nicht eindeutig")
