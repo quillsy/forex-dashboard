@@ -24,7 +24,7 @@ STATCAN_PRODUCTS = {
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title"})
+OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url"})
 
 
 def now_utc():
@@ -166,6 +166,16 @@ def eligible(record, now=None, factor=None, currency=None):
         reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
+    if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt"):
+        from official_bls import _pdf_url
+        series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
+        published = timestamp(record.get("published_at"))
+        if (observation.get("series_id") != series
+                or observation.get("bls_release_period") != reference.strftime("%Y-%m")
+                or timestamp(record.get("next_due_at")) is None
+                or published is None
+                or observation.get("bls_release_url") != _pdf_url(factor, published)):
+            return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
     if rights_hold:
@@ -253,10 +263,15 @@ def details(currency, now=None, data=None):
 
 
 def public_observation(observation):
-    """Strict field projection; never persist provider exception bodies or URLs."""
+    """Strict field projection; only allowlisted public source URLs persist."""
     result = {}
     for key in OBS_FIELDS:
         value = observation.get(key)
+        if key == "bls_release_url":
+            if isinstance(value, str) and re.fullmatch(
+                    r"https://www\.dol\.gov/newsroom/economicdata/(?:empsit|cpi)_\d{8}\.pdf", value):
+                result[key] = value
+            continue
         if key == "publication_basis" and isinstance(value, str) and re.fullmatch(
                 r"https://www\.bea\.gov/news/\d{4}/[a-z0-9-]*gdp[a-z0-9-]*", value):
             result[key] = value
@@ -384,10 +399,108 @@ def record_not_due(record, currency, factor, now):
 def collect(app, path=PATH):
     """One cold collector run; only individually qualified observations publish."""
     from source_contracts import validate_fred_metadata
+    from official_bls import BlsInvalid, REPORTS, fetch_release_state
+    from provider_transport import CollectorTransport
     previous = load(path)
     checked_at = now_utc().isoformat()
     data = {"model_version": MODEL, "last_attempt_at": checked_at, "currencies": {}}
     metadata = {}
+    prior_api_attempts = previous.get("bls_api_attempts", {})
+    prior_api_attempts = prior_api_attempts if isinstance(prior_api_attempts, dict) else {}
+    data["bls_api_attempts"] = {factor: value for factor, value in prior_api_attempts.items()
+                                if factor in REPORTS and timestamp(value) is not None}
+    prior_budget = previous.get("bls_api_budget", {})
+    prior_budget = prior_budget if isinstance(prior_budget, dict) else {}
+    same_day = prior_budget.get("utc_day") == checked_at[:10]
+    old_count = prior_budget.get("local_attempts") if same_day else 0
+    local_attempts = old_count if type(old_count) is int and old_count >= 0 else 20
+    prior_attempts = prior_budget.get("attempted_at", [])
+    if isinstance(prior_attempts, list) and len(prior_attempts) <= 100:
+        parsed_attempts = [timestamp(item) for item in prior_attempts]
+    else:
+        parsed_attempts = [None]
+    valid_attempts = all(item is not None and item <= timestamp(checked_at)
+                         for item in parsed_attempts)
+    recent_attempts = ([item.isoformat() for item in parsed_attempts
+                        if timestamp(checked_at) - item < timedelta(hours=24)]
+                       if valid_attempts else [])
+    rolling_attempts = len(recent_attempts) if valid_attempts else 20
+    data["bls_api_budget"] = {"utc_day": checked_at[:10], "local_attempts": local_attempts,
+                              "rolling_24h_attempts": rolling_attempts,
+                              "attempted_at": recent_attempts, "basis": "local_estimate"}
+    prior_windows = previous.get("bls_release_windows", {})
+    prior_windows = prior_windows if isinstance(prior_windows, dict) else {}
+    data["bls_release_windows"] = {}
+    prior_release_states = previous.get("bls_release_states", {})
+    prior_release_states = prior_release_states if isinstance(prior_release_states, dict) else {}
+    data["bls_release_states"] = {}
+    bls_states = {}
+    for factor in REPORTS if "USD" in CURRENCIES else ():
+        if factor not in FACTORS:
+            continue
+        prior = previous.get("currencies", {}).get("USD", {}).get(factor, {})
+        prior = prior if isinstance(prior, dict) else {}
+        prior_obs = prior.get("observation", {})
+        prior_obs = prior_obs if isinstance(prior_obs, dict) else {}
+        verified_state = prior_release_states.get(factor)
+        verified_state = verified_state if isinstance(verified_state, dict) else {}
+        confirmed_period = verified_state.get("period") or (prior_obs.get("bls_release_period")
+            if prior.get("validation") == "VALID" else None)
+        previous_state = (verified_state if verified_state else
+            {"period": confirmed_period, "published_at": prior.get("published_at"),
+             "next_due_at": prior.get("next_due_at"), "release_url": prior_obs.get("bls_release_url")})
+        prior_window = prior_windows.get(factor, {})
+        prior_window = prior_window if isinstance(prior_window, dict) else {}
+        window_due = previous_state.get("next_due_at")
+        window_attempts = (prior_window.get("attempts")
+                           if prior_window.get("due_at") == window_due
+                           and prior_window.get("utc_day") == checked_at[:10] else 0)
+        if type(window_attempts) is not int or window_attempts < 0:
+            window_attempts = 12
+        diagnostic = {}
+        try:
+            state = fetch_release_state(
+                factor, session=app.requests if isinstance(getattr(app, "requests", None), CollectorTransport) else http,
+                now=timestamp(checked_at),
+                confirmed_period=confirmed_period,
+                last_api_attempt=timestamp(prior_api_attempts.get(factor)),
+                diagnostics=diagnostic, previous_state=previous_state,
+                rolling_attempts=rolling_attempts, release_attempts=window_attempts)
+            bls_states[factor] = {"state": state}
+            data["bls_release_states"][factor] = state
+        except http.exceptions.RequestException as error:
+            temporary = temporary_source_outage(error) or error.args == ("PROVIDER_COOLDOWN",)
+            bls_states[factor] = {
+                "validation": "SOURCE_UNAVAILABLE" if temporary else "UNVERIFIED",
+                "reason": "BLS-Veröffentlichungsquelle vorübergehend nicht erreichbar"
+                          if temporary else "BLS-Veröffentlichungsquelle nicht bestätigt",
+            }
+        except (BlsInvalid, ValueError, TypeError, KeyError) as error:
+            reason = {
+                "BLS_LOCAL_API_BUDGET_EXHAUSTED": "BLS-API-Abfragebudget erschöpft; neue Ausgabe nicht bestätigt",
+                "BLS_RELEASE_WINDOW_EXHAUSTED": "BLS-Folgeperiode nach begrenzten Prüfungen nicht bestätigt",
+                "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED": "BLS-Folgeperiode fällig, aber amtlich noch nicht bestätigt",
+                "BLS_API_RECHECK_COOLDOWN": "BLS-Folgeprüfung noch nicht fällig",
+            }.get(str(error), "BLS-Kalender oder veröffentlichte Ausgabe nicht eindeutig")
+            bls_states[factor] = {"validation": "UNVERIFIED",
+                                  "reason": reason}
+        finally:
+            if diagnostic.get("api_attempted"):
+                data["bls_api_attempts"][factor] = checked_at
+                local_attempts += 1
+                data["bls_api_budget"]["local_attempts"] = local_attempts
+                rolling_attempts += 1
+                data["bls_api_budget"]["rolling_24h_attempts"] = rolling_attempts
+                data["bls_api_budget"]["attempted_at"].append(checked_at)
+                if diagnostic.get("release_window_due"):
+                    window_due = diagnostic["release_window_due"]
+                    window_attempts += 1
+            if window_due:
+                data["bls_release_windows"][factor] = {"due_at": window_due,
+                                                       "utc_day": checked_at[:10],
+                                                       "attempts": window_attempts}
+            if factor not in data["bls_release_states"] and verified_state:
+                data["bls_release_states"][factor] = verified_state
 
     def fred_contract(series, category):
         if not series:
@@ -413,9 +526,24 @@ def collect(app, path=PATH):
     for currency in CURRENCIES:
         prior_records = previous.get("currencies", {}).get(currency, {})
         prior_records = prior_records if isinstance(prior_records, dict) else {}
-        retained = {factor: copy.deepcopy(prior_records[factor]) for factor in FACTORS
-                    if (currency, factor) not in PUBLIC_RIGHTS_HOLDS
-                    and record_not_due(prior_records.get(factor), currency, factor, now_utc())}
+        retained = {}
+        for factor in FACTORS:
+            if (currency, factor) in PUBLIC_RIGHTS_HOLDS:
+                continue
+            prior = prior_records.get(factor)
+            if not record_not_due(prior, currency, factor, now_utc()):
+                continue
+            if currency == "USD" and factor in bls_states:
+                check = bls_states[factor]
+                state = check.get("state")
+                if state is not None:
+                    prior_obs = prior.get("observation", {})
+                    if (prior_obs.get("bls_release_period") != state["period"]
+                            or prior.get("next_due_at") != state["next_due_at"]):
+                        continue
+                elif check["validation"] != "SOURCE_UNAVAILABLE":
+                    continue
+            retained[factor] = copy.deepcopy(prior)
         requested = tuple(factor for factor in FACTORS
                           if factor not in retained and (currency, factor) not in PUBLIC_RIGHTS_HOLDS)
         raw = app.compute_currency_details(currency, include_context=False,
@@ -443,6 +571,29 @@ def collect(app, path=PATH):
             observation.setdefault("frequency", "daily" if factor == "Geldpolitik" else "quarterly" if factor == "GDP" or (factor == "Inflation" and currency == "NZD") else "monthly")
             validation = observation.pop("_validation", "VALID")
             reason = observation.pop("_reason", None)
+            if currency == "USD" and factor in bls_states:
+                check = bls_states[factor]
+                state = check.get("state")
+                old = prior_records.get(factor, {})
+                old_obs = old.get("observation", {}) if isinstance(old, dict) else {}
+                old_obs = old_obs if isinstance(old_obs, dict) else {}
+                if state is None:
+                    validation, reason = check["validation"], check["reason"]
+                elif old_obs.get("bls_release_period") not in (None, state["period"]) and validation == "SOURCE_UNAVAILABLE":
+                    validation, reason = "UNVERIFIED", "Neuere amtliche BLS-Referenzperiode veröffentlicht"
+                elif observation.get("date") is not None:
+                    observed_period = str(observation["date"])[:7]
+                    expected_series = REPORTS[factor]["series_id"]
+                    observation.update(bls_release_period=state["period"],
+                                       bls_release_url=state.get("release_url"),
+                                       published_at=state["published_at"],
+                                       next_due_at=state["next_due_at"],
+                                       publication_basis="BLS-API-Referenzmonat und amtliche DOL/BLS-Mitteilung mit Folgetermin")
+                    if (observation.get("series_id") != expected_series
+                            or observed_period != state["period"]):
+                        validation, reason = "UNVERIFIED", "FRED-Periode entspricht nicht der neuesten amtlichen BLS-Ausgabe"
+                    elif now_utc() >= timestamp(state["next_due_at"]):
+                        validation, reason = "UNVERIFIED", "Neue BLS-Veröffentlichung fällig; Folgeperiode nicht bestätigt"
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
                 if currency in ("USD", "EUR", "GBP", "JPY", "CAD", "AUD"):

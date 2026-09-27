@@ -195,6 +195,19 @@ class CoreRegressionTests(unittest.TestCase):
                          'observation': {'date': '2026-09-12', 'value': 2.0,
                                          'policy_rate': 2.0, 'yield_2y': 2.0}}
                 for factor in live.FACTORS}
+        # USD CPI and labor need actual release-period proof, even in the
+        # synthetic pair arithmetic fixture. Their factor scores stay frozen.
+        for factor, series, published, due, url in (
+            ('Inflation', 'CPIAUCNS', '2026-09-11T12:30:00+00:00',
+             '2026-10-14T12:30:00+00:00', 'cpi_09112026.pdf'),
+            ('Arbeitsmarkt', 'UNRATE', '2026-09-04T12:30:00+00:00',
+             '2026-10-02T12:30:00+00:00', 'empsit_09042026.pdf'),
+        ):
+            record = dataset['currencies']['USD'][factor]
+            record.update(published_at=published, next_due_at=due)
+            record['observation'].update(date='2026-08-01', series_id=series,
+                bls_release_period='2026-08',
+                bls_release_url='https://www.dol.gov/newsroom/economicdata/' + url)
         self.core.update(live_data=live, use_live_core_cache=lambda *args: True)
         return live, now, dataset
 
