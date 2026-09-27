@@ -7832,6 +7832,7 @@ if not getattr(st, "_mock_mode", False):
             
         st.subheader("📋 Einzelwährungs-Fundamentaltabelle (G8)")
         table_rows = []
+        total_score_label = "Score (nur CORE)" if use_live_core_cache() else "Gesamt-Score"
         for rank_idx, curr in enumerate(sorted_curr_keys, 1):
             d = g8_data[curr]
             det = d["details"]
@@ -7860,14 +7861,14 @@ if not getattr(st, "_mock_mode", False):
                 "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
                 "CORE Score": f"{d['core']:+.1f}" if d['core'] is not None else "N/A",
                 "CORE-Abdeckung": f"{comp:.0f}%",
-                "Gesamt-Score": f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
+                total_score_label: f"{d['score']:+.1f}" if d['score'] is not None else "N/A",
                 "Signal / Tendenz": badge_str,
                 "Geldpolitik (35%)": f"{cats.get('Geldpolitik', 0.0):+.1f}" if cats.get('Geldpolitik') is not None else "N/A",
                 "Inflation (20%)": f"{cats.get('Inflation', 0.0):+.1f}" if cats.get('Inflation') is not None else "N/A",
                 "Arbeitsmarkt (20%)": f"{cats.get('Arbeitsmarkt', 0.0):+.1f}" if cats.get('Arbeitsmarkt') is not None else "N/A",
                 "PMI (20%)": f"{cats.get('PMI', 0.0):+.1f}" if cats.get('PMI') is not None else "N/A",
                 "GDP (5%)": f"{cats.get('GDP', 0.0):+.1f}" if cats.get('GDP') is not None else "N/A",
-                "Korrektur": f"{d['corr']:+.1f}" if d['corr'] is not None else "N/A",
+                "Korrektur": f"{d['corr']:+.1f}" if d['corr'] is not None and det.get('_context_status') != "NOT_COLLECTED" else "N/A",
                 "Regime": d["regime"],
                 "Datenqualität": status_dq
             })
@@ -7938,7 +7939,8 @@ if not getattr(st, "_mock_mode", False):
             # that source/date to the independently verified policy rate.
             raw_metrics[0]["Quelle"] = "Verified Policy Rate Center"
             raw_metrics[0]["Bezugsdatum"] = "Siehe Policy Rate Center"
-            st.dataframe(pd.DataFrame(raw_metrics), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(raw_metrics)[["Kategorie", "Wert", "Status", "Modell-Score", "Quelle", "Bezugsdatum"]],
+                         hide_index=True, use_container_width=True)
     
             st.subheader("📈 TREND & MOMENTUM CONTEXT")
             if use_live_core_cache():
@@ -7965,7 +7967,8 @@ if not getattr(st, "_mock_mode", False):
             st.subheader("⚖️ Core Weights & Model Isolation")
             f_score_str = f"{f_score_d:+.1f}" if f_score_d is not None else "N/A"
             core_str = f"{core_d:+.1f}" if core_d is not None else "N/A"
-            st.write(f"- **Gesamt-Score (Final Score):** `{f_score_str}`")
+            score_label = "Score (nur CORE; Context nicht geprüft)" if details_f.get("_context_status") == "NOT_COLLECTED" else "Gesamt-Score (Final Score)"
+            st.write(f"- **{score_label}:** `{f_score_str}`")
             st.write(f"- **BASE CORE Score:** `{core_str}`")
             context_checked = details_f.get("_context_status") != "NOT_COLLECTED"
             st.write(f"- **Trend-Faktoren (Trend Score):** `{details_f['_trend_score']:+.1f}`" if context_checked and details_f.get('_trend_score') is not None else "- **Trend-Faktoren (Trend Score):** `N/A`")
