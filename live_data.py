@@ -16,6 +16,11 @@ MODEL = "CORE_V2_8_2026_09"
 PATH = Path("live_core_data.json")
 FACTORS = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
 CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
+STATCAN_PRODUCTS = {
+    "Inflation": ("Consumer Price Index, monthly, not seasonally adjusted", "1810000401"),
+    "Arbeitsmarkt": ("Labour force characteristics, monthly, seasonally adjusted and trend-cycle", "1410028701"),
+    "GDP": ("Gross domestic product, expenditure-based, Canada, quarterly", "3610010401"),
+}
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
@@ -504,6 +509,10 @@ def render_status(st, authorized=False):
     now = now_utc()
     completed = checked is not None and checked <= now
     st.caption("LIVE-ANALYSE · G8 · Fundamentaler Horizont: 1–2 Wochen")
+    st.info("This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis.")
+    st.caption("Nutzungsbedingungen dieser Anwendung: Mit der Nutzung stimmen Nutzer den "
+               "[FRED® API Terms of Use](https://fred.stlouisfed.org/docs/api/terms_of_use.html) zu. "
+               "Rechte an einzelnen, über FRED abgerufenen Datenreihen sind getrennt zu prüfen.")
     if not completed:
         st.error("Noch kein geprüfter Live-Datensatz vorhanden. Paar-Signale sind gesperrt.")
     elif now - checked >= timedelta(hours=1):
@@ -562,9 +571,32 @@ def render_status(st, authorized=False):
     st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
         st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.caption("This service uses API functions from e-Stat, however its contents are not guaranteed by government. "
+                   "[e-Stat credit](https://www.e-stat.go.jp/api/en/api-info/credit/)")
+        for factor, (title, table_id) in STATCAN_PRODUCTS.items():
+            row = next(row for row in rows if row["Währung"] == "CAD" and row["Faktor"] == factor)
+            period = str(row["Referenzperiode"] or "")
+            if (not str(row["Quelle"] or "").startswith("Statistics Canada")
+                    or number(row["Wert"]) is None
+                    or not re.fullmatch(r"\d{4}-(?:\d{2}(?:-\d{2})?|Q[1-4])", period)):
+                continue
+            st.caption(f'Source: Statistics Canada, {title}, {period}. Reproduced and distributed on an "as is" basis with the permission of Statistics Canada.')
+            st.caption(f'Adapted from Statistics Canada, {title}, {period}. This does not constitute an endorsement by Statistics Canada of this product. '
+                       f'[Original table](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid={table_id}) · '
+                       '[Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence)')
+        st.caption("Quelle der angezeigten australischen CPI-, Arbeitsmarkt- und GDP-Daten: "
+                   "Australian Bureau of Statistics (ABS), © Commonwealth of Australia; "
+                   "[CC BY 4.0](https://www.abs.gov.au/website-privacy-copyright-and-disclaimer). "
+                   "CORE-Scores und etwaige Wachstumsraten sind eigene, auf ABS-Daten basierende Berechnungen. "
+                   "Originalreihen und Referenzperioden stehen in der Quellentabelle.")
+        st.caption("This work is based on/includes Stats NZ’s data which are licensed by Stats NZ for reuse "
+                   "under the Creative Commons Attribution 4.0 International licence. "
+                   "[Stats NZ copyright](https://www.stats.govt.nz/about-us/copyright/). "
+                   "CORE-Scores und etwaige Wachstumsraten sind eigene Berechnungen; "
+                   "Originalveröffentlichungen und Referenzperioden stehen in der Quellentabelle.")
         st.caption("Eurostat-Daten: Quelle Eurostat, Abrufzeit siehe Tabelle. CORE-Scores sind eigene Berechnungen; Eurostat ist für diese Berechnungen nicht verantwortlich.")
         st.caption("Schweizer HICP/HVPI: Bundesamt für Statistik (BFS), Datensatztitel und Originaldatei siehe Quellentabelle; Nutzung mit Quellenangabe (OPEN-BY). Scores sind eigene Berechnungen.")
-        st.caption("Quartals-Arbeitsmarkt: Stats NZ, Labour market statistics ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), und Bundesamt für Statistik, Erwerbslosenquote gemäss ILO ([Nutzung mit Quellenangabe](https://opendata.swiss/terms-of-use#terms_by)). Originalquellen stehen in der Tabelle. Scores und Darstellungsänderungen sind eigene Berechnungen.")
+        st.caption("Quartals-Arbeitsmarkt: Bundesamt für Statistik, Erwerbslosenquote gemäss ILO ([Nutzung mit Quellenangabe](https://opendata.swiss/terms-of-use#terms_by)). Originalquellen stehen in der Tabelle. Scores und Darstellungsänderungen sind eigene Berechnungen.")
     with st.expander("Sperrgründe je Währung", expanded=True):
         blocked = []
         for currency in CURRENCIES:
