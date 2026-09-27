@@ -910,6 +910,29 @@ class CpiTransportClassificationTests(unittest.TestCase):
         self.assertEqual(observation['source_url'], source_url)
         self.assertEqual(observation['source_title'], 'Consumers price index: June 2026 quarter')
 
+    def test_ons_update_date_is_not_reported_as_gbp_cpi_publication_time(self):
+        import pandas as pd
+        from test_core_regressions import load_core
+
+        frame = pd.DataFrame([{
+            'date': pd.Timestamp('2026-08-01'), 'value': 3.1,
+            # ONS updateDate can precede the official 07:00 local bulletin.
+            'release_date': pd.Timestamp('2026-09-15 23:00:00'),
+            'is_pit_limited': False,
+        }])
+        core = load_core()
+        core.update(get_cpi_yoy_details=lambda *args: (
+            3.1, '2026-08-01', 'CPI_YOY', 'ONS', 'D7G7', 'FRESH'),
+            get_ons_cpi_data=Mock(return_value=(frame, datetime(2026, 9, 16), True)),
+            get_statsnz_cpi_data=Mock(), get_statcan_cpi_data=Mock())
+        with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+            result = core['compute_currency_details']('GBP', '2026-09-27',
+                include_context=False, factors_to_refresh=('Inflation',))
+        observation = result['_observations']['Inflation']
+        self.assertEqual(observation['value'], 3.1)
+        self.assertNotIn('published_at', observation)
+        self.assertIn('updateDate', observation['publication_basis'])
+
 
 class ReleaseAwareCollectionTests(unittest.TestCase):
     def setUp(self):
