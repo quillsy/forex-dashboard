@@ -252,6 +252,27 @@ def update_daily_markers(timestamp, components, live_only, path=Path("daily_coll
     _fallback_state(path, marker)
 
 
+def collection_exit_code(overall, components, live_only):
+    """Separate a completed partial dataset from a failed collection job."""
+    if overall == "SUCCESS":
+        return 0
+
+    def state(name):
+        component = components.get(name, {})
+        return component.get("collection_status", component.get("status", "FAILED")) if isinstance(component, dict) else "FAILED"
+
+    if state("live_core") not in ("SUCCESS", "PARTIAL"):
+        return 1
+    if live_only:
+        return 0
+    # A partial CORE/policy dataset is already blocked factor by factor in the
+    # published cache. Missing snapshots or a crashed component are job errors.
+    completed_daily = (state("policy_rates") in ("SUCCESS", "PARTIAL")
+                       and state("snapshots") == "SUCCESS"
+                       and state("outcomes") == "SUCCESS")
+    return 0 if completed_daily else 1
+
+
 def main():
     import fcntl
     import live_data
@@ -313,8 +334,7 @@ def main():
         print("Data collection:", overall)
         for name, result in components.items():
             print(name + ":", result.get("collection_status", result.get("status", "FAILED")))
-        completed_live = live_only and components.get("live_core", {}).get("status") in ("SUCCESS", "PARTIAL")
-        return 0 if overall == "SUCCESS" or completed_live else 1
+        return collection_exit_code(overall, components, live_only)
 
 
 if __name__ == "__main__":

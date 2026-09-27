@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from collector_preflight import preflight_decision, should_collect
-from run_data_collection import update_daily_markers
+from run_data_collection import collection_exit_code, update_daily_markers
 
 
 class CollectorPreflightTests(unittest.TestCase):
@@ -231,6 +231,23 @@ class CollectorPreflightTests(unittest.TestCase):
                          (False, "live"))
         self.assertEqual(preflight_decision("schedule", "0 22 * * *", "", self.root, next_day),
                          (True, "live"))
+
+    def test_completed_partial_daily_run_does_not_raise_workflow_failure(self):
+        components = {"policy_rates": {"status": "PARTIAL"},
+                      "live_core": {"status": "PARTIAL", "eligible_factors": 27},
+                      "snapshots": {"status": "SUCCESS"},
+                      "outcomes": {"status": "SUCCESS"}}
+        self.assertEqual(collection_exit_code("PARTIAL", components, False), 0)
+        self.assertEqual(collection_exit_code("PARTIAL", components, True), 0)
+
+        for failed in ("policy_rates", "live_core", "snapshots", "outcomes"):
+            with self.subTest(failed=failed):
+                broken = {name: dict(value) for name, value in components.items()}
+                broken[failed]["status"] = "FAILED"
+                self.assertEqual(collection_exit_code("PARTIAL", broken, False), 1)
+        broken = {name: dict(value) for name, value in components.items()}
+        broken["live_core"]["collection_status"] = "FAILED"
+        self.assertEqual(collection_exit_code("PARTIAL", broken, True), 1)
 
 
 if __name__ == "__main__":
