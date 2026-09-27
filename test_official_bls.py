@@ -396,6 +396,24 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertNotIn("safe_until", self.last_dataset["bls_api_budget"])
         self.assertEqual(self.last_dataset["bls_api_budget"]["basis"], "local_estimate")
 
+    def test_contradictory_same_day_count_stays_blocked_after_restart(self):
+        observation = {"Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01",
+                                       "series_id": "UNRATE", "source": "FRED"}}
+        prior = {"model_version": live_data.MODEL, "currencies": {"USD": {}},
+                 "bls_api_budget": {"utc_day": NOW.date().isoformat(),
+                                    "local_attempts": 10, "attempted_at": []}}
+        self.run_collector(states(), observation, previous_data=prior, at=NOW)
+        first = self.last_dataset
+        expected_until = (NOW + timedelta(hours=24)).isoformat()
+        self.assertEqual(self.source_calls["Arbeitsmarkt"]["rolling_attempts"], 20)
+        self.assertEqual(first["bls_api_budget"]["safe_until"], expected_until)
+        self.assertEqual(first["bls_api_budget"]["basis"], "unknown")
+        self.run_collector(states(), observation, previous_data=first,
+                           at=NOW + timedelta(hours=1))
+        self.assertEqual(self.source_calls["Arbeitsmarkt"]["rolling_attempts"], 20)
+        self.assertEqual(self.last_dataset["bls_api_budget"]["safe_until"], expected_until)
+        self.assertIsNone(self.last_dataset["bls_api_budget"]["rolling_24h_attempts"])
+
     def test_retry_after_blocks_without_count_then_recovers_on_real_request(self):
         def response(status, body=b"", headers=None):
             item = requests.Response()

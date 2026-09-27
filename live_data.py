@@ -424,6 +424,11 @@ def collect(app, path=PATH):
         parsed_attempts = [timestamp(item) for item in prior_attempts]
     else:
         parsed_attempts = [None]
+    if same_day and count_valid and all(item is not None for item in parsed_attempts):
+        today_attempts = sum(item.date().isoformat() == checked_at[:10]
+                             for item in parsed_attempts)
+        if old_count != today_attempts:
+            budget_corrupt = True
     valid_attempts = (not budget_corrupt and
                       all(item is not None and item <= timestamp(checked_at)
                           for item in parsed_attempts))
