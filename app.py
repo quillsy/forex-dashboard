@@ -5552,7 +5552,12 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                             for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
                                 if isinstance(release.get(field), str):
                                     observations["Inflation"][field] = release[field]
-                        if not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
+                        if curr == "GBP":
+                            # ONS updateDate is a series-maintenance timestamp, not
+                            # proof of the bulletin's actual release time.
+                            observations["Inflation"]["publication_basis"] = (
+                                "ONS-Veröffentlichungszeit nicht aus updateDate abgeleitet")
+                        elif not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
                             published = pd.Timestamp(release["release_date"])
                             published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")
                             observations["Inflation"]["published_at"] = published.isoformat()
