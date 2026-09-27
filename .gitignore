@@ -25,6 +25,7 @@ ENV/
 # Scratch and test files
 scratch/
 test_*.py
+!test_mof_context.py
 
 # Collector process locks and atomic-write scratch files
 .data_collection.lock
