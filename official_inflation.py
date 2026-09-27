@@ -4,10 +4,12 @@ import math
 import re
 
 import requests
+from bs4 import BeautifulSoup
 
 ESTAT_TABLE = "0004052037"
 ESTAT_URL = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 ABS_URL = "https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M"
+ABS_RELEASES_URL = "https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia"
 
 
 def _list(value):
@@ -120,11 +122,56 @@ def parse_abs_cpi(payload, now=None):
     return _result(records, now, "Australian Bureau of Statistics headline CPI YoY", "CPI/3.10001.10.50.M")
 
 
+def parse_abs_release_index(html):
+    """Read the current monthly CPI period and next UTC deadline from ABS."""
+    page = BeautifulSoup(html, "html.parser")
+    latest = page.select_one("#block-views-block-topic-releases-listing-topic-latest-release-block")
+    future = page.select_one("#block-views-block-topic-releases-listing-future-releases-block")
+    if latest is None or future is None:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID")
+    links = latest.select(".views-row a")
+    rows = future.select(".views-row")
+    if len(links) != 1:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID")
+
+    def period(label):
+        match = re.fullmatch(r"Consumer Price Index, Australia, ([A-Z][a-z]+) (\d{4})", label)
+        if not match:
+            raise ValueError("ABS_RELEASE_INDEX_INVALID")
+        try:
+            return datetime.strptime(f"{match[1]} {match[2]}", "%B %Y").strftime("%Y-%m")
+        except ValueError as exc:
+            raise ValueError("ABS_RELEASE_INDEX_INVALID") from exc
+
+    current_period = period(links[0].get_text(" ", strip=True))
+    if not rows:
+        # ABS may not have announced a later date yet. Recheck the index and
+        # data hourly instead of inventing a monthly publication deadline.
+        return {"latest_period": current_period, "next_due_at": None}
+    upcoming = rows[0]
+    next_period = period(upcoming.get_text(" ", strip=True).split("Release date", 1)[0].strip())
+    year, month = map(int, current_period.split("-"))
+    expected_next = f"{year + (month == 12):04d}-{month % 12 + 1:02d}"
+    if next_period != expected_next:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID")
+    times = upcoming.select("time[datetime]")
+    if len(times) != 1:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID")
+    try:
+        due = datetime.fromisoformat(times[0]["datetime"].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID") from exc
+    if due.tzinfo is None:
+        raise ValueError("ABS_RELEASE_INDEX_INVALID")
+    return {"latest_period": current_period, "next_due_at": due.astimezone(timezone.utc).isoformat()}
+
+
 _DIAGNOSTIC_ERRORS = frozenset({
     "ESTAT_INCOMPLETE_RESPONSE", "ESTAT_FAILURE", "ESTAT_TABLE_INVALID", "ESTAT_IDENTITY_INVALID", "ESTAT_UNIT_INVALID",
     "ESTAT_OBSERVATION_IDENTITY_INVALID", "ABS_DIMENSIONS_INVALID", "ABS_SERIES_COUNT_INVALID",
     "ABS_SERIES_KEY_INVALID", "ABS_SERIES_IDENTITY_INVALID", "ABS_UNIT_INVALID",
     "ABS_TIME_DIMENSION_INVALID", "CPI_PERIOD_INVALID", "CPI_VALUE_INVALID", "CPI_CONFLICT",
+    "ABS_RELEASE_INDEX_INVALID", "ABS_API_RELEASE_LAG", "ABS_RELEASE_CONFLICT", "ABS_RELEASE_DUE_UNCONFIRMED",
 })
 
 
@@ -178,12 +225,30 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
         result = parser(payload, now=now)
         if result is not None and currency == "AUD":
             result["source_url"] = ABS_URL
+            phase = "release_index"
+            release = client.get(ABS_RELEASES_URL, timeout=15)
+            release.raise_for_status()
+            calendar = parse_abs_release_index(release.text)
+            result["next_due_at"] = calendar["next_due_at"]
+            if calendar["next_due_at"] is None:
+                result["needs_hourly_check"] = True
+            checked = _now(now)
+            if result["reference_period"] < calendar["latest_period"]:
+                diagnostic["code"] = "ABS_API_RELEASE_LAG"
+                result.update(_validation="UNVERIFIED", _reason="ABS-CPI-API liefert eine ältere Referenzperiode als die amtliche Veröffentlichung")
+            elif result["reference_period"] > calendar["latest_period"]:
+                diagnostic["code"] = "ABS_RELEASE_CONFLICT"
+                result.update(_validation="UNVERIFIED", _reason="ABS-CPI-API und amtliche Veröffentlichungsseite widersprechen sich")
+            elif calendar["next_due_at"] is not None and checked >= _now(calendar["next_due_at"]):
+                diagnostic["code"] = "ABS_RELEASE_DUE_UNCONFIRMED"
+                result.update(_validation="UNVERIFIED", _reason="Neue ABS-CPI-Veröffentlichung fällig; aktuelle Referenzperiode unbestätigt")
         if result is not None and currency == "JPY":
             result["source_url"] = "https://www.e-stat.go.jp/en/stat-search/database?layout=dataset&statdisp_id=0004052037"
-        diagnostic["code"] = "OK" if result is not None else "NO_ELIGIBLE_OBSERVATION"
+        if diagnostic["code"] == "SOURCE_UNAVAILABLE":
+            diagnostic["code"] = "OK" if result is not None else "NO_ELIGIBLE_OBSERVATION"
         return result
     except requests.RequestException:
-        diagnostic["code"] = "HTTP_ERROR" if phase == "transport" else "INVALID_JSON"
+        diagnostic["code"] = "ABS_RELEASE_INDEX_UNAVAILABLE" if phase == "release_index" else "HTTP_ERROR" if phase == "transport" else "INVALID_JSON"
         return None
     except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
         token = exc.args[0] if len(exc.args) == 1 else None

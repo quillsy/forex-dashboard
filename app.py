@@ -4516,6 +4516,13 @@ def get_current_official_cpi(curr):
                     "remaining": None, "limit": None, "reset_at": None, "budget_evidence": "unknown"})
                 item["data_status"] = diagnostics.get("code", "UNKNOWN")
                 item["provider_response_status"] = diagnostics.get("provider_status")
+            if curr == "AUD" and result is None:
+                outage = diagnostics.get("code") in ("HTTP_ERROR", "ABS_RELEASE_INDEX_UNAVAILABLE")
+                return {"value": None, "date": None, "source": "Australian Bureau of Statistics",
+                        "series_id": "CPI/3.10001.10.50.M",
+                        "_validation": "SOURCE_UNAVAILABLE" if outage else "UNVERIFIED",
+                        "_reason": "ABS-CPI-Quelle vorübergehend nicht erreichbar" if outage
+                                   else "ABS-CPI-Daten oder amtlicher Veröffentlichungsstand nicht bestätigt"}
             return result
     except requests.exceptions.JSONDecodeError:
         validation = "UNVERIFIED"
@@ -4531,7 +4538,7 @@ def get_current_official_cpi(curr):
             "_reason": "Amtlicher Inflations-Datenvertrag nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Inflationsquelle vorübergehend nicht erreichbar"}
 
 
-def get_cpi_yoy_details(curr: str, target_date=None):
+def get_cpi_yoy_details(curr: str, target_date=None, official_observation=None):
     if use_live_core_cache(target_date):
         detail = live_data.details(curr)
         observation = detail["_observations"].get("Inflation", {})
@@ -4541,9 +4548,14 @@ def get_cpi_yoy_details(curr: str, target_date=None):
     collector_current = (os.environ.get("FX_COLLECTOR") == "1" and
                          (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()))
     if curr in ("EUR", "CHF", "JPY", "AUD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
-        observation = get_current_official_cpi(curr)
+        observation = official_observation if official_observation is not None else get_current_official_cpi(curr)
         if not observation:
             return None, None, "CPI_YOY", "UNAVAILABLE", None, "UNAVAILABLE"
+        if observation.get("_validation") == "SOURCE_UNAVAILABLE":
+            return (None, None, "CPI_YOY", observation["source"], observation["series_id"], "SOURCE_UNAVAILABLE")
+        if observation.get("_validation") == "UNVERIFIED":
+            return (None, observation["date"], "CPI_YOY", observation["source"],
+                    observation["series_id"], "UNAVAILABLE")
         status = observation_freshness(observation["date"], datetime.now(), 45, 90, monthly=True)
         return (observation["value"] if status in ("FRESH", "AGING") else None,
                 observation["date"], "HICP_YOY" if curr in ("EUR", "CHF") else "CPI_YOY",
@@ -5501,7 +5513,11 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
 
     if 'Inflation' in requested_factors:
         try:
-            cpi, observed, metric_type, source, series_id, status = get_cpi_yoy_details(curr, dt_str)
+            aud_official = (get_current_official_cpi(curr) if curr == "AUD" and
+                            pd.Timestamp(dt_str).date() == datetime.now().date() else None)
+            cpi, observed, metric_type, source, series_id, status = (
+                get_cpi_yoy_details(curr, dt_str, official_observation=aud_official)
+                if aud_official is not None else get_cpi_yoy_details(curr, dt_str))
             cpi = finite_number(cpi)
             freshness["Inflation"] = status
             observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
@@ -5517,7 +5533,7 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     period = pd.Timestamp(observed)
                     observations["Inflation"]["reference_period"] = f"{period.year}-Q{(period.month - 1) // 3 + 1}" if curr == "NZD" else period.strftime("%Y-%m")
             if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
-                official = get_current_official_cpi(curr)
+                official = aud_official if curr == "AUD" else get_current_official_cpi(curr)
                 if official:
                     observations["Inflation"].update(official)
             if curr in ("NZD", "GBP", "CAD") and observed is not None:
