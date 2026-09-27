@@ -166,7 +166,7 @@ def eligible(record, now=None, factor=None, currency=None):
         reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
-    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS
+    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
     if rights_hold:
         return False, rights_hold
@@ -178,6 +178,15 @@ def eligible(record, now=None, factor=None, currency=None):
         minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if reference < minimum:
             return False, "Neuere amtliche Referenzperiode veröffentlicht: " + release["label"]
+    scheduled = SCHEDULED_RELEASES.get((currency, factor))
+    if scheduled:
+        scheduled_due = timestamp(scheduled.get("due_at"))
+        if scheduled_due is None:
+            return False, "Amtlicher Veröffentlichungstermin nicht bestätigt"
+        if now >= scheduled_due:
+            minimum = datetime.strptime(scheduled["minimum_period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if reference < minimum:
+                return False, "Neuere amtliche Referenzperiode fällig: " + scheduled["minimum_period_start"][:7]
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
     if any(record.get(field) is not None and timestamp(record[field]) is None
