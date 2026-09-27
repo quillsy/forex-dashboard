@@ -13,6 +13,38 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_cad_2y_rights_hold_revokes_cached_score_and_hides_public_yield(self):
+        row = live.build_record('Geldpolitik', 20, {
+            'policy_rate': 2.5, 'yield_2y': 3.1, 'date': '2026-09-04',
+            'series_id': 'BD.CDN.2YR.DQ.YLD', 'source': 'Bank of Canada',
+        }, 'FRESH', NOW.isoformat())
+        data = {'completed_at': NOW.isoformat(), 'currencies': {'CAD': {'Geldpolitik': row}}}
+        allowed, reason = live.eligible(row, NOW, factor='Geldpolitik', currency='CAD')
+        self.assertFalse(allowed)
+        self.assertIn('Weiterverwendung', reason)
+        self.assertIsNone(live.details('CAD', NOW, data)['Geldpolitik'])
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=data), patch.object(live, 'now_utc', return_value=NOW):
+            live.render_status(st)
+        rows = st.dataframe.call_args_list[1].args[0]
+        cad = next(row for row in rows if row['Währung'] == 'CAD' and row['Faktor'] == 'Geldpolitik')
+        self.assertEqual(cad['Status'], 'Gesperrt')
+        self.assertIsNone(cad['Wert'])
+
+    def test_cad_2y_rights_hold_skips_provider_fetch_and_redacts_snapshot(self):
+        app = Mock(FRED_KEY=None)
+        app.compute_currency_details.return_value = {'_observations': {}, '_freshness': {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            with patch.object(live, 'CURRENCIES', ('CAD',)), patch.object(live, 'now_utc', return_value=NOW):
+                live.collect(app, path)
+                cad = live.load(path)['currencies']['CAD']['Geldpolitik']
+        requested = app.compute_currency_details.call_args.kwargs['factors_to_refresh']
+        self.assertNotIn('Geldpolitik', requested)
+        self.assertIsNone(cad['score'])
+        self.assertEqual(cad['observation'], {})
+        self.assertIn('Weiterverwendung', cad['reason'])
+
     def test_ons_gdp_provenance_exact_allowlist(self):
         url = 'https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2'
         self.assertEqual(live.public_observation({'source_url': url})['source_url'], url)
