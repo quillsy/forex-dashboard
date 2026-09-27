@@ -24,7 +24,7 @@ STATCAN_PRODUCTS = {
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url", "bls_embargo_ends_at"})
+OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url", "bls_embargo_ends_at", "bls_proof_source", "bls_first_observed_at", "bls_api_raw_value", "bls_fred_raw_value"})
 
 
 def now_utc():
@@ -167,16 +167,37 @@ def eligible(record, now=None, factor=None, currency=None):
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
     if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt"):
-        from official_bls import _pdf_url
+        from official_bls import PINNED_DUES, _api_url, _pdf_url, _raw_decimal, _successor, BlsInvalid
         series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
         published = timestamp(record.get("published_at"))
         embargo = timestamp(observation.get("bls_embargo_ends_at")) if observation.get("bls_embargo_ends_at") else published
+        proof_url = observation.get("bls_release_url")
+        api_proof = observation.get("bls_proof_source") == "BLS_API_V1"
         if (observation.get("series_id") != series
                 or observation.get("bls_release_period") != reference.strftime("%Y-%m")
                 or timestamp(record.get("next_due_at")) is None
-                or published is None
-                or embargo != published
-                or observation.get("bls_release_url") != _pdf_url(factor, embargo)):
+                or published is None or embargo is None):
+            return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
+        if api_proof:
+            period = observation["bls_release_period"]
+            first = timestamp(observation.get("bls_first_observed_at"))
+            planned = timestamp(PINNED_DUES[factor].get(period))
+            next_due = timestamp(PINNED_DUES[factor].get(_successor(period)))
+            try:
+                matched = (_raw_decimal(observation.get("bls_api_raw_value"))
+                           == _raw_decimal(observation.get("bls_fred_raw_value")))
+                if factor == "Arbeitsmarkt":
+                    matched = matched and _raw_decimal(observation.get("value")) == _raw_decimal(observation.get("bls_fred_raw_value"))
+            except BlsInvalid:
+                matched = False
+            if (planned is None or next_due is None or embargo != planned
+                    or timestamp(record.get("next_due_at")) != next_due
+                    or first is None or first != published or first > now
+                    or not planned + timedelta(hours=24) <= first < next_due
+                    or proof_url != _api_url(factor) or not matched
+                    or observation.get("source") != ("FRED" if factor == "Arbeitsmarkt" else "FRED / BLS")):
+                return False, "BLS-API-Beleg oder Rohwertvergleich ungültig"
+        elif embargo != published or proof_url != _pdf_url(factor, embargo):
             return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
@@ -270,8 +291,10 @@ def public_observation(observation):
     for key in OBS_FIELDS:
         value = observation.get(key)
         if key == "bls_release_url":
-            if isinstance(value, str) and re.fullmatch(
-                    r"https://www\.dol\.gov/newsroom/economicdata/(?:empsit|cpi)_\d{8}\.pdf", value):
+            if isinstance(value, str) and (re.fullmatch(
+                    r"https://www\.dol\.gov/newsroom/economicdata/(?:empsit|cpi)_\d{8}\.pdf", value)
+                    or value in ("https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000",
+                                 "https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0")):
                 result[key] = value
             continue
         if key == "publication_basis" and isinstance(value, str) and re.fullmatch(
@@ -398,10 +421,35 @@ def record_not_due(record, currency, factor, now):
     return due is not None and due > now and eligible(record, now, factor=factor, currency=currency)[0]
 
 
+def _fred_raw_for_bls(app, factor, observation, period):
+    """Read the original FRED index for CPI; its pc1 score stays untouched."""
+    from official_bls import BlsInvalid, _raw_decimal
+    try:
+        observed = datetime.strptime(str(observation.get("date"))[:10], "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise BlsInvalid("BLS_FRED_PERIOD_MISMATCH") from exc
+    if observed.strftime("%Y-%m") != period:
+        raise BlsInvalid("BLS_FRED_PERIOD_MISMATCH")
+    if factor == "Arbeitsmarkt":
+        if observation.get("source") != "FRED":
+            raise BlsInvalid("BLS_FRED_SOURCE_INVALID")
+        return str(_raw_decimal(observation.get("value")))
+    if observation.get("source") != "FRED / BLS" or not app.FRED_KEY:
+        raise BlsInvalid("BLS_FRED_SOURCE_INVALID")
+    frame, _, is_live = app.get_fred_data("CPIAUCNS", app.FRED_KEY, propagate_transport=True)
+    if is_live is not True or frame is None or not hasattr(frame, "columns") or not {"date", "value"}.issubset(frame.columns):
+        raise BlsInvalid("BLS_FRED_RAW_UNAVAILABLE")
+    matches = [(date, value) for date, value in zip(frame["date"], frame["value"])
+               if str(date)[:7] == period]
+    if len(matches) != 1:
+        raise BlsInvalid("BLS_FRED_RAW_PERIOD_INVALID")
+    return str(_raw_decimal(matches[0][1]))
+
+
 def collect(app, path=PATH):
     """One cold collector run; only individually qualified observations publish."""
     from source_contracts import validate_fred_metadata
-    from official_bls import BlsInvalid, REPORTS, fetch_release_state
+    from official_bls import BlsInvalid, REPORTS, _raw_decimal, fetch_release_state
     from provider_transport import CollectorTransport
     previous = load(path)
     checked_at = now_utc().isoformat()
@@ -411,6 +459,12 @@ def collect(app, path=PATH):
     prior_pdf_attempts = prior_pdf_attempts if isinstance(prior_pdf_attempts, dict) else {}
     data["bls_pdf_attempts"] = {factor: value for factor, value in prior_pdf_attempts.items()
                                 if factor in REPORTS and timestamp(value) is not None}
+    prior_api_attempts = previous.get("bls_api_attempts", {})
+    if not isinstance(prior_api_attempts, dict):
+        prior_api_attempts = {factor: "INVALID" for factor in REPORTS}
+    data["bls_api_attempts"] = {factor: value if timestamp(value) is not None else "INVALID"
+                                for factor, value in prior_api_attempts.items() if factor in REPORTS}
+    data["bls_provider_status"] = {}
     prior_release_states = previous.get("bls_release_states", {})
     prior_release_states = prior_release_states if isinstance(prior_release_states, dict) else {}
     data["bls_release_states"] = {}
@@ -434,30 +488,56 @@ def collect(app, path=PATH):
             state = fetch_release_state(
                 factor, session=app.requests if isinstance(getattr(app, "requests", None), CollectorTransport) else http,
                 now=timestamp(checked_at), previous_state=previous_state,
-                last_pdf_attempt=timestamp(prior_pdf_attempts.get(factor)), diagnostics=diagnostic)
+                last_pdf_attempt=timestamp(prior_pdf_attempts.get(factor)),
+                last_api_attempt=timestamp(prior_api_attempts.get(factor)),
+                api_budget_blocked=(factor in prior_api_attempts and
+                                    (timestamp(prior_api_attempts[factor]) is None or
+                                     timestamp(prior_api_attempts[factor]) > timestamp(checked_at))),
+                diagnostics=diagnostic)
             bls_states[factor] = {"state": state}
-            data["bls_release_states"][factor] = state
+            data["bls_provider_status"][factor] = {
+                "dol": diagnostic.get("pdf_status", "NOT_REQUESTED"),
+                "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"),
+                "proof": state.get("proof_source", "DOL_PDF")}
+            if state.get("proof_source") != "BLS_API_V1":
+                data["bls_release_states"][factor] = state
         except http.exceptions.RequestException as error:
             temporary = temporary_source_outage(error) or error.args == ("PROVIDER_COOLDOWN",)
             prior_due = timestamp(prior.get("next_due_at"))
             due_or_unknown = (prior.get("validation") == "VALID" and
-                              (prior_due is None or timestamp(checked_at) >= prior_due))
+                              prior_due is not None and timestamp(checked_at) >= prior_due)
+            unknown_due = prior.get("validation") == "VALID" and prior_due is None
             bls_states[factor] = {
-                "validation": "SOURCE_UNAVAILABLE" if temporary and not due_or_unknown else "UNVERIFIED",
+                "validation": "SOURCE_UNAVAILABLE" if temporary and not (due_or_unknown or unknown_due) else "UNVERIFIED",
                 "reason": ("BLS-Folgeausgabe fällig; amtliche Veröffentlichung nicht bestätigt"
-                           if due_or_unknown else "BLS-Veröffentlichungsquelle vorübergehend nicht erreichbar"
+                           if due_or_unknown else "BLS-Termin/Beleg unbekannt"
+                           if unknown_due else "BLS-Veröffentlichungsquelle vorübergehend nicht erreichbar"
                            if temporary else "BLS-Veröffentlichungsquelle nicht bestätigt"),
             }
+            data["bls_provider_status"][factor] = {
+                "dol": diagnostic.get("pdf_status", "TRANSPORT_ERROR"),
+                "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"), "proof": "UNVERIFIED"}
         except (BlsInvalid, ValueError, TypeError, KeyError) as error:
             reason = {
                 "BLS_PDF_RELEASE_DATE_UNKNOWN": "Amtlicher BLS-Veröffentlichungstermin für die aktuelle Ausgabe unbekannt",
                 "BLS_PDF_RELEASE_NOT_CURRENT": "Aktuelle amtliche BLS-Ausgabe nicht bestätigt",
                 "BLS_PDF_RECHECK_COOLDOWN": "Nächste amtliche BLS-Ausgabe wird innerhalb einer Stunde erneut geprüft",
+                "BLS_API_WAIT_24H": "BLS-API-Fallback erst 24 Stunden nach geplantem Termin zulässig",
+                "BLS_API_DAILY_LIMIT": "BLS-API-Tageslimit für diesen Faktor erreicht",
+                "BLS_API_ATTEMPT_STATE_INVALID": "BLS-API-Versuchszähler ungültig",
+                "BLS_API_SCHEDULE_UNKNOWN": "BLS-Termin/Beleg unbekannt",
+                "BLS_API_PERIOD_MISMATCH": "BLS-API-Referenzperiode entspricht nicht dem Kalender",
             }.get(str(error), "BLS-Kalender oder veröffentlichte Ausgabe nicht eindeutig")
             bls_states[factor] = {"validation": "UNVERIFIED", "reason": reason}
+            data["bls_provider_status"][factor] = {
+                "dol": diagnostic.get("pdf_status", "NOT_REQUESTED"),
+                "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"),
+                "proof": str(error) if isinstance(error, BlsInvalid) else "BLS_ERROR"}
         finally:
             if diagnostic.get("pdf_attempted"):
                 data["bls_pdf_attempts"][factor] = checked_at
+            if diagnostic.get("api_attempted"):
+                data["bls_api_attempts"][factor] = checked_at
             if factor not in data["bls_release_states"] and verified_state:
                 data["bls_release_states"][factor] = verified_state
 
@@ -543,16 +623,39 @@ def collect(app, path=PATH):
                 elif observation.get("date") is not None:
                     observed_period = str(observation["date"])[:7]
                     expected_series = REPORTS[factor]["series_id"]
-                    observation.update(bls_release_period=state["period"],
-                                       bls_release_url=state.get("release_url"),
-                                       bls_embargo_ends_at=state["embargo_ends_at"],
-                                       published_at=state["embargo_ends_at"],
-                                       next_due_at=state["next_due_at"],
-                                       publication_basis="Amtliche DOL/BLS-Mitteilung: Berichtsmonat, Embargo-Ende als früheste Freigabe und geplanter Folgetermin; tatsächliche Verfügbarkeit erst bei Prüfung bestätigt")
                     if (observation.get("series_id") != expected_series
                             or observed_period != state["period"]):
                         validation, reason = "UNVERIFIED", "FRED-Periode entspricht nicht der neuesten amtlichen BLS-Ausgabe"
-                    elif now_utc() >= timestamp(state["next_due_at"]):
+                    elif state.get("proof_source") == "BLS_API_V1":
+                        try:
+                            fred_raw = _fred_raw_for_bls(app, factor, observation, state["period"])
+                            if _raw_decimal(fred_raw) != _raw_decimal(state["raw_value"]):
+                                raise BlsInvalid("BLS_FRED_RAW_MISMATCH")
+                        except (BlsInvalid, http.exceptions.RequestException, ValueError, TypeError):
+                            validation, reason = "UNVERIFIED", "BLS- und FRED-Rohwert für denselben Monat nicht bestätigt"
+                            data["bls_provider_status"][factor]["proof"] = "BLS_FRED_RAW_MISMATCH_OR_UNAVAILABLE"
+                        else:
+                            state["fred_raw_value"] = fred_raw
+                            data["bls_release_states"][factor] = state
+                            observation.update(bls_release_period=state["period"],
+                                               bls_release_url=state["release_url"],
+                                               bls_embargo_ends_at=state["embargo_ends_at"],
+                                               bls_proof_source="BLS_API_V1",
+                                               bls_first_observed_at=state["first_observed_at"],
+                                               bls_api_raw_value=state["raw_value"],
+                                               bls_fred_raw_value=fred_raw,
+                                               published_at=state["first_observed_at"],
+                                               next_due_at=state["next_due_at"],
+                                               provider_status="BLS API v1; FRED-Rohwert abgeglichen",
+                                               publication_basis="Amtliche BLS-API-v1-Beobachtung erstmals beim Abruf gesehen; Kalendertermin ist keine tatsächliche Veröffentlichungszeit")
+                    else:
+                        observation.update(bls_release_period=state["period"],
+                                           bls_release_url=state.get("release_url"),
+                                           bls_embargo_ends_at=state["embargo_ends_at"],
+                                           published_at=state["embargo_ends_at"],
+                                           next_due_at=state["next_due_at"],
+                                           publication_basis="Amtliche DOL/BLS-Mitteilung: Berichtsmonat, Embargo-Ende als früheste Freigabe und geplanter Folgetermin; tatsächliche Verfügbarkeit erst bei Prüfung bestätigt")
+                    if now_utc() >= timestamp(state["next_due_at"]):
                         validation, reason = "UNVERIFIED", "Neue BLS-Veröffentlichung fällig; Folgeperiode nicht bestätigt"
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
@@ -675,6 +778,8 @@ def render_status(st, authorized=False):
             bls_embargo = (observation.get("bls_embargo_ends_at") or record.get("published_at")
                            if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt")
                            and observation.get("bls_release_url") else None)
+            bls_api_first = (observation.get("bls_first_observed_at")
+                             if observation.get("bls_proof_source") == "BLS_API_V1" else None)
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
                          "Aktualität": current_freshness(record, now, factor) if valid else "UNAVAILABLE",
@@ -688,7 +793,8 @@ def render_status(st, authorized=False):
                          "Prüfbasis": observation.get("publication_basis"),
                          "Messzeitraum": observation.get("period_label") or observation.get("frequency"),
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if observation.get("is_estimate") is True or any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
-                         "Veröffentlicht": ((str(bls_embargo) + " (Embargo-Ende; Uploadzeit unbekannt)")
+                         "Veröffentlicht": ((str(bls_api_first) + " (erster BLS-API-Abruf; tatsächliche Veröffentlichungszeit unbekannt)")
+                                           if bls_api_first else (str(bls_embargo) + " (Embargo-Ende; Uploadzeit unbekannt)")
                                            if bls_embargo else record.get("published_at")
                                            or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt")),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
@@ -696,6 +802,12 @@ def render_status(st, authorized=False):
     available = sum(row["Status"] == "Verfügbar" for row in rows)
     retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")
+    if any(row.get("observation", {}).get("bls_proof_source") == "BLS_API_V1"
+           for row in data.get("currencies", {}).get("USD", {}).values() if isinstance(row, dict)):
+        st.caption("BLS API v1: Quelle U.S. Bureau of Labor Statistics; Abrufdatum steht beim Einzelwert. "
+                   "Kalendertermin und erster API-Abruf belegen keine genaue Veröffentlichungszeit. "
+                   "BLS.gov cannot vouch for the data or analyses derived from these data after the data have been retrieved from BLS.gov. "
+                   "[BLS API Terms of Service, geprüft am 27.09.2026](https://www.bls.gov/developers/termsOfService.htm).")
     if retained:
         st.warning("Einzelne Quellen konnten zuletzt nicht bestätigt werden. Ihre gespeicherten Werte bleiben nur innerhalb der bestehenden Freigabefrist nutzbar; Details stehen in der Quellentabelle.")
     st.markdown("**Verfügbare Fundamentaldaten je Währung**")
@@ -776,7 +888,19 @@ def render_status(st, authorized=False):
                            "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
                            "Anfragen im letzten Lauf": item.get("requests_this_run"),
                            "Heute gezählt (UTC)": item.get("requests_observed_utc_day"),
-                           "Restkontingent": "Unbekannt", "Limit": "Unbekannt", "Rücksetzung": "Unbekannt",
-                           "Nachweis": "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"}
+                           "Restkontingent": "Unbekannt",
+                           "Limit": "25 Anfragen/Tag (BLS API v1 ohne Registrierung)" if host == "api.bls.gov" else "Unbekannt",
+                           "Rücksetzung": "Unbekannt",
+                           "Nachweis": "BLS API FAQ; Restbudget nicht bestätigt" if host == "api.bls.gov" else "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"}
                           for host, item in providers.items()], hide_index=True, use_container_width=True)
+            api_attempts = data.get("bls_api_attempts", {})
+            api_attempts = api_attempts if isinstance(api_attempts, dict) else {}
+            counted = sum(timestamp(api_attempts.get(factor)) is not None and
+                          timestamp(api_attempts.get(factor)).date() == now.date()
+                          for factor in ("Arbeitsmarkt", "Inflation"))
+            st.caption(f"BLS API v1: {counted}/2 lokal gespeicherte Faktorversuche am heutigen UTC-Tag "
+                       "(höchstens einer je Faktor in abgeschlossenen Collector-Läufen). "
+                       "Das offizielle Limit ohne Registrierung beträgt 25 Anfragen/Tag; das Restbudget ist unbekannt. "
+                       "Ein Prozessabbruch vor der Datensatzspeicherung kann lokale Versuche auslassen. "
+                       "[BLS API FAQ](https://www.bls.gov/developers/api_FAQs.htm).")
             st.caption("Andere Anwendungen können denselben Schlüssel verwenden. Lokale Zähler sind daher kein Nachweis des gesamten Kontoverbrauchs.")
