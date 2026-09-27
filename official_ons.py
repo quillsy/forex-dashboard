@@ -15,6 +15,12 @@ import requests
 BASE = "https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/"
 PN2_FALLBACK_URL = "https://api.beta.ons.gov.uk/v1/data?uri=/economy/grossdomesticproductgdp/timeseries/ihyr/pn2"
 TITLE = "Gross Domestic Product: q-on-q4 growth rate CVM SA %"
+# The Q2 national-accounts revision has the same reference period as PN2's
+# first estimate. Its announced 07:00 Europe/London release is 06:00 UTC.
+# https://www.ons.gov.uk/releases/gdpquarterlynationalaccountsukapriltojune2026
+Q2_2026_REVISION_DUE = datetime(2026, 9, 30, 6, tzinfo=timezone.utc)
+Q2_2026_REVISION_DATE = "2026-09-30"
+Q2_2026_END = "2026-06-30"
 
 
 def _now(now):
@@ -37,6 +43,10 @@ def parse_ons_gdp(payload, dataset, *, now=None):
         raise ValueError("ONS_RELEASE_DATE_INVALID")
     release_day = release.astimezone(ZoneInfo("Europe/London")).date()
     if release_day > checked.astimezone(ZoneInfo("Europe/London")).date():
+        raise ValueError("ONS_FUTURE_RELEASE")
+    # releaseDate is only a calendar date. An early API update on the morning
+    # of the scheduled bulletin cannot be treated as already published.
+    if release_day.isoformat() >= Q2_2026_REVISION_DATE and checked < Q2_2026_REVISION_DUE:
         raise ValueError("ONS_FUTURE_RELEASE")
     quarters = payload.get("quarters")
     if not isinstance(quarters, list):
@@ -123,7 +133,25 @@ def fetch_ons_gdp(*, now=None, session=None):
         if key in by_release and by_release[key] != result["value"]:
             return None
         by_release[key] = result["value"]
-    return max(results, key=lambda result: (result["date"], result["release_date_known"]))
+    latest = max(results, key=lambda result: (result["date"], result["release_date_known"]))
+    if checked >= Q2_2026_REVISION_DUE and latest["date"] <= Q2_2026_END:
+        # A successful PN2 fetch still carries the first Q2 estimate. Require
+        # the QNA family itself to contain Q2 in the new release vintage; a
+        # changed numeric value is not required because a revision may be zero.
+        revised = next((result for result in results
+                        if result["series_id"] == "IHYR/QNA"
+                        and result["date"] == Q2_2026_END
+                        and result["release_date_known"] >= Q2_2026_REVISION_DATE), None)
+        if revised is None:
+            return None
+        # PN2 can share the release date, so a plain max() would keep the
+        # first (PN2) item. A still later conflicting PN2 value is unresolved.
+        if any(result["date"] == Q2_2026_END
+               and result["release_date_known"] >= revised["release_date_known"]
+               and result["value"] != revised["value"] for result in results):
+            return None
+        return revised
+    return latest
 
 
 LABOUR_URL = "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data"
