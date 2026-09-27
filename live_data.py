@@ -424,7 +424,11 @@ def record_not_due(record, currency, factor, now):
 def _fred_raw_for_bls(app, factor, observation, period):
     """Read the original FRED index for CPI; its pc1 score stays untouched."""
     from official_bls import BlsInvalid, _raw_decimal
-    if observation.get("date", "")[:7] != period:
+    try:
+        observed = datetime.strptime(str(observation.get("date"))[:10], "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise BlsInvalid("BLS_FRED_PERIOD_MISMATCH") from exc
+    if observed.strftime("%Y-%m") != period:
         raise BlsInvalid("BLS_FRED_PERIOD_MISMATCH")
     if factor == "Arbeitsmarkt":
         if observation.get("source") != "FRED":
@@ -802,7 +806,7 @@ def render_status(st, authorized=False):
            for row in data.get("currencies", {}).get("USD", {}).values() if isinstance(row, dict)):
         st.caption("BLS API v1: Quelle U.S. Bureau of Labor Statistics; Abrufdatum steht beim Einzelwert. "
                    "Kalendertermin und erster API-Abruf belegen keine genaue Veröffentlichungszeit. "
-                   "BLS billigt dieses Dashboard nicht und übernimmt keine Gewähr für dessen Darstellung. "
+                   "BLS.gov cannot vouch for the data or analyses derived from these data after the data have been retrieved from BLS.gov. "
                    "[BLS API Terms of Service, geprüft am 27.09.2026](https://www.bls.gov/developers/termsOfService.htm).")
     if retained:
         st.warning("Einzelne Quellen konnten zuletzt nicht bestätigt werden. Ihre gespeicherten Werte bleiben nur innerhalb der bestehenden Freigabefrist nutzbar; Details stehen in der Quellentabelle.")

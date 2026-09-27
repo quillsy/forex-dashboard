@@ -1,6 +1,7 @@
 """Offline checks for USD BLS bulletin proof and FRED period gating."""
 import tempfile
 import unittest
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -9,6 +10,7 @@ import requests
 import pandas as pd
 
 import live_data
+from provider_transport import CollectorTransport
 from official_bls import (BlsInvalid, PINNED_DUES, _api_url, _pdf_url, fetch_release_state,
                           parse_api_latest, parse_pdf_release, parse_schedule)
 
@@ -51,10 +53,11 @@ def pdf_response(status=200):
 
 def api_payload(factor, *, period="M08", value=None, year="2026"):
     # Synthetic values exercise equality checks, not a claim about the live index.
-    return {"status": "REQUEST_SUCCEEDED", "message": [], "Results": [{"series": [{
+    return {"status": "REQUEST_SUCCEEDED", "message": [], "Results": {"series": [{
         "seriesID": "LNS14000000" if factor == "Arbeitsmarkt" else "CUUR0000SA0",
         "data": [{"year": year, "period": period, "periodName": "August",
-                  "value": value or ("4.1" if factor == "Arbeitsmarkt" else "321.123")}] }]}]}
+                  "latest": "true", "footnotes": [{}],
+                  "value": value or ("4.1" if factor == "Arbeitsmarkt" else "321.123")}] }]}}
 
 
 def api_response(factor, **kwargs):
@@ -175,24 +178,28 @@ class BlsBulletinTests(unittest.TestCase):
             with self.subTest(factor=factor):
                 self.assertEqual(parse_api_latest(api_payload(factor), factor, "2026-08"),
                                  "4.1" if factor == "Arbeitsmarkt" else "321.123")
-                for changes in ({"period": "M13"}, {"period": "M07"}):
+                for changes in ({"period": "M13"}, {"period": "M07"}, {"latest": "false"}):
                     payload = api_payload(factor)
-                    payload["Results"][0]["series"][0]["data"][0].update(changes)
+                    payload["Results"]["series"][0]["data"][0].update(changes)
                     with self.assertRaises(BlsInvalid):
                         parse_api_latest(payload, factor, "2026-08")
                 payload = api_payload(factor)
-                payload["Results"][0]["series"][0]["data"].append(
+                payload["Results"]["series"][0]["data"].append(
                     {"year": "2026", "period": "M13", "periodName": "Annual", "value": "3"})
                 self.assertEqual(parse_api_latest(payload, factor, "2026-08"),
                                  "4.1" if factor == "Arbeitsmarkt" else "321.123")
-                payload["Results"][0]["series"][0]["data"].append(
+                payload["Results"]["series"][0]["data"].append(
                     {"year": "2026", "period": "M09", "periodName": "September", "value": "3"})
                 with self.assertRaisesRegex(BlsInvalid, "BLS_API_PERIOD_MISMATCH"):
                     parse_api_latest(payload, factor, "2026-08")
                 payload = api_payload(factor)
-                payload["Results"][0]["series"][0]["data"].append(
-                    dict(payload["Results"][0]["series"][0]["data"][0]))
+                payload["Results"]["series"][0]["data"].append(
+                    dict(payload["Results"]["series"][0]["data"][0]))
                 with self.assertRaisesRegex(BlsInvalid, "BLS_API_DUPLICATE_PERIOD"):
+                    parse_api_latest(payload, factor, "2026-08")
+                payload = api_payload(factor)
+                payload["Results"] = [payload["Results"]]
+                with self.assertRaisesRegex(BlsInvalid, "BLS_API_RESULTS_INVALID"):
                     parse_api_latest(payload, factor, "2026-08")
                 payload = api_payload(factor)
                 payload["status"] = "REQUEST_NOT_PROCESSED"
@@ -330,6 +337,12 @@ class BlsBulletinTests(unittest.TestCase):
 
 
 class BlsCollectorTests(unittest.TestCase):
+    def test_fred_comparison_accepts_timestamp_date_but_rejects_bad_period(self):
+        observation = {"date": pd.Timestamp("2026-08-01"), "source": "FRED", "value": 4.1}
+        self.assertEqual(live_data._fred_raw_for_bls(Mock(), "Arbeitsmarkt", observation, "2026-08"), "4.1")
+        with self.assertRaisesRegex(BlsInvalid, "BLS_FRED_PERIOD_MISMATCH"):
+            live_data._fred_raw_for_bls(Mock(), "Arbeitsmarkt", observation, "2026-09")
+
     def record(self, factor, checked, due=None):
         state = states()[factor]
         return live_data.build_record(factor, 70 if factor == "Inflation" else 30, {
@@ -473,6 +486,13 @@ class BlsCollectorTests(unittest.TestCase):
         tampered = dict(rows["Inflation"])
         tampered["observation"] = dict(rows["Inflation"]["observation"], bls_fred_raw_value="0")
         self.assertFalse(live_data.eligible(tampered, NOW, factor="Inflation", currency="USD")[0])
+        st = MagicMock()
+        with patch.object(live_data, "load", return_value=self.last_dataset), \
+             patch.object(live_data, "now_utc", return_value=NOW):
+            live_data.render_status(st)
+        captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
+        self.assertIn("BLS.gov cannot vouch for the data", captions)
+        self.assertIn("BLS API Terms of Service", captions)
         prior = self.last_dataset
         rows = self.run_collector({factor: prior["bls_release_states"][factor] for factor in observations},
                                   observations, previous_data=prior, at=NOW + timedelta(hours=1))
@@ -507,6 +527,49 @@ class BlsCollectorTests(unittest.TestCase):
         self.run_collector({"Arbeitsmarkt": BlsInvalid("BLS_API_ATTEMPT_STATE_INVALID")},
                            observation, previous_data=first, at=NOW + timedelta(hours=1))
         self.assertTrue(self.source_calls["Arbeitsmarkt"]["api_budget_blocked"])
+
+    def test_one_dol_403_cooldown_allows_both_factor_api_proofs(self):
+        observations = {
+            "Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01", "series_id": "UNRATE", "source": "FRED"},
+            "Inflation": {"value": 3.4, "date": "2026-08-01", "series_id": "CPIAUCNS", "source": "FRED / BLS"},
+        }
+        underlying = Mock()
+        def response(url, **kwargs):
+            if url.startswith("https://www.dol.gov/"):
+                return pdf_response(403)
+            if url == _api_url("Arbeitsmarkt"):
+                return api_response("Arbeitsmarkt")
+            if url == _api_url("Inflation"):
+                return api_response("Inflation")
+            fred = Mock(status_code=200)
+            fred.json.return_value = {}
+            return fred
+        underlying.get.side_effect = response
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "live.json"
+            transport = CollectorTransport(client=underlying,
+                                           status_path=Path(directory) / "status.json", clock=lambda: NOW)
+            app = Mock(FRED_KEY="test", requests=transport)
+            app.compute_currency_details.return_value = {
+                "Arbeitsmarkt": 30, "Inflation": 70,
+                "_freshness": {factor: "FRESH" for factor in observations},
+                "_observations": observations}
+            app.get_fred_data.return_value = (pd.DataFrame({"date": pd.to_datetime(["2026-08-01"]),
+                                                              "value": [321.123]}), None, True)
+            with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), \
+                 patch.object(live_data, "CURRENCIES", ("USD",)), \
+                 patch.object(live_data, "FACTORS", {"Inflation": 20, "Arbeitsmarkt": 20}), \
+                 patch.object(live_data, "now_utc", return_value=NOW), \
+                 patch("source_contracts.validate_fred_metadata", return_value=True):
+                live_data.collect(app, path)
+            data = live_data.load(path)
+        self.assertEqual(transport.usage["www.dol.gov"]["requests_this_run"], 1)
+        self.assertEqual(transport.usage["api.bls.gov"]["requests_this_run"], 2)
+        for factor in observations:
+            self.assertEqual(data["currencies"]["USD"][factor]["validation"], "VALID")
+            self.assertEqual(data["bls_api_attempts"][factor], NOW.isoformat())
+        self.assertEqual(data["bls_provider_status"]["Inflation"]["dol"],
+                         "PRIOR_HTTP_403_COOLDOWN")
 
 
 if __name__ == "__main__":

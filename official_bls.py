@@ -208,10 +208,10 @@ def parse_api_latest(payload, factor, expected_period):
     try:
         if not isinstance(payload, dict) or payload.get("status") != "REQUEST_SUCCEEDED" or payload.get("message"):
             raise BlsInvalid("BLS_API_STATUS_INVALID")
-        result_groups = payload["Results"]
-        if not isinstance(result_groups, list) or len(result_groups) != 1:
+        result_group = payload["Results"]
+        if not isinstance(result_group, dict) or set(result_group) != {"series"}:
             raise BlsInvalid("BLS_API_RESULTS_INVALID")
-        series = result_groups[0]["series"]
+        series = result_group["series"]
         if not isinstance(series, list) or len(series) != 1 or series[0].get("seriesID") != REPORTS[factor]["api_series"]:
             raise BlsInvalid("BLS_API_SERIES_INVALID")
         rows = series[0]["data"]
@@ -238,6 +238,8 @@ def parse_api_latest(payload, factor, expected_period):
         row = monthly[expected_period]
         if row.get("periodName") != datetime.strptime(expected_period, "%Y-%m").strftime("%B"):
             raise BlsInvalid("BLS_API_PERIOD_MISMATCH")
+        if row.get("latest") not in (True, "true"):
+            raise BlsInvalid("BLS_API_LATEST_INVALID")
         value = _raw_decimal(row["value"])
         if not (Decimal("0") <= value <= Decimal("25") if factor == "Arbeitsmarkt" else Decimal("0") < value < Decimal("1000")):
             raise BlsInvalid("BLS_API_VALUE_INVALID")
@@ -285,8 +287,9 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
     """Confirm the current report from its DOL bulletin or bounded API v1.
 
     A PDF attempt always comes first. Only an unreachable DOL transport may
-    use API v1 after the pinned release plus 24 hours, at most once per factor
-    and UTC day. Neither a planned date nor old FRED data proves publication.
+    use API v1 after the pinned release plus 24 hours. Persisted attempt times
+    limit completed collector runs to one API request per factor and UTC day.
+    Neither a planned date nor old FRED data proves publication.
     """
     report = REPORTS[factor]
     now = now or datetime.now(timezone.utc)
@@ -340,8 +343,14 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
         response.raise_for_status()
     except requests.exceptions.RequestException as error:
         status = getattr(getattr(error, "response", None), "status_code", None)
+        prior_dol_403 = (error.args == ("PROVIDER_COOLDOWN",)
+                         and isinstance(usage, dict)
+                         and usage.get("www.dol.gov", {}).get("outcomes_this_run", {}).get("HTTP_403", 0) >= 1
+                         and "www.dol.gov" in getattr(session, "cooldown", ()))
+        if prior_dol_403 and isinstance(diagnostics, dict):
+            diagnostics["pdf_status"] = "PRIOR_HTTP_403_COOLDOWN"
         unreachable = (isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
-                       and not isinstance(error, requests.exceptions.SSLError)) or (
+                       and not isinstance(error, requests.exceptions.SSLError)) or prior_dol_403 or (
                            type(status) is int and (status in (403, 408, 425, 429) or 500 <= status < 600))
         if not unreachable:
             raise
