@@ -20,8 +20,6 @@ REPORTS = {
         "schedule_title": "Schedule of Releases for the Employment Situation",
         "release_title": "THE EMPLOYMENT SITUATION",
         "series_id": "UNRATE",
-        "bls_series": "LNS14000000",
-        "api": "https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000",
         "archive_prefix": "empsit",
     },
     "Inflation": {
@@ -29,8 +27,6 @@ REPORTS = {
         "schedule_title": "Schedule of Releases for the Consumer Price Index",
         "release_title": "CONSUMER PRICE INDEX",
         "series_id": "CPIAUCNS",
-        "bls_series": "CUUR0000SA0",
-        "api": "https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0",
         "archive_prefix": "cpi",
     },
 }
@@ -55,8 +51,6 @@ PINNED_DUES = {
     },
 }
 USER_AGENT = "Mozilla/5.0 fx-dashboard-source-verification/1.0"
-LOCAL_ROLLING_API_CAP = 20  # BLS keyless limit is 25/day; external use is unknown.
-RELEASE_FAST_WINDOW_CAP = 12
 _MONTH = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
 _ROW = re.compile(
     rf"{_MONTH}\s+(\d{{4}})\s+([A-Z][a-z]{{2,8}})\.?\s+(\d{{1,2}}),\s+"
@@ -141,44 +135,6 @@ def parse_schedule(html, factor):
     return rows
 
 
-def parse_api_latest(payload, factor):
-    """Validate the keyless BLS API response; no release time is inferred."""
-    report = REPORTS[factor]
-    try:
-        messages = payload.get("message")
-        if (payload.get("status") == "REQUEST_NOT_PROCESSED"
-                and isinstance(messages, list) and len(messages) == 1
-                and isinstance(messages[0], str)
-                and re.fullmatch(
-                    r"Request could not be serviced, as the daily threshold for total number of requests "
-                    r"allocated to the user with registration key\s+.*\s+has been reached\.",
-                    messages[0])):
-            raise BlsInvalid("BLS_PROVIDER_LIMIT")
-        if payload["status"] != "REQUEST_SUCCEEDED" or payload.get("message"):
-            raise BlsInvalid("BLS_API_STATUS_INVALID")
-        rows = payload["Results"]["series"]
-        if len(rows) != 1 or rows[0]["seriesID"] != report["bls_series"]:
-            raise BlsInvalid("BLS_API_SERIES_INVALID")
-        latest = [row for row in rows[0]["data"] if row.get("latest") == "true"]
-        if len(latest) != 1:
-            raise BlsInvalid("BLS_API_LATEST_INVALID")
-        row = latest[0]
-        month = re.fullmatch(r"M(0[1-9]|1[0-2])", row["period"])
-        year = int(row["year"])
-        value = float(row["value"])
-        if (month is None or not 1900 <= year <= 2200 or
-                not (0 <= value <= 25 if factor == "Arbeitsmarkt" else 0 < value < 1000)):
-            raise BlsInvalid("BLS_API_VALUE_INVALID")
-        period = f"{year:04d}-{month[1]}"
-        if row.get("periodName") != datetime.strptime(period, "%Y-%m").strftime("%B"):
-            raise BlsInvalid("BLS_API_PERIOD_INVALID")
-        return period
-    except (KeyError, TypeError, ValueError, IndexError) as exc:
-        if isinstance(exc, BlsInvalid):
-            raise
-        raise BlsInvalid("BLS_API_SCHEMA_INVALID") from exc
-
-
 def parse_pdf_release(text, factor, now):
     """Bind a DOL-hosted BLS bulletin to its heading, embargo and next month."""
     report = REPORTS[factor]
@@ -204,7 +160,7 @@ def parse_pdf_release(text, factor, now):
                    due_day, due_hour, due_minute)
     if not published <= now < due or not published < due:
         raise BlsInvalid("BLS_PDF_RELEASE_NOT_CURRENT")
-    return {"period": period, "published_at": published.isoformat(),
+    return {"period": period, "embargo_ends_at": published.isoformat(),
             "next_due_at": due.isoformat()}
 
 
@@ -226,85 +182,73 @@ def _pdf_url(factor, published):
     return f"https://www.dol.gov/newsroom/economicdata/{REPORTS[factor]['archive_prefix']}_{local_date}.pdf"
 
 
-def fetch_release_state(factor, *, session=requests, now=None, confirmed_period=None,
-                        last_api_attempt=None, diagnostics=None, previous_state=None,
-                        rolling_attempts=0, release_attempts=0):
-    """Use the official API for the current month and its DOL-hosted BLS PDF.
+def _verified_previous(factor, state):
+    """Accept only a coherent, already confirmed bulletin, never a date alone."""
+    if not isinstance(state, dict) or not isinstance(state.get("period"), str):
+        return None
+    period = state["period"]
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+        return None
+    published = _parse_aware(state.get("embargo_ends_at") or state.get("published_at"))
+    due = _parse_aware(state.get("next_due_at"))
+    if (published is None or due is None or published >= due
+            or state.get("release_url") != _pdf_url(factor, published)):
+        return None
+    pinned = PINNED_DUES[factor]
+    if ((period in pinned and pinned[period] != published.isoformat())
+            or (_successor(period) in pinned and pinned[_successor(period)] != due.isoformat())):
+        return None
+    return period, published, due
 
-    BLS HTML and feeds return 403 from GitHub runners. Existing qualified proof
-    is reusable between daily API checks only before its exact successor
-    deadline. At/after due, check every 30 minutes for the first 12 actual
-    attempts that UTC day, then hourly while rolling budget remains.
+
+def fetch_release_state(factor, *, session=requests, now=None, previous_state=None,
+                        last_pdf_attempt=None, diagnostics=None):
+    """Confirm the current report from its official DOL-hosted BLS bulletin.
+
+    Pinned schedule dates and a validated prior bulletin select a PDF URL only.
+    Neither a planned date nor an old FRED observation proves publication.
     """
     report = REPORTS[factor]
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise BlsInvalid("BLS_CLOCK_INVALID")
     now = now.astimezone(timezone.utc)
-    reusable = False
-    if confirmed_period is not None and isinstance(previous_state, dict) and previous_state.get("period") == confirmed_period:
-        try:
-            prior_due = datetime.fromisoformat(previous_state.get("next_due_at", ""))
-            prior_published = datetime.fromisoformat(previous_state.get("published_at", ""))
-            reusable = (prior_due.tzinfo is not None and prior_published.tzinfo is not None
-                        and prior_published <= now < prior_due
-                        and previous_state.get("release_url") == _pdf_url(factor, prior_published))
-        except (TypeError, ValueError):
-            reusable = False
-    prior_deadline = (_parse_aware(previous_state.get("next_due_at"))
-                      if isinstance(previous_state, dict) else None)
-    after_due = (confirmed_period is not None and isinstance(previous_state, dict)
-                 and previous_state.get("period") == confirmed_period
-                 and prior_deadline is not None and now >= prior_deadline)
-    if after_due and (type(release_attempts) is not int or release_attempts < 0):
-        raise BlsInvalid("BLS_RELEASE_WINDOW_INVALID")
-    minimum_interval = (timedelta(minutes=30) if after_due and prior_deadline.date() == now.date()
-                        and release_attempts < RELEASE_FAST_WINDOW_CAP
-                        else timedelta(hours=1) if after_due
-                        else timedelta(hours=24) if reusable else timedelta(hours=1))
-    if (last_api_attempt is not None and
-            minimum_interval > now - last_api_attempt >= timedelta(0)):
-        if reusable and not after_due:
-            return previous_state
-        raise BlsInvalid("BLS_API_RECHECK_COOLDOWN")
-    if not isinstance(rolling_attempts, int) or rolling_attempts < 0 or rolling_attempts >= LOCAL_ROLLING_API_CAP:
-        if reusable and not after_due:
-            return previous_state
-        raise BlsInvalid("BLS_LOCAL_API_BUDGET_EXHAUSTED")
-    headers = {"User-Agent": USER_AGENT}
+    previous = _verified_previous(factor, previous_state)
+    if previous is not None and previous[1] <= now < previous[2]:
+        return {**previous_state, "embargo_ends_at": previous[1].isoformat()}
+
+    candidates = [(published, period) for period, value in PINNED_DUES[factor].items()
+                  if (published := _parse_aware(value)) is not None and published <= now]
+    if previous is not None and previous[2] <= now:
+        successor = _successor(previous[0])
+        if (successor in PINNED_DUES[factor]
+                and PINNED_DUES[factor][successor] != previous[2].isoformat()):
+            raise BlsInvalid("BLS_SCHEDULE_CONFLICT")
+        candidates.append((previous[2], successor))
+    if not candidates:
+        raise BlsInvalid("BLS_PDF_RELEASE_DATE_UNKNOWN")
+    published, period = max(candidates)
+    url = _pdf_url(factor, published)
+    if (last_pdf_attempt is not None and
+            timedelta(0) <= now - last_pdf_attempt < timedelta(hours=1)):
+        raise BlsInvalid("BLS_PDF_RECHECK_COOLDOWN")
     usage = getattr(session, "usage", None)
-    before = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)
+    before = (usage.get("www.dol.gov", {}).get("requests_this_run", 0)
               if isinstance(usage, dict) else None)
     try:
-        response = session.get(report["api"], headers=headers, timeout=15)
+        response = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
     finally:
-        after = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)
+        after = (usage.get("www.dol.gov", {}).get("requests_this_run", 0)
                  if isinstance(usage, dict) else None)
         attempted = after > before if isinstance(before, int) and isinstance(after, int) else True
         if attempted and isinstance(diagnostics, dict):
-            diagnostics["api_attempted"] = True
-            if after_due:
-                diagnostics["release_window_due"] = previous_state["next_due_at"]
-    response.raise_for_status()
-    period = parse_api_latest(response.json(), factor)
-    if after_due and period == confirmed_period:
-        raise BlsInvalid("BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED")
-    if reusable and period == confirmed_period:
-        return previous_state
-    published = PINNED_DUES[factor].get(period)
-    if published is None and isinstance(previous_state, dict) and period == _successor(previous_state.get("period", "1900-01")):
-        published = previous_state.get("next_due_at")
-    if published is None:
-        raise BlsInvalid("BLS_PDF_RELEASE_DATE_UNKNOWN")
-    published = datetime.fromisoformat(published)
-    url = _pdf_url(factor, published)
-    response = session.get(url, headers=headers, timeout=20)
+            diagnostics["pdf_attempted"] = True
     response.raise_for_status()
     if "pdf" not in response.headers.get("Content-Type", "").lower():
         raise BlsInvalid("BLS_PDF_CONTENT_TYPE_INVALID")
     state = parse_pdf_release(_pdf_text(response.content), factor, now)
-    if state["period"] != period or state["published_at"] != published.isoformat():
-        raise BlsInvalid("BLS_API_PDF_CONFLICT")
+    if state["period"] != period or state["embargo_ends_at"] != published.isoformat():
+        raise BlsInvalid("BLS_PDF_RELEASE_CONFLICT")
     pinned_next = PINNED_DUES[factor].get(_successor(period))
     if pinned_next is not None and state["next_due_at"] != pinned_next:
         raise BlsInvalid("BLS_PDF_SCHEDULE_CONFLICT")

@@ -24,7 +24,7 @@ STATCAN_PRODUCTS = {
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
               "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
-OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url"})
+OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url", "bls_embargo_ends_at"})
 
 
 def now_utc():
@@ -170,11 +170,13 @@ def eligible(record, now=None, factor=None, currency=None):
         from official_bls import _pdf_url
         series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
         published = timestamp(record.get("published_at"))
+        embargo = timestamp(observation.get("bls_embargo_ends_at")) if observation.get("bls_embargo_ends_at") else published
         if (observation.get("series_id") != series
                 or observation.get("bls_release_period") != reference.strftime("%Y-%m")
                 or timestamp(record.get("next_due_at")) is None
                 or published is None
-                or observation.get("bls_release_url") != _pdf_url(factor, published)):
+                or embargo != published
+                or observation.get("bls_release_url") != _pdf_url(factor, embargo)):
             return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
@@ -405,53 +407,10 @@ def collect(app, path=PATH):
     checked_at = now_utc().isoformat()
     data = {"model_version": MODEL, "last_attempt_at": checked_at, "currencies": {}}
     metadata = {}
-    prior_api_attempts = previous.get("bls_api_attempts", {})
-    prior_api_attempts = prior_api_attempts if isinstance(prior_api_attempts, dict) else {}
-    data["bls_api_attempts"] = {factor: value for factor, value in prior_api_attempts.items()
+    prior_pdf_attempts = previous.get("bls_pdf_attempts", {})
+    prior_pdf_attempts = prior_pdf_attempts if isinstance(prior_pdf_attempts, dict) else {}
+    data["bls_pdf_attempts"] = {factor: value for factor, value in prior_pdf_attempts.items()
                                 if factor in REPORTS and timestamp(value) is not None}
-    raw_budget = previous.get("bls_api_budget", {})
-    budget_corrupt = not isinstance(raw_budget, dict)
-    prior_budget = raw_budget if isinstance(raw_budget, dict) else {}
-    same_day = prior_budget.get("utc_day") == checked_at[:10]
-    old_count = prior_budget.get("local_attempts") if same_day else 0
-    count_valid = type(old_count) is int and old_count >= 0
-    budget_corrupt = (budget_corrupt or not count_valid or
-                      (bool(prior_budget.get("local_attempts")) and
-                       "attempted_at" not in prior_budget))
-    local_attempts = old_count if count_valid else 0
-    prior_attempts = prior_budget.get("attempted_at", [])
-    if isinstance(prior_attempts, list) and len(prior_attempts) <= 100:
-        parsed_attempts = [timestamp(item) for item in prior_attempts]
-    else:
-        parsed_attempts = [None]
-    if same_day and count_valid and all(item is not None for item in parsed_attempts):
-        today_attempts = sum(item.date().isoformat() == checked_at[:10]
-                             for item in parsed_attempts)
-        if old_count != today_attempts:
-            budget_corrupt = True
-    valid_attempts = (not budget_corrupt and
-                      all(item is not None and item <= timestamp(checked_at)
-                          for item in parsed_attempts))
-    prior_safe_until = prior_budget.get("safe_until")
-    parsed_safe_until = timestamp(prior_safe_until) if prior_safe_until is not None else None
-    if prior_safe_until is not None and parsed_safe_until is None:
-        valid_attempts = False
-    recent_attempts = ([item.isoformat() for item in parsed_attempts
-                        if timestamp(checked_at) - item < timedelta(hours=24)]
-                       if valid_attempts else [])
-    safe_until = (parsed_safe_until if parsed_safe_until is not None
-                  and timestamp(checked_at) < parsed_safe_until else
-                  timestamp(checked_at) + timedelta(hours=24) if not valid_attempts else None)
-    rolling_attempts = 20 if safe_until is not None else len(recent_attempts)
-    data["bls_api_budget"] = {"utc_day": checked_at[:10], "local_attempts": local_attempts,
-                              "rolling_24h_attempts": None if safe_until is not None else rolling_attempts,
-                              "attempted_at": recent_attempts,
-                              "basis": "unknown" if safe_until is not None else "local_estimate"}
-    if safe_until is not None:
-        data["bls_api_budget"]["safe_until"] = safe_until.isoformat()
-    prior_windows = previous.get("bls_release_windows", {})
-    prior_windows = prior_windows if isinstance(prior_windows, dict) else {}
-    data["bls_release_windows"] = {}
     prior_release_states = previous.get("bls_release_states", {})
     prior_release_states = prior_release_states if isinstance(prior_release_states, dict) else {}
     data["bls_release_states"] = {}
@@ -468,63 +427,37 @@ def collect(app, path=PATH):
         confirmed_period = verified_state.get("period") or (prior_obs.get("bls_release_period")
             if prior.get("validation") == "VALID" else None)
         previous_state = (verified_state if verified_state else
-            {"period": confirmed_period, "published_at": prior.get("published_at"),
+            {"period": confirmed_period, "embargo_ends_at": prior_obs.get("bls_embargo_ends_at") or prior.get("published_at"),
              "next_due_at": prior.get("next_due_at"), "release_url": prior_obs.get("bls_release_url")})
-        prior_window = prior_windows.get(factor, {})
-        prior_window = prior_window if isinstance(prior_window, dict) else {}
-        window_due = previous_state.get("next_due_at")
-        window_attempts = (prior_window.get("attempts")
-                           if prior_window.get("due_at") == window_due
-                           and prior_window.get("utc_day") == checked_at[:10] else 0)
-        if type(window_attempts) is not int or window_attempts < 0:
-            window_attempts = 12
         diagnostic = {}
         try:
             state = fetch_release_state(
                 factor, session=app.requests if isinstance(getattr(app, "requests", None), CollectorTransport) else http,
-                now=timestamp(checked_at),
-                confirmed_period=confirmed_period,
-                last_api_attempt=timestamp(prior_api_attempts.get(factor)),
-                diagnostics=diagnostic, previous_state=previous_state,
-                rolling_attempts=rolling_attempts, release_attempts=window_attempts)
+                now=timestamp(checked_at), previous_state=previous_state,
+                last_pdf_attempt=timestamp(prior_pdf_attempts.get(factor)), diagnostics=diagnostic)
             bls_states[factor] = {"state": state}
             data["bls_release_states"][factor] = state
         except http.exceptions.RequestException as error:
             temporary = temporary_source_outage(error) or error.args == ("PROVIDER_COOLDOWN",)
+            prior_due = timestamp(prior.get("next_due_at"))
+            due_or_unknown = (prior.get("validation") == "VALID" and
+                              (prior_due is None or timestamp(checked_at) >= prior_due))
             bls_states[factor] = {
-                "validation": "SOURCE_UNAVAILABLE" if temporary else "UNVERIFIED",
-                "reason": "BLS-Veröffentlichungsquelle vorübergehend nicht erreichbar"
-                          if temporary else "BLS-Veröffentlichungsquelle nicht bestätigt",
+                "validation": "SOURCE_UNAVAILABLE" if temporary and not due_or_unknown else "UNVERIFIED",
+                "reason": ("BLS-Folgeausgabe fällig; amtliche Veröffentlichung nicht bestätigt"
+                           if due_or_unknown else "BLS-Veröffentlichungsquelle vorübergehend nicht erreichbar"
+                           if temporary else "BLS-Veröffentlichungsquelle nicht bestätigt"),
             }
         except (BlsInvalid, ValueError, TypeError, KeyError) as error:
-            provider_limit = str(error) == "BLS_PROVIDER_LIMIT"
-            known_due = timestamp(prior.get("next_due_at"))
-            cached_before_due = (provider_limit and prior.get("validation") == "VALID"
-                                 and known_due is not None and timestamp(checked_at) < known_due)
             reason = {
-                "BLS_PROVIDER_LIMIT": "BLS-Tageslimit erreicht; amtliche Aktualitätsprüfung ausstehend",
-                "BLS_LOCAL_API_BUDGET_EXHAUSTED": "BLS-API-Abfragebudget erschöpft; neue Ausgabe nicht bestätigt",
-                "BLS_RELEASE_WINDOW_INVALID": "BLS-Abrufzähler ungültig; Folgeperiode nicht bestätigt",
-                "BLS_NEW_REFERENCE_MONTH_NOT_CONFIRMED": "BLS-Folgeperiode fällig, aber amtlich noch nicht bestätigt",
-                "BLS_API_RECHECK_COOLDOWN": "BLS-Folgeprüfung noch nicht fällig",
+                "BLS_PDF_RELEASE_DATE_UNKNOWN": "Amtlicher BLS-Veröffentlichungstermin für die aktuelle Ausgabe unbekannt",
+                "BLS_PDF_RELEASE_NOT_CURRENT": "Aktuelle amtliche BLS-Ausgabe nicht bestätigt",
+                "BLS_PDF_RECHECK_COOLDOWN": "Nächste amtliche BLS-Ausgabe wird innerhalb einer Stunde erneut geprüft",
             }.get(str(error), "BLS-Kalender oder veröffentlichte Ausgabe nicht eindeutig")
-            bls_states[factor] = {"validation": "SOURCE_UNAVAILABLE" if cached_before_due else "UNVERIFIED",
-                                  "reason": reason}
+            bls_states[factor] = {"validation": "UNVERIFIED", "reason": reason}
         finally:
-            if diagnostic.get("api_attempted"):
-                data["bls_api_attempts"][factor] = checked_at
-                local_attempts += 1
-                data["bls_api_budget"]["local_attempts"] = local_attempts
-                rolling_attempts += 1
-                data["bls_api_budget"]["rolling_24h_attempts"] = rolling_attempts
-                data["bls_api_budget"]["attempted_at"].append(checked_at)
-                if diagnostic.get("release_window_due"):
-                    window_due = diagnostic["release_window_due"]
-                    window_attempts += 1
-            if window_due:
-                data["bls_release_windows"][factor] = {"due_at": window_due,
-                                                       "utc_day": checked_at[:10],
-                                                       "attempts": window_attempts}
+            if diagnostic.get("pdf_attempted"):
+                data["bls_pdf_attempts"][factor] = checked_at
             if factor not in data["bls_release_states"] and verified_state:
                 data["bls_release_states"][factor] = verified_state
 
@@ -612,9 +545,10 @@ def collect(app, path=PATH):
                     expected_series = REPORTS[factor]["series_id"]
                     observation.update(bls_release_period=state["period"],
                                        bls_release_url=state.get("release_url"),
-                                       published_at=state["published_at"],
+                                       bls_embargo_ends_at=state["embargo_ends_at"],
+                                       published_at=state["embargo_ends_at"],
                                        next_due_at=state["next_due_at"],
-                                       publication_basis="BLS-API-Referenzmonat und amtliche DOL/BLS-Mitteilung mit Folgetermin")
+                                       publication_basis="Amtliche DOL/BLS-Mitteilung: Berichtsmonat, Embargo-Ende als früheste Freigabe und geplanter Folgetermin; tatsächliche Verfügbarkeit erst bei Prüfung bestätigt")
                     if (observation.get("series_id") != expected_series
                             or observed_period != state["period"]):
                         validation, reason = "UNVERIFIED", "FRED-Periode entspricht nicht der neuesten amtlichen BLS-Ausgabe"
@@ -747,9 +681,13 @@ def render_status(st, authorized=False):
                          "Referenzperiode": observation.get("reference_period") or observation.get("date"),
                          "Quelle": observation.get("source"), "Datensatz": observation.get("source_title"), "Einheit": observation.get("unit"),
                          "Quellenlink": public_observation(observation).get("source_url"),
+                         "Amtlicher Veröffentlichungsbeleg": public_observation(observation).get("bls_release_url"),
+                         "Prüfbasis": observation.get("publication_basis"),
                          "Messzeitraum": observation.get("period_label") or observation.get("frequency"),
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if observation.get("is_estimate") is True or any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
-                         "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
+                         "Veröffentlicht": ((str(observation["bls_embargo_ends_at"]) + " (Embargo-Ende; Uploadzeit unbekannt)")
+                                           if observation.get("bls_embargo_ends_at") else record.get("published_at")
+                                           or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt")),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
                          "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)", "date_only_start_of_EU_day": "Luxemburg"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day", "date_only_start_of_EU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
     available = sum(row["Status"] == "Verfügbar" for row in rows)
