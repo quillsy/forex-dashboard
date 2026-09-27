@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests as http
+from source_contracts import PUBLIC_RIGHTS_HOLDS
 
 MODEL = "CORE_V2_8_2026_09"
 PATH = Path("live_core_data.json")
@@ -161,6 +162,9 @@ def eligible(record, now=None, factor=None, currency=None):
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS
+    rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
+    if rights_hold:
+        return False, rights_hold
     conflict = KNOWN_SOURCE_CONFLICTS.get((currency, factor, reference.strftime("%Y-%m")))
     if conflict and now >= timestamp(conflict["confirmed_at"]):
         return False, conflict["reason"]
@@ -375,12 +379,24 @@ def collect(app, path=PATH):
         prior_records = previous.get("currencies", {}).get(currency, {})
         prior_records = prior_records if isinstance(prior_records, dict) else {}
         retained = {factor: copy.deepcopy(prior_records[factor]) for factor in FACTORS
-                    if record_not_due(prior_records.get(factor), currency, factor, now_utc())}
-        requested = tuple(factor for factor in FACTORS if factor not in retained)
+                    if (currency, factor) not in PUBLIC_RIGHTS_HOLDS
+                    and record_not_due(prior_records.get(factor), currency, factor, now_utc())}
+        requested = tuple(factor for factor in FACTORS
+                          if factor not in retained and (currency, factor) not in PUBLIC_RIGHTS_HOLDS)
         raw = app.compute_currency_details(currency, include_context=False,
                                           factors_to_refresh=requested) if requested else {}
         data["currencies"][currency] = {}
         for factor in FACTORS:
+            rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
+            if rights_hold:
+                # Do not request, score or republish a third-party yield while
+                # its public reuse rights are unresolved, even from old cache.
+                data["currencies"][currency][factor] = {
+                    "factor": factor, "score": None, "validation": "UNVERIFIED",
+                    "reason": rights_hold, "last_attempt_at": checked_at,
+                    "observation": {},
+                }
+                continue
             if factor in retained:
                 # Keep every timestamp and status exactly as last verified.
                 data["currencies"][currency][factor] = retained[factor]
@@ -505,11 +521,12 @@ def render_status(st, authorized=False):
             if not completed and valid:
                 valid, reason = False, "Kein abgeschlossener Live-Datensatz"
             observation = record.get("observation", {})
+            rights_hold = (currency, factor) in PUBLIC_RIGHTS_HOLDS
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
                          "Aktualität": current_freshness(record, now, factor) if valid else "UNAVAILABLE",
                          "Letzter Abruf": ("Fehlgeschlagen; letzter geprüfter Wert" if number(record.get("score")) is not None else "Fehlgeschlagen; kein geprüfter Wert") if record.get("last_error") else "Siehe Prüfzeit",
-                         "Wert": observation.get("yield_2y") if factor == "Geldpolitik" else observation.get("value"),
+                         "Wert": None if rights_hold else observation.get("yield_2y") if factor == "Geldpolitik" else observation.get("value"),
                          "Leitzins (%)": observation.get("policy_rate") if factor == "Geldpolitik" else None,
                          "Referenzperiode": observation.get("reference_period") or observation.get("date"),
                          "Quelle": observation.get("source"), "Datensatz": observation.get("source_title"), "Einheit": observation.get("unit"),

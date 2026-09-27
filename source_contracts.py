@@ -109,6 +109,20 @@ KNOWN_RELEASES[("USD", "Geldpolitik")] = {
 # not conflicting sources. See HICP_RESOLUTION_2026_09.md for the correction.
 KNOWN_SOURCE_CONFLICTS = {}
 
+# The Bank of Canada's 2Y benchmark names CanDeal DNA as a joint source.
+# BoC's general reuse permission excludes third-party content unless reuse is
+# expressly allowed. Neither the BoC notes nor CanDeal's publication notice
+# establishes permission for this public dashboard or its derived CORE score.
+# Keep this availability hold until the exact use is licensed or a genuinely
+# equivalent, rights-cleared series is verified. This does not change weights.
+# https://www.bankofcanada.ca/rates/interest-rates/lookup-bond-yields/notes-on-canadian-bond-yields/
+# https://www.bankofcanada.ca/terms/
+# https://www.candeal.com/en/news/bank-canada-selects-candeal-data-analytics-dna-reference-pricing-service-its-pricing-source
+PUBLIC_RIGHTS_HOLDS = {
+    ("CAD", "Geldpolitik"):
+        "2J-Rendite: öffentliche Weiterverwendung der CanDeal/BoC-Reihe nicht geklärt",
+}
+
 KNOWN_RELEASES[("CHF", "Inflation")] = {
     "period_start": "2026-08-01", "label": "2026-08 (HICP/HVPI)",
     "published_at": "2026-09-03T06:30:00+00:00",
