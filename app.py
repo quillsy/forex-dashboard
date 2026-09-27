@@ -8284,6 +8284,26 @@ if not getattr(st, "_mock_mode", False):
             
             st.write(f"### Paar-Divergenz: {CURRENCIES[base_sel]['flag']} {base_sel} vs {CURRENCIES[quote_sel]['flag']} {quote_sel}")
             render_bias_box(sig_val, base_sel, quote_sel, b_core, q_core, s_code)
+            if s_code == "INSUFFICIENT DATA":
+                blocked_rows = []
+                for currency, details in ((base_sel, b_details), (quote_sel, q_details)):
+                    if details.get("_live_checked") is False:
+                        blocked_rows.append({"Währung": currency, "Faktor": "Datensatz",
+                                             "Sperrgrund": "Kein abgeschlossener Live-Datensatz"})
+                    reasons = details.get("_blocking_reasons", {})
+                    reasons = reasons if isinstance(reasons, dict) else {}
+                    for factor in CORE_FACTOR_WEIGHTS:
+                        if finite_number(details.get(factor)) is None:
+                            reason = str(reasons.get(factor) or "CORE-Faktor nicht freigegeben")
+                            if reason.startswith(f"{factor}:"):
+                                reason = reason[len(factor) + 1:].strip()
+                            blocked_rows.append({"Währung": currency, "Faktor": factor,
+                                                 "Sperrgrund": reason})
+                st.subheader("Sperrgründe für dieses Paar")
+                if blocked_rows:
+                    st.dataframe(blocked_rows, hide_index=True, use_container_width=True)
+                else:
+                    st.caption("Die CORE-Freigabe wurde beim Lesen neu bewertet. Bitte die Ansicht aktualisieren.")
             
             col_pb1, col_pb2 = st.columns(2)
             with col_pb1:
