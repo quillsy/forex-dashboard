@@ -168,6 +168,34 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(aud['Status'], 'Gesperrt')
         self.assertIn('2026-07', aud['Grund'])
 
+    def test_eurostat_september_flash_blocks_august_even_without_calendar_metadata(self):
+        due = datetime(2026, 10, 1, 22, tzinfo=timezone.utc)
+        checked = due - timedelta(minutes=1)
+        # Existing snapshots have no next_due_at. A failed calendar check must
+        # not let a successful but lagging API requalify the August reading.
+        august = live.build_record('Inflation', 60, {
+            'value': 3.2, 'date': '2026-08-31', 'reference_period': '2026-08',
+            'source': 'Eurostat', 'series_id': 'prc_hicp_minr:M.RCH_A.TOTAL.EA21',
+        }, 'FRESH', checked.isoformat())
+        self.assertIsNone(august['next_due_at'])
+        self.assertTrue(live.eligible(august, due - timedelta(seconds=1),
+                                      factor='Inflation', currency='EUR')[0])
+        self.assertFalse(live.eligible(august, due, factor='Inflation', currency='EUR')[0])
+        august['checked_at'] = (due + timedelta(minutes=1)).isoformat()
+        allowed, reason = live.eligible(august, due + timedelta(minutes=1),
+                                        factor='Inflation', currency='EUR')
+        self.assertFalse(allowed)
+        self.assertIn('2026-09', reason)
+        september = live.build_record('Inflation', 70, {
+            'value': 3.4, 'date': '2026-09-30', 'reference_period': '2026-09',
+            'source': 'Eurostat', 'series_id': 'prc_hicp_minr:M.RCH_A.TOTAL.EA21',
+            'needs_hourly_check': True,
+        }, 'FRESH', (due + timedelta(minutes=1)).isoformat())
+        self.assertTrue(live.eligible(september, due + timedelta(minutes=1),
+                                      factor='Inflation', currency='EUR')[0])
+        self.assertFalse(live.eligible(september, due + timedelta(hours=1, minutes=1),
+                                       factor='Inflation', currency='EUR')[0])
+
     def test_official_same_period_conflict_blocks_either_selected_value(self):
         import source_contracts
         now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)

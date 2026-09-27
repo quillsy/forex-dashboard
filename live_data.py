@@ -166,7 +166,7 @@ def eligible(record, now=None, factor=None, currency=None):
         reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
-    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS
+    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
     if rights_hold:
         return False, rights_hold
@@ -178,6 +178,15 @@ def eligible(record, now=None, factor=None, currency=None):
         minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if reference < minimum:
             return False, "Neuere amtliche Referenzperiode veröffentlicht: " + release["label"]
+    scheduled = SCHEDULED_RELEASES.get((currency, factor))
+    if scheduled:
+        scheduled_due = timestamp(scheduled.get("due_at"))
+        if scheduled_due is None:
+            return False, "Amtlicher Veröffentlichungstermin nicht bestätigt"
+        if now >= scheduled_due:
+            minimum = datetime.strptime(scheduled["minimum_period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if reference < minimum:
+                return False, "Neuere amtliche Referenzperiode fällig: " + scheduled["minimum_period_start"][:7]
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
     if any(record.get(field) is not None and timestamp(record[field]) is None
@@ -544,7 +553,7 @@ def render_status(st, authorized=False):
                          "Veröffentlichungsstatus": "Amtlich vorläufig" if observation.get("is_estimate") is True or any(flag in str(observation.get("provider_status") or "").split() for flag in ("e", "p")) else observation.get("provider_status") or "Keine Vorläufigkeitskennzeichnung gemeldet",
                          "Veröffentlicht": record.get("published_at") or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt"),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
-                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)", "date_only_start_of_EU_day": "Luxemburg"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day", "date_only_start_of_EU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
     available = sum(row["Status"] == "Verfügbar" for row in rows)
     retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")

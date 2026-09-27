@@ -128,3 +128,19 @@ KNOWN_RELEASES[("CHF", "Inflation")] = {
     "published_at": "2026-09-03T06:30:00+00:00",
     "source": "https://dam-api.bfs.admin.ch/hub/api/dam/assets/36835032/master",
 }
+
+# Eurostat confirms the *date*, not a publication hour, of the September 2026
+# EA21 flash HICP. Midnight in Europe/Luxembourg is the conservative deadline:
+# an August reading must not be requalified by a lagging API after that point.
+# This transition applies only to the August -> September reference period;
+# September data resume hourly checks until a later official date is verified.
+# https://ec.europa.eu/eurostat/en/web/products-euro-indicators/w/2-17092026-ap
+SCHEDULED_RELEASES = {
+    ("EUR", "Inflation"): {
+        "previous_period": "2026-08",
+        "minimum_period_start": "2026-09-01",
+        "release_date_known": "2026-10-02",
+        "due_at": "2026-10-01T22:00:00+00:00",
+        "next_due_precision": "date_only_start_of_EU_day",
+    },
+}

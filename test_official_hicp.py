@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from official_hicp import parse_hicp
 NOW = datetime(2026, 9, 7, 15, tzinfo=timezone.utc)
 def fixture():
@@ -17,6 +18,36 @@ class HICPTests(unittest.TestCase):
         self.assertTrue(result['is_estimate'])
         self.assertEqual(result['provider_status'], 'e')
         self.assertIsNone(result['published_at'])
+        self.assertEqual(result['next_due_at'], '2026-10-01T22:00:00+00:00')
+        self.assertEqual(result['next_due_precision'], 'date_only_start_of_EU_day')
+        self.assertTrue(result['needs_hourly_check'])
+        self.assertEqual(datetime(2026, 10, 2, tzinfo=ZoneInfo('Europe/Luxembourg')).astimezone(timezone.utc).isoformat(),
+                         result['next_due_at'])
+
+    def test_august_api_lag_blocks_at_september_flash_deadline(self):
+        due = datetime(2026, 10, 1, 22, tzinfo=timezone.utc)
+        before = parse_hicp(fixture(), now=datetime(2026, 10, 1, 21, 59, tzinfo=timezone.utc))
+        self.assertNotIn('_validation', before)
+        late = parse_hicp(fixture(), now=due)
+        self.assertEqual(late['reference_period'], '2026-08')
+        self.assertEqual(late['_validation'], 'UNVERIFIED')
+        self.assertIn('September-Flash', late['_reason'])
+
+    def test_september_reading_resumes_hourly_checks_without_old_deadline(self):
+        data = fixture()
+        data['size'][-1] = 3
+        data['dimension']['time']['category']['index']['2026-09'] = 2
+        data['value']['2'] = 3.4
+        data['status']['2'] = 'e'
+        before = parse_hicp(data, now=datetime(2026, 10, 1, 21, 59, tzinfo=timezone.utc))
+        self.assertEqual(before['_validation'], 'UNVERIFIED')
+        released = parse_hicp(data, now=datetime(2026, 10, 1, 22, tzinfo=timezone.utc))
+        self.assertEqual(released['reference_period'], '2026-09')
+        self.assertEqual(released['value'], 3.4)
+        self.assertNotIn('_validation', released)
+        self.assertIsNone(released['next_due_at'])
+        self.assertTrue(released['needs_hourly_check'])
+        self.assertEqual(released['release_date_known'], '2026-10-02')
     def test_wrong_unit_geography_status_and_values(self):
         for key, value in [('unit','I25'), ('geo','EA20'), ('coicop18','CP01')]:
             data=fixture(); data['dimension'][key]['category']['index']={value:0}
