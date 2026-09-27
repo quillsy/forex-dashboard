@@ -409,25 +409,41 @@ def collect(app, path=PATH):
     prior_api_attempts = prior_api_attempts if isinstance(prior_api_attempts, dict) else {}
     data["bls_api_attempts"] = {factor: value for factor, value in prior_api_attempts.items()
                                 if factor in REPORTS and timestamp(value) is not None}
-    prior_budget = previous.get("bls_api_budget", {})
-    prior_budget = prior_budget if isinstance(prior_budget, dict) else {}
+    raw_budget = previous.get("bls_api_budget", {})
+    budget_corrupt = not isinstance(raw_budget, dict)
+    prior_budget = raw_budget if isinstance(raw_budget, dict) else {}
     same_day = prior_budget.get("utc_day") == checked_at[:10]
     old_count = prior_budget.get("local_attempts") if same_day else 0
-    local_attempts = old_count if type(old_count) is int and old_count >= 0 else 20
+    count_valid = type(old_count) is int and old_count >= 0
+    budget_corrupt = (budget_corrupt or not count_valid or
+                      (bool(prior_budget.get("local_attempts")) and
+                       "attempted_at" not in prior_budget))
+    local_attempts = old_count if count_valid else 0
     prior_attempts = prior_budget.get("attempted_at", [])
     if isinstance(prior_attempts, list) and len(prior_attempts) <= 100:
         parsed_attempts = [timestamp(item) for item in prior_attempts]
     else:
         parsed_attempts = [None]
-    valid_attempts = all(item is not None and item <= timestamp(checked_at)
-                         for item in parsed_attempts)
+    valid_attempts = (not budget_corrupt and
+                      all(item is not None and item <= timestamp(checked_at)
+                          for item in parsed_attempts))
+    prior_safe_until = prior_budget.get("safe_until")
+    parsed_safe_until = timestamp(prior_safe_until) if prior_safe_until is not None else None
+    if prior_safe_until is not None and parsed_safe_until is None:
+        valid_attempts = False
     recent_attempts = ([item.isoformat() for item in parsed_attempts
                         if timestamp(checked_at) - item < timedelta(hours=24)]
                        if valid_attempts else [])
-    rolling_attempts = len(recent_attempts) if valid_attempts else 20
+    safe_until = (parsed_safe_until if parsed_safe_until is not None
+                  and timestamp(checked_at) < parsed_safe_until else
+                  timestamp(checked_at) + timedelta(hours=24) if not valid_attempts else None)
+    rolling_attempts = 20 if safe_until is not None else len(recent_attempts)
     data["bls_api_budget"] = {"utc_day": checked_at[:10], "local_attempts": local_attempts,
-                              "rolling_24h_attempts": rolling_attempts,
-                              "attempted_at": recent_attempts, "basis": "local_estimate"}
+                              "rolling_24h_attempts": None if safe_until is not None else rolling_attempts,
+                              "attempted_at": recent_attempts,
+                              "basis": "unknown" if safe_until is not None else "local_estimate"}
+    if safe_until is not None:
+        data["bls_api_budget"]["safe_until"] = safe_until.isoformat()
     prior_windows = previous.get("bls_release_windows", {})
     prior_windows = prior_windows if isinstance(prior_windows, dict) else {}
     data["bls_release_windows"] = {}

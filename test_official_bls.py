@@ -372,6 +372,30 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertEqual(self.last_dataset["bls_api_budget"]["local_attempts"], 0)
         self.assertEqual(self.last_dataset["bls_api_budget"]["rolling_24h_attempts"], 20)
 
+    def test_corrupt_quota_history_stays_blocked_across_restarts_for_24h(self):
+        observation = {"Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01",
+                                       "series_id": "UNRATE", "source": "FRED"}}
+        prior = {"model_version": live_data.MODEL, "currencies": {"USD": {}},
+                 "bls_api_budget": {"utc_day": NOW.date().isoformat(),
+                                    "local_attempts": 0, "attempted_at": "corrupt"}}
+        self.run_collector(states(), observation, previous_data=prior, at=NOW)
+        first = self.last_dataset
+        expected_until = (NOW + timedelta(hours=24)).isoformat()
+        self.assertEqual(self.source_calls["Arbeitsmarkt"]["rolling_attempts"], 20)
+        self.assertEqual(first["bls_api_budget"]["safe_until"], expected_until)
+        self.assertIsNone(first["bls_api_budget"]["rolling_24h_attempts"])
+        self.assertEqual(first["bls_api_budget"]["basis"], "unknown")
+        self.run_collector(states(), observation, previous_data=first,
+                           at=NOW + timedelta(hours=2))
+        second = self.last_dataset
+        self.assertEqual(self.source_calls["Arbeitsmarkt"]["rolling_attempts"], 20)
+        self.assertEqual(second["bls_api_budget"]["safe_until"], expected_until)
+        self.run_collector(states(), observation, previous_data=second,
+                           at=NOW + timedelta(hours=24, minutes=1))
+        self.assertEqual(self.source_calls["Arbeitsmarkt"]["rolling_attempts"], 0)
+        self.assertNotIn("safe_until", self.last_dataset["bls_api_budget"])
+        self.assertEqual(self.last_dataset["bls_api_budget"]["basis"], "local_estimate")
+
     def test_retry_after_blocks_without_count_then_recovers_on_real_request(self):
         def response(status, body=b"", headers=None):
             item = requests.Response()
