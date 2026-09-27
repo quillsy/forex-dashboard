@@ -13,6 +13,45 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_aud_collector_reuses_one_official_cpi_check_and_blocks_release_lag(self):
+        import ast
+        import pandas as pd
+        from test_core_regressions import load_core
+
+        checked = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == 'get_cpi_yoy_details')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<aud-cpi-route>', 'exec'), core)
+        core.update(datetime=Clock, pd=pd)
+        official = {'value': 3.5, 'date': '2026-07-01', 'reference_period': '2026-07',
+                    'source': 'Australian Bureau of Statistics headline CPI YoY',
+                    'series_id': 'CPI/3.10001.10.50.M',
+                    'next_due_at': '2026-09-30T01:30:00+00:00'}
+        source = Mock(return_value=official)
+        core['get_current_official_cpi'] = source
+        result = core['compute_currency_details']('AUD', '2026-09-27',
+            include_context=False, factors_to_refresh=('Inflation',))
+        source.assert_called_once_with('AUD')
+        self.assertEqual(result['_observations']['Inflation']['next_due_at'], official['next_due_at'])
+        self.assertIsNotNone(result['Inflation'])
+
+        source.reset_mock()
+        source.return_value = {**official, '_validation': 'UNVERIFIED',
+                               '_reason': 'ABS-CPI-API liefert eine ältere Referenzperiode'}
+        blocked = core['compute_currency_details']('AUD', '2026-09-27',
+            include_context=False, factors_to_refresh=('Inflation',))
+        source.assert_called_once_with('AUD')
+        self.assertIsNone(blocked['Inflation'])
+        self.assertEqual(blocked['_observations']['Inflation']['value'], 3.5)
+        self.assertEqual(blocked['_observations']['Inflation']['_validation'], 'UNVERIFIED')
+
     def test_cad_2y_rights_hold_revokes_cached_score_and_hides_public_yield(self):
         row = live.build_record('Geldpolitik', 20, {
             'policy_rate': 2.5, 'yield_2y': 3.1, 'date': '2026-09-04',

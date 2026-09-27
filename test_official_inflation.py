@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import requests
 
-from official_inflation import fetch_official_cpi, parse_abs_cpi, parse_estat_cpi
+from official_inflation import fetch_official_cpi, parse_abs_cpi, parse_abs_release_index, parse_estat_cpi
 
 NOW = "2026-09-07T12:00:00+00:00"
 
@@ -28,7 +28,71 @@ def abs_data():
             "attributes": {"series": [{"id": "UNIT_MEASURE", "values": [{"id": "PCT", "name": "Percent"}]}]}}}
 
 
+def abs_release_index(latest="July", next_month="August", due="2026-09-30T01:30:00Z", future=True):
+    future_row = (f'<div class="views-row">Consumer Price Index, Australia, {next_month} 2026'
+                  f'<span>Release date</span><time datetime="{due}">11:30am AEST</time></div>') if future else ''
+    return f'''<div id="block-views-block-topic-releases-listing-topic-latest-release-block">
+      <div class="views-row"><a>Consumer Price Index, Australia, {latest} 2026</a></div></div>
+      <div id="block-views-block-topic-releases-listing-future-releases-block">
+      {future_row}</div>'''
+
+
+def abs_client(page):
+    client = Mock()
+    api = Mock(); api.json.return_value = abs_data()
+    release = Mock(); release.text = page
+    client.get.side_effect = [api, release]
+    return client
+
+
 class OfficialInflationTests(unittest.TestCase):
+    def test_abs_official_release_deadline_and_current_api_period(self):
+        calendar = parse_abs_release_index(abs_release_index())
+        self.assertEqual(calendar, {"latest_period": "2026-07", "next_due_at": "2026-09-30T01:30:00+00:00"})
+        client = abs_client(abs_release_index()); diagnostics = {}
+        row = fetch_official_cpi("AUD", client=client, now="2026-09-27T12:00:00+00:00", diagnostics=diagnostics)
+        self.assertEqual(row["value"], 3.5)
+        self.assertEqual(row["next_due_at"], "2026-09-30T01:30:00+00:00")
+        self.assertNotIn("_validation", row)
+        self.assertEqual(diagnostics, {"code": "OK"})
+        self.assertEqual(client.get.call_count, 2)
+
+    def test_abs_old_api_period_blocked_after_release(self):
+        client = abs_client(abs_release_index("August", "September", "2026-10-28T00:30:00Z"))
+        diagnostics = {}
+        row = fetch_official_cpi("AUD", client=client, now="2026-10-01T12:00:00+00:00", diagnostics=diagnostics)
+        self.assertEqual(row["reference_period"], "2026-07")  # show the observed value with its true period
+        self.assertEqual(row["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostics, {"code": "ABS_API_RELEASE_LAG"})
+        due_client = abs_client(abs_release_index())
+        due = fetch_official_cpi("AUD", client=due_client, now="2026-09-30T01:30:00+00:00", diagnostics=diagnostics)
+        self.assertEqual(due["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostics, {"code": "ABS_RELEASE_DUE_UNCONFIRMED"})
+
+    def test_abs_calendar_conflict_or_invalid_page_never_qualifies(self):
+        client = abs_client(abs_release_index("June", "July", "2026-08-26T01:30:00Z")); diagnostics = {}
+        row = fetch_official_cpi("AUD", client=client, now="2026-09-27T12:00:00+00:00", diagnostics=diagnostics)
+        self.assertEqual(row["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostics, {"code": "ABS_RELEASE_CONFLICT"})
+        for page in ("<html></html>", abs_release_index(next_month="September"),
+                     abs_release_index(due="unknown")):
+            with self.subTest(page=page[:30]), self.assertRaisesRegex(ValueError, "ABS_RELEASE_INDEX_INVALID"):
+                parse_abs_release_index(page)
+
+    def test_abs_release_page_outage_cannot_be_reported_as_fresh(self):
+        client = abs_client(abs_release_index()); diagnostics = {}
+        responses = list(client.get.side_effect)
+        responses[1].raise_for_status.side_effect = requests.Timeout("private-response")
+        client.get.side_effect = responses
+        self.assertIsNone(fetch_official_cpi("AUD", client=client, now=NOW, diagnostics=diagnostics))
+        self.assertEqual(diagnostics, {"code": "ABS_RELEASE_INDEX_UNAVAILABLE"})
+
+    def test_abs_unannounced_next_release_requires_hourly_check(self):
+        client = abs_client(abs_release_index(future=False))
+        row = fetch_official_cpi("AUD", client=client, now=NOW)
+        self.assertIsNone(row["next_due_at"])
+        self.assertTrue(row["needs_hourly_check"])
+
     def test_correct_latest_and_unknown_publication(self):
         for parse, fixture, value in [(parse_estat_cpi, estat, 1.9), (parse_abs_cpi, abs_data, 3.5)]:
             row = parse(fixture(), NOW)
@@ -86,7 +150,7 @@ class OfficialInflationTests(unittest.TestCase):
         self.assertIsNone(fetch_official_cpi("JPY", client=client, now=NOW)); client.get.assert_not_called()
 
     def test_abs_validated_result_carries_keyless_source_endpoint(self):
-        client = Mock(); client.get.return_value.json.return_value = abs_data()
+        client = abs_client(abs_release_index())
         result = fetch_official_cpi("AUD", client=client, now=NOW)
         self.assertEqual(result['source_url'], 'https://data.api.abs.gov.au/rest/data/CPI/3.10001.10.50.M')
         self.assertEqual(result['series_id'], 'CPI/3.10001.10.50.M')
