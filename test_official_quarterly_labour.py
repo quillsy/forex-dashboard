@@ -143,10 +143,47 @@ class QuarterlyLabourTests(unittest.TestCase):
 
 
 class JapanLabourTests(unittest.TestCase):
+    CURRENT_NOW = datetime(2026, 10, 2, 13, tzinfo=timezone.utc)
+
     def release_pages(self):
         return ('<table><tr><td>Monthly</td><td>- July 2026 - (Released on August 28, 2026) Main results</td><td>-</td></tr></table>',
                 '<table><tr><td>2026 July</td><td>August 28</td><td></td><td></td></tr>'
                 '<tr><td>August</td><td>October 2</td><td></td><td></td></tr></table>')
+
+    def metadata(self, changes=None, download=None):
+        # Relevant original e-Stat detail-table markup, checked 2026-10-02.
+        # The separate empty modal row is also present on the real page.
+        fields = {
+            'Statistics name': 'Labour Force Survey',
+            'Statistics code': '00200531',
+            'Dataset category0': 'Labour force survey (Public documents, Historical data)',
+            'Dataset category1': 'Historical data',
+            'Dataset category2': 'Basic tabulation',
+            'Table number': '1-a-1',
+            'Table category1': '[Monthly figures - Results of whole Japan] Seasonally adjusted series and Original series',
+            'Statistical table name': 'Major items (Labour force, Employed person, Employee, Unemployed person, Not in labour force, Unemployment rate)',
+            'Publisher': 'Ministry of Internal Affairs and Communications',
+            'Survey date': '2026 Aug.',
+            'Published date and time': '2026-10-02 08:30',
+            'Tabulation area': 'Nationwide',
+        }
+        fields.update(changes or {})
+        rows = ''.join('<tr><th class="stat-resource_item">' + html.escape(key)
+                       + '</th><td class="stat-resource_item"><a>\n '
+                       + html.escape(value) + ' \n</a></td><td class="stat-resource_item stat-resource_exp-item"></td></tr>'
+                       for key, value in fields.items())
+        link = download or '/en/stat-search/file-download?statInfId=000031831358&fileKind=0'
+        return ('<a class="stat-dl_icon stat-icon_0 stat-icon_format js-dl stat-download_icon_top" href="'
+                + html.escape(link, quote=True) + '"><span class="stat-dl_text">EXCEL</span></a>'
+                + '<table>' + rows + '</table><table><tr><th>Statistics name</th>'
+                '<td class="js-modal_toukei_name"></td></tr></table>')
+
+    def current_calendar(self):
+        return ('<table><tr><th>Reference month</th><th>Date of release</th><th>Reference month</th><th>Date of release</th></tr>'
+                '<tr><td>2026 July</td><td>August 28</td><td></td><td></td></tr>'
+                '<tr><td>August</td><td>October 2</td><td></td><td></td></tr>'
+                '<tr><td>September,<br>July - September average</td><td>October 30</td><td>July - September average</td><td>November 10</td></tr>'
+                '<tr><td>October</td><td>December 1</td><td></td><td></td></tr></table>')
 
     def book(self, mutate=None):
         from openpyxl import Workbook
@@ -200,12 +237,132 @@ class JapanLabourTests(unittest.TestCase):
         from official_quarterly_labour import fetch_japan_labour
         from unittest.mock import Mock
         import requests
-        session = Mock(); results, calendar_page = self.release_pages()
-        first = Mock(text=results); second = Mock(text=calendar_page)
+        session = Mock(); _, calendar_page = self.release_pages()
+        first = Mock(text=self.metadata({'Survey date': '2026 Jul.', 'Published date and time': '2026-08-28 08:30'}))
+        second = Mock(text=calendar_page)
         second.raise_for_status.side_effect = requests.HTTPError()
         session.get.side_effect = [first, second]
         with self.assertRaises(requests.HTTPError): fetch_japan_labour(now=NOW, session=session)
         self.assertEqual(session.get.call_count, 2)
+
+    def test_current_estat_metadata_and_august_workbook_without_overview_date(self):
+        from official_quarterly_labour import (
+            JP_LABOUR_CALENDAR, JP_LABOUR_FILE, JP_LABOUR_METADATA, JP_LABOUR_RESULTS,
+            fetch_japan_labour,
+        )
+        from live_data import public_observation
+        workbook = self.book(lambda s: setattr(s.cell(18, 20), 'value', 2.5))
+        session = Session([Response(text=self.metadata()), Response(text=self.current_calendar()),
+                           Response(content=workbook)])
+        observation = fetch_japan_labour(now=self.CURRENT_NOW, session=session)
+        self.assertEqual([call[0] for call in session.calls],
+                         [JP_LABOUR_METADATA, JP_LABOUR_CALENDAR, JP_LABOUR_FILE])
+        self.assertNotIn(JP_LABOUR_RESULTS, [call[0] for call in session.calls])
+        self.assertEqual((observation['value'], observation['reference_period'], observation['date']),
+                         (2.5, '2026-08', '2026-08-31'))
+        self.assertEqual(observation['series_id'], 'Historical1-a-1:unemployment_rate:BothSexes:SA:M')
+        self.assertEqual(observation['seasonal_adjustment'], 'SA')
+        self.assertEqual(observation['source_url'], JP_LABOUR_FILE)
+        self.assertIn('e-Stat-Metadaten derselben Datei', observation['publication_basis'])
+        public = public_observation(observation)
+        self.assertEqual(public['publication_basis'], observation['publication_basis'])
+        self.assertEqual(public['source_url'], JP_LABOUR_FILE)
+        self.assertEqual(observation['release_date_known'], '2026-10-02')
+        self.assertIsNone(observation['published_at'])
+        self.assertEqual(observation['next_due_at'], '2026-10-29T15:00:00+00:00')
+        self.assertEqual(observation['next_due_precision'], 'date_only_start_of_JP_day')
+
+    def test_metadata_rejects_wrong_statistics_table_series_area_and_publisher(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        for key, value in [
+            ('Statistics code', '00200573'), ('Statistics name', 'Consumer Price Index'),
+            ('Dataset category1', 'Monthly results'), ('Dataset category2', 'Detailed tabulation'),
+            ('Table number', '1-a-9'), ('Table category1', '[Monthly figures - Regional results] Seasonally adjusted series and Original series'),
+            ('Table category1', '[Monthly figures - Results of whole Japan] Original series'),
+            ('Statistical table name', 'Employed person [by age group]'),
+            ('Tabulation area', 'Tokyo'), ('Publisher', 'Other publisher'),
+        ]:
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'IDENTITY_INVALID'):
+                parse_japan_labour_metadata(self.metadata({key: value}), self.current_calendar(), now=self.CURRENT_NOW)
+
+    def test_metadata_rejects_wrong_file_id_kind_host_and_ambiguous_download(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        links = [
+            '/en/stat-search/file-download?statInfId=000031831359&fileKind=0',
+            '/en/stat-search/file-download?statInfId=000031831358&fileKind=2',
+            'https://example.test/en/stat-search/file-download?statInfId=000031831358&fileKind=0',
+            '/en/stat-search/file-download?statInfId=000031831358&fileKind=0&fileKind=2',
+            '/en/stat-search/file-download?statInfId=000031831358&fileKind=0#other',
+        ]
+        for link in links:
+            with self.subTest(link=link), self.assertRaisesRegex(ValueError, 'DOWNLOAD_MISMATCH'):
+                parse_japan_labour_metadata(self.metadata(download=link), self.current_calendar(), now=self.CURRENT_NOW)
+        extra = '<a class="stat-download_icon_top" href="/en/stat-search/file-download?statInfId=000031831359&amp;fileKind=0">EXCEL</a>'
+        with self.assertRaisesRegex(ValueError, 'DOWNLOAD_AMBIGUOUS'):
+            parse_japan_labour_metadata(self.metadata() + extra, self.current_calendar(), now=self.CURRENT_NOW)
+
+    def test_metadata_rejects_duplicate_cards_and_fields_instead_of_first_match(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        data = self.metadata()
+        duplicate = '<tr><th class="stat-resource_item">Survey date</th><td>2026 Jul.</td></tr>'
+        for page in [data + data, data.replace('</table>', duplicate + '</table>', 1), '<html></html>']:
+            with self.subTest(page=page[:80]), self.assertRaisesRegex(ValueError, 'METADATA_AMBIGUOUS'):
+                parse_japan_labour_metadata(page, self.current_calendar(), now=self.CURRENT_NOW)
+
+    def test_metadata_rejects_future_invalid_and_overdue_monthly_release(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        for changes, code in [
+            ({'Published date and time': '2026-10-03 08:30'}, 'FUTURE_RELEASE'),
+            ({'Published date and time': '2026-10-32 08:30'}, 'PUBLICATION_INVALID'),
+            ({'Published date and time': '2026-08-31 08:30'}, 'PUBLICATION_INVALID'),
+            ({'Survey date': '2026 Q2'}, 'PERIOD_INVALID'),
+            ({'Survey date': '2026 Xxx.'}, 'PERIOD_INVALID'),
+            ({'Survey date': '2026 Jul.', 'Published date and time': '2026-08-28 08:30'}, 'NEW_RELEASE_DUE'),
+        ]:
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, code):
+                parse_japan_labour_metadata(self.metadata(changes), self.current_calendar(), now=self.CURRENT_NOW)
+
+    def test_metadata_calendar_conflicts_and_next_date_boundary(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        with self.assertRaisesRegex(ValueError, 'RELEASE_CALENDAR_CONFLICT'):
+            parse_japan_labour_metadata(self.metadata(), self.current_calendar().replace('October 2</td>', 'October 3</td>'), now=self.CURRENT_NOW)
+        before = datetime(2026, 10, 29, 14, 59, 59, tzinfo=timezone.utc)
+        result = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=before)
+        self.assertEqual(result['next_due_at'], '2026-10-29T15:00:00+00:00')
+        with self.assertRaisesRegex(ValueError, 'NEW_RELEASE_DUE'):
+            parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=datetime(2026, 10, 29, 15, tzinfo=timezone.utc))
+
+    def test_current_metadata_cannot_qualify_missing_or_unconfirmed_workbook_month(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        with self.assertRaisesRegex(ValueError, 'LATEST_PERIOD_MISSING'):
+            parse_japan_labour(self.book(), release, now=self.CURRENT_NOW)
+        def future(s):
+            s.cell(18, 20, 2.6)
+            s.cell(19, 20, 2.7)
+        with self.assertRaisesRegex(ValueError, 'UNCONFIRMED_PERIOD'):
+            parse_japan_labour(self.book(future), release, now=self.CURRENT_NOW)
+
+    def test_metadata_calendar_or_workbook_outage_never_returns_observation(self):
+        from official_quarterly_labour import fetch_japan_labour
+        from unittest.mock import Mock
+        import requests
+        for failed in range(3):
+            for error in [requests.Timeout('source unavailable'), requests.HTTPError('source unavailable')]:
+                session = Mock()
+                responses = [Mock(text=self.metadata()), Mock(text=self.current_calendar())]
+                session.get.side_effect = responses[:failed] + [error]
+                with self.subTest(failed=failed, error=type(error).__name__), self.assertRaises(type(error)):
+                    fetch_japan_labour(now=self.CURRENT_NOW, session=session)
+                self.assertEqual(session.get.call_count, failed + 1)
+
+    def test_invalid_metadata_never_falls_back_or_downloads_workbook(self):
+        from official_quarterly_labour import fetch_japan_labour
+        session = Session([Response(text=self.metadata({'Table number': '1-a-9'})),
+                           Response(text=self.current_calendar())])
+        with self.assertRaisesRegex(ValueError, 'IDENTITY_INVALID'):
+            fetch_japan_labour(now=self.CURRENT_NOW, session=session)
+        self.assertEqual(len(session.calls), 2)
 
 
 if __name__ == '__main__': unittest.main()
