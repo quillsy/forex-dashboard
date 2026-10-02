@@ -145,11 +145,11 @@ class SnapshotRegressions(unittest.TestCase):
 
     def test_currency_first_snapshot_wins_and_retains_missing_factors(self):
         weights = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
-        details = {"Geldpolitik": 20, "PMI": None, "_missing": ["PMI"], "_completeness": 80}
+        details = {"Geldpolitik": 20, "PMI": None, "_missing": ["PMI"], "_completeness": 80, "_live_checked": True}
         fn = self.ns["save_currency_snapshot"]
         self.assertTrue(fn("USD", 20, 20, 0, "Normal", details, weights, "2026-09-04"))
         original = self.read()
-        self.assertFalse(fn("USD", -40, -40, 10, "Changed", {}, weights, "2026-09-04"))
+        self.assertFalse(fn("USD", -40, -40, 10, "Changed", details, weights, "2026-09-04"))
         self.assertEqual(self.read(), original)
         self.assertIsNone(next(iter(original.values()))["factor_scores"]["PMI"])
 

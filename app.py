@@ -7522,11 +7522,13 @@ def update_open_outcomes():
 
 
 def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, details, model_weights, today_str):
+    details = details or {}
+    if use_live_core_cache(today_str) and details.get('_live_checked') is not True:
+        raise ValueError('CURRENCY_REQUIRES_COMPLETED_LIVE_BATCH')
     signals = load_live_signals()
     snap_id = f"CURR_{curr}_{today_str}_{CURRENT_MODEL_VERSION}"
     if snap_id in signals:
         return False
-    details = details or {}
     model_weights = _live_snapshot_weights()
     
     eff_weights = {}
