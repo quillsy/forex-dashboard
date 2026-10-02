@@ -2484,37 +2484,58 @@ def parse_statsnz_cpi_release(html, expected_period):
     from bs4 import BeautifulSoup
     period = pd.Period(expected_period, freq="Q")
     expected_title = f"Consumers price index: {period.end_time.strftime('%B %Y')} quarter"
+    candidates = []
     for tag in BeautifulSoup(html, "html.parser").select("[data-value]"):
+        matching_release = False
         try:
             payload = json.loads(tag["data-value"])
             if not isinstance(payload, dict) or payload.get("Title") != expected_title:
                 continue
+            matching_release = True
+            candidate_start = len(candidates)
             release = pd.Timestamp(payload["DateTaxonomyTerm"]["PublicationDate"])
+            if pd.isna(release):
+                return None
+            taxonomy = payload["DateTaxonomyTerm"]
+            if ("DisplayName" in taxonomy and taxonomy["DisplayName"] != expected_title) or (
+                    "DateString" in taxonomy and
+                    datetime.strptime(taxonomy["DateString"], "%d %B %Y").date() != release.date()):
+                return None
             # Stats NZ publishes in New Zealand local time; keep a UTC-naive timestamp.
             release = release.tz_localize("Pacific/Auckland").tz_convert("UTC").tz_localize(None)
             if release > pd.Timestamp.now(tz="UTC").tz_localize(None) or release < period.end_time.normalize():
-                continue
+                return None
             next_period = period + 1
             next_title = f"Consumers price index: {next_period.end_time.strftime('%B %Y')} quarter"
             due_dates = []
+            if "PageBlocks" in payload and not isinstance(payload["PageBlocks"], list):
+                return None
             for block in payload.get("PageBlocks", []):
-                if not isinstance(block, dict) or block.get("ClassName") != "TextBlock" or \
-                        block.get("Title") != expected_title + " – next release date":
-                    continue
+                if not isinstance(block, dict):
+                    return None
                 content = block.get("Content")
-                if not isinstance(content, str) or len(content) > 5000:
+                announcement = (" ".join(BeautifulSoup(content, "html.parser").get_text(" ", strip=True).split())
+                                if isinstance(content, str) and len(content) <= 5000 else None)
+                if block.get("Title") != expected_title + " – next release date":
+                    if announcement and announcement.startswith(f"Next release {next_title} "):
+                        return None
                     continue
-                announcement = " ".join(BeautifulSoup(content, "html.parser").get_text(" ", strip=True).split())
+                if block.get("ClassName") != "TextBlock" or announcement is None:
+                    return None
                 prefix = f"Next release {next_title} will be released on "
                 if not announcement.startswith(prefix) or not announcement.endswith("."):
-                    continue
+                    return None
                 try:
                     due_day = datetime.strptime(announcement[len(prefix):-1], "%d %B %Y").date()
                 except ValueError:
-                    continue
+                    return None
                 if next_period.end_time.date() <= due_day <= (next_period.end_time + pd.Timedelta(days=90)).date():
                     due_dates.append(due_day)
+                else:
+                    return None
             unique_due_dates = set(due_dates)
+            if len(unique_due_dates) > 1:
+                return None
             next_due = (pd.Timestamp(next(iter(unique_due_dates))).tz_localize("Pacific/Auckland").tz_convert("UTC").isoformat()
                         if len(unique_due_dates) == 1 else None)
             for series in payload.get("FeaturedMedia", {}).get("SeriesData", []):
@@ -2524,10 +2545,14 @@ def parse_statsnz_cpi_release(html, expected_period):
                 for row in rows[1:]:
                     if not row or row[0] != "CPI all groups (annual)":
                         continue
+                    if len(row) != len(rows[0]):
+                        return None
                     for label, raw in zip(rows[0][1:], row[1:]):
                         observed = pd.to_datetime(label.replace("Sept-", "Sep-"), format="%b-%y").to_period("Q")
                         value = finite_number(raw)
-                        if observed == period and value is not None and abs(value) <= 25:
+                        if observed == period:
+                            if value is None or abs(value) > 25:
+                                return None
                             result = {"date": period.end_time.normalize(), "value": value,
                                       "index_level": None, "derived_yoy": None,
                                       "release_date": release, "is_pit_limited": True,
@@ -2535,10 +2560,18 @@ def parse_statsnz_cpi_release(html, expected_period):
                             if next_due:
                                 result.update(next_due_at=next_due,
                                               next_due_precision="date_only_start_of_NZ_day")
-                            return result
-        except (ValueError, TypeError, KeyError, IndexError):
+                            candidates.append(result)
+            if len(candidates) == candidate_start:
+                return None
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError, csv.Error):
+            if matching_release:
+                return None
             continue
-    return None
+    # Repeated chart/payload copies may agree. Order must never resolve a
+    # conflict in the value, publication time or confirmed release deadline.
+    if not candidates or any(candidate != candidates[0] for candidate in candidates[1:]):
+        return None
+    return candidates[0]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

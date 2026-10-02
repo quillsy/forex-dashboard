@@ -59,6 +59,182 @@ class FreeSources(unittest.TestCase):
     def setUp(self):
         self.n = load_sources()
 
+    def nz_payload(self, payload):
+        return '<div data-value="'+html.escape(json.dumps(payload), quote=True)+'"></div>'
+
+    def nz_original_payload(self):
+        from bs4 import BeautifulSoup
+        tag = BeautifulSoup(nz_release_with_confirmed_next_date(), 'html.parser').select_one('[data-value]')
+        return json.loads(tag['data-value'])
+
+    def test_nz_conflicting_values_in_rows_charts_and_payloads_are_rejected(self):
+        import copy
+        original = self.nz_original_payload()
+        changed = copy.deepcopy(original)
+        chart = changed['FeaturedMedia']['SeriesData'][0]
+        chart['GraphCsvData'] = chart['GraphCsvData'].replace('3.1,4.1', '3.1,9.9')
+        for payload in (self.nz_payload(original)+self.nz_payload(changed),
+                        self.nz_payload(changed)+self.nz_payload(original)):
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](payload, '2026Q2'))
+        for reverse in (False, True):
+            together = copy.deepcopy(original)
+            charts = [original['FeaturedMedia']['SeriesData'][0], chart]
+            together['FeaturedMedia']['SeriesData'] = charts[::-1] if reverse else charts
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(together), '2026Q2'))
+            rows = ['CPI all groups (annual),3.1,4.1', 'CPI all groups (annual),3.1,9.9']
+            together['FeaturedMedia']['SeriesData'] = [{'GraphCsvData':
+                'Quarter,Mar-26,Jun-26\r\n'+'\r\n'.join(rows[::-1] if reverse else rows)+'\r\n'}]
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(together), '2026Q2'))
+
+    def test_nz_agreeing_duplicates_preserve_value_publication_and_deadline(self):
+        import copy
+        original = self.nz_original_payload()
+        baseline = self.n['parse_statsnz_cpi_release'](self.nz_payload(original), '2026Q2')
+        repeated = copy.deepcopy(original)
+        repeated['FeaturedMedia']['SeriesData'] *= 2
+        repeated['PageBlocks'] *= 2
+        for payload in (self.nz_payload(repeated), self.nz_payload(original)*2,
+                        nz_release()+self.nz_payload(repeated)):
+            self.assertEqual(self.n['parse_statsnz_cpi_release'](payload, '2026Q2'), baseline)
+
+    def test_nz_conflicting_or_invalid_release_metadata_cannot_hide_after_valid_copy(self):
+        import copy
+        original = self.nz_original_payload()
+        for publication in ('2026-07-22 10:45:00', '2099-07-21 10:45:00', 'invalid', None, 'NaT'):
+            changed = copy.deepcopy(original)
+            changed['DateTaxonomyTerm']['PublicationDate'] = publication
+            for payload in (self.nz_payload(original)+self.nz_payload(changed),
+                            self.nz_payload(changed)+self.nz_payload(original)):
+                self.assertIsNone(self.n['parse_statsnz_cpi_release'](payload, '2026Q2'))
+        changed = copy.deepcopy(original)
+        changed['PageBlocks'].append({**changed['PageBlocks'][0],
+            'Content': changed['PageBlocks'][0]['Content'].replace('22 October', '23 October')})
+        self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(changed), '2026Q2'))
+        changed = copy.deepcopy(original)
+        changed['PageBlocks'][0]['Content'] = changed['PageBlocks'][0]['Content'].replace('22 October', '23 October')
+        self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(original)+self.nz_payload(changed), '2026Q2'))
+
+    def test_nz_invalid_target_cell_or_truncated_annual_row_cannot_hide_after_valid_copy(self):
+        import copy
+        original = self.nz_original_payload()
+        for raw in ('NaN', 'inf', '-', '', '26'):
+            changed = copy.deepcopy(original)
+            changed['FeaturedMedia']['SeriesData'][0]['GraphCsvData'] = (
+                changed['FeaturedMedia']['SeriesData'][0]['GraphCsvData'].replace('3.1,4.1', '3.1,'+raw))
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(original)+self.nz_payload(changed), '2026Q2'))
+        changed['FeaturedMedia']['SeriesData'][0]['GraphCsvData'] = 'Quarter,Mar-26,Jun-26\r\nCPI all groups (annual),3.1\r\n'
+        self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(original)+self.nz_payload(changed), '2026Q2'))
+
+    def test_nz_contradictory_taxonomy_or_incomplete_matching_copy_blocks(self):
+        import copy
+        original = self.nz_original_payload()
+        for fields in ({'DisplayName': 'Different release'}, {'DateString': '22 July 2026'},
+                       {'DateString': 'invalid'}):
+            changed = copy.deepcopy(original)
+            changed['DateTaxonomyTerm'].update(fields)
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(changed), '2026Q2'))
+        for fields in ({}, {'PublicationDate': '2026-07-22 10:45:00'}):
+            changed = copy.deepcopy(original)
+            changed['DateTaxonomyTerm'].update(fields)
+            changed['FeaturedMedia']['SeriesData'] = []
+            for payload in (self.nz_payload(original)+self.nz_payload(changed),
+                            self.nz_payload(changed)+self.nz_payload(original)):
+                self.assertIsNone(self.n['parse_statsnz_cpi_release'](payload, '2026Q2'))
+        original['DateTaxonomyTerm'].update(DisplayName=original['Title'], DateString='21 July 2026')
+        self.assertEqual(self.n['parse_statsnz_cpi_release'](self.nz_payload(original), '2026Q2')['value'], 4.1)
+
+    def test_nz_missing_calendar_differs_from_malformed_present_calendar(self):
+        import copy
+        original = self.nz_original_payload()
+        absent = copy.deepcopy(original)
+        absent.pop('PageBlocks')
+        self.assertEqual(self.n['parse_statsnz_cpi_release'](self.nz_payload(absent), '2026Q2')['value'], 4.1)
+        self.assertNotIn('next_due_at', self.n['parse_statsnz_cpi_release'](self.nz_payload(absent), '2026Q2'))
+        for invalid_blocks in ({}, None, [None]):
+            changed = copy.deepcopy(original)
+            changed['PageBlocks'] = invalid_blocks
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(changed), '2026Q2'))
+        for field, value in (('ClassName', 'WrongClass'), ('Title', 'Wrong next release title'),
+                             ('Content', None), ('Content', 'Next release invalid.')):
+            changed = copy.deepcopy(original)
+            changed['PageBlocks'][0][field] = value
+            self.assertIsNone(self.n['parse_statsnz_cpi_release'](self.nz_payload(changed), '2026Q2'))
+
+    def test_nz_conflicting_release_revokes_previous_valid_collector_record(self):
+        import copy
+        import os
+        from datetime import timedelta, timezone
+        from unittest.mock import patch
+        from test_core_regressions import load_core
+        checked = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+
+        class Timestamp:
+            def __new__(cls, *args, **kwargs):
+                return pd.Timestamp(*args, **kwargs)
+
+            @classmethod
+            def now(cls, tz=None):
+                return pd.Timestamp(checked).tz_convert(tz) if tz else pd.Timestamp(checked).tz_localize(None)
+
+        frozen_pd = SimpleNamespace(**{name: getattr(pd, name) for name in ('Period', 'DataFrame', 'Timedelta', 'isna', 'to_datetime')},
+                                    Timestamp=Timestamp)
+        self.n.update(pd=frozen_pd, datetime=Clock, live_data=live_data)
+        original = self.nz_original_payload()
+        changed = copy.deepcopy(original)
+        changed['FeaturedMedia']['SeriesData'][0]['GraphCsvData'] = (
+            changed['FeaturedMedia']['SeriesData'][0]['GraphCsvData'].replace('3.1,4.1', '3.1,9.9'))
+        # An older complete page cannot overrule an invalid newer release.
+        older = copy.deepcopy(original)
+        older['Title'] = 'Consumers price index: March 2026 quarter'
+        older['DateTaxonomyTerm']['PublicationDate'] = '2026-04-21 10:45:00'
+        older['PageBlocks'] = [{'ClassName': 'TextBlock',
+            'Title': older['Title']+' – next release date',
+            'Content': 'Next release Consumers price index: June 2026 quarter will be released on 28 September 2026.'}]
+        current_html = self.nz_payload(original)+self.nz_payload(changed)
+        def response(url, **kwargs):
+            if 'june-2026' in url:
+                return SimpleNamespace(status_code=200, text=current_html)
+            if 'march-2026' in url:
+                return SimpleNamespace(status_code=200, text=self.nz_payload(older))
+            return SimpleNamespace(status_code=404, text='')
+        self.n['requests'].get = Mock(side_effect=response)
+        self.assertEqual(self.n['parse_statsnz_cpi_release'](self.nz_payload(original), '2026Q2')['value'], 4.1)
+        self.assertIsNone(self.n['get_statsnz_cpi_data'](propagate_transport=True)[0])
+        core = load_core()
+        route = next(node for node in ast.parse(Path(__file__).with_name('app.py').read_text()).body
+                     if isinstance(node, ast.FunctionDef) and node.name == 'get_cpi_yoy_details')
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<nz-cpi-route>', 'exec'), core)
+        core.update(datetime=Clock, requests=requests, get_statsnz_cpi_data=self.n['get_statsnz_cpi_data'],
+                    get_ons_cpi_data=Mock(side_effect=AssertionError('Unexpected ONS call')),
+                    get_statcan_cpi_data=Mock(side_effect=AssertionError('Unexpected StatCan call')))
+        previous = live_data.build_record('Inflation', 100, {
+            'value': 4.1, 'date': '2026-06-30', 'source': 'Stats NZ', 'series_id': 'CPIQ.SE9A',
+            'frequency': 'quarterly', 'next_due_at': '2026-10-21T11:00:00+00:00',
+            'needs_hourly_check': True}, 'AGING', (checked-timedelta(minutes=30)).isoformat())
+        self.assertTrue(live_data.eligible(previous, checked, factor='Inflation', currency='NZD')[0])
+        app = SimpleNamespace(requests=self.n['requests'], FRED_KEY=None,
+                              compute_currency_details=core['compute_currency_details'])
+        for current_html, valid in ((self.nz_payload(original), True),
+                                    (self.nz_payload(original)+self.nz_payload(changed), False)):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)/'live.json'
+                live_data.save({'model_version': live_data.MODEL, 'currencies': {'NZD': {'Inflation': previous}}}, path)
+                with patch.dict(os.environ, {'FX_COLLECTOR': '1'}), \
+                     patch.object(live_data, 'now_utc', return_value=checked), \
+                     patch.object(live_data, 'CURRENCIES', ('NZD',)), \
+                     patch.object(live_data, 'FACTORS', {'Inflation': live_data.FACTORS['Inflation']}):
+                    live_data.collect(app, path)
+                record = live_data.load(path)['currencies']['NZD']['Inflation']
+                self.assertEqual(record['validation'], 'VALID' if valid else 'UNVERIFIED')
+                self.assertEqual(record['score'], 100 if valid else None)
+                self.assertNotIn('last_error', record)
+                self.assertEqual(live_data.eligible(record, checked, factor='Inflation', currency='NZD')[0], valid)
+
     def test_nz_extracts_annual_data_and_actual_publication_not_heartbeat(self):
         row = self.n['parse_statsnz_cpi_release'](nz_release(), '2025Q2')
         self.assertEqual(row['value'], 2.7)
@@ -83,12 +259,12 @@ class FreeSources(unittest.TestCase):
         self.assertTrue(live_data.eligible(record, before, factor='Inflation', currency='NZD')[0])
         self.assertFalse(live_data.eligible(record, due, factor='Inflation', currency='NZD')[0])
 
-    def test_nz_wrong_next_quarter_or_ambiguous_date_is_not_used(self):
+    def test_nz_present_invalid_next_release_blocks_instead_of_becoming_unknown(self):
         original = nz_release_with_confirmed_next_date()
         for changed in (original.replace('September 2026 quarter', 'December 2026 quarter'),
                         original.replace('22 October 2026', '22 October 2099')):
             row = self.n['parse_statsnz_cpi_release'](changed, '2026Q2')
-            self.assertNotIn('next_due_at', row)
+            self.assertIsNone(row)
 
     def test_nz_wrong_period_quarterly_series_and_future_release_rejected(self):
         for payload, period in [(nz_release(),'2025Q1'),
