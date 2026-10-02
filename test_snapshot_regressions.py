@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import live_data
 
 
 SOURCE = Path(__file__).with_name("app.py")
@@ -19,6 +20,7 @@ FUNCTIONS = {
     "finite_number", "pair_core_is_complete", "load_live_signals", "save_live_signals", "_live_snapshot_weights", "_live_run_summary", "_finish_live_summary",
     "_live_positive_price", "_live_price_history", "save_live_signal_snapshot",
     "save_currency_snapshot", "save_all_g10_live_snapshots", "update_open_outcomes", "get_pair_signal_and_badge",
+    "live_core_observation_for_display",
 }
 
 
@@ -59,7 +61,7 @@ def harness():
     namespace["compute_currency_professional_score_and_regime_custom"] = lambda curr, *args: (
         -5.0 if curr == "USD" else 20.0, "Normal", -5.0 if curr == "USD" else 20.0,
         0, namespace["compute_currency_details"](curr))
-    namespace["live_data"] = SimpleNamespace(load=lambda: {}, now_utc=Clock.now,
+    namespace["live_data"] = SimpleNamespace(load=lambda: {}, now_utc=Clock.now, timestamp=live_data.timestamp,
         details=lambda curr, **kwargs: namespace["compute_currency_details"](curr))
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace
@@ -146,6 +148,9 @@ class SnapshotRegressions(unittest.TestCase):
     def test_currency_first_snapshot_wins_and_retains_missing_factors(self):
         weights = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
         details = {"Geldpolitik": 20, "PMI": None, "_missing": ["PMI"], "_completeness": 80, "_live_checked": True}
+        self.ns['compute_currency_details'] = lambda *args: {
+            **dict.fromkeys(weights, 20.0), 'PMI': None, '_missing': ['PMI'],
+            '_completeness': 80, '_live_checked': True, '_freshness': {}}
         fn = self.ns["save_currency_snapshot"]
         self.assertTrue(fn("USD", 20, 20, 0, "Normal", details, weights, "2026-09-04"))
         original = self.read()
