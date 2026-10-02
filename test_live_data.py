@@ -828,6 +828,125 @@ class LiveDataTests(unittest.TestCase):
             self.assertFalse(live.eligible(row, NOW)[0])
 
 
+class FreshnessDeadlineDisplayTests(unittest.TestCase):
+    CHECKED = datetime(2026, 10, 2, 15, 9, 1, 294035, tzinfo=timezone.utc)
+    COMPLETED = datetime(2026, 10, 2, 15, 9, 50, 172030, tzinfo=timezone.utc)
+
+    def record(self, currency='AUD', factor='GDP', hourly=True):
+        # Representative records from the completed public 02.10.2026 batch.
+        value, published, due = {
+            ('USD', 'GDP'): (2.1915745328897174, '2026-09-30T12:30:00+00:00', '2026-10-29T12:30:00+00:00'),
+            ('AUD', 'Arbeitsmarkt'): (4.64629609, '2026-09-24T01:30:00+00:00', '2026-10-15T00:30:00+00:00'),
+            ('AUD', 'GDP'): (2.137635765206136, '2026-09-02T01:30:00+00:00', '2026-12-02T00:30:00+00:00'),
+            ('NZD', 'GDP'): (3.0053354082143047, '2026-09-16T22:45:00+00:00', '2026-12-16T11:00:00+00:00'),
+        }[(currency, factor)]
+        monthly = factor == 'Arbeitsmarkt'
+        return live.build_record(factor, 20, {
+            'value': value, 'date': '2026-08-31' if monthly else '2026-06-30',
+            'reference_period': '2026-08' if monthly else '2026-Q2',
+            'source': {'USD': 'BEA', 'AUD': 'ABS', 'NZD': 'Stats NZ GDP expenditure'}[currency],
+            'unit': 'percent of labour force' if monthly else 'percent YoY',
+            'frequency': 'monthly' if monthly else 'quarterly', 'seasonal_adjustment': 'SA',
+            'published_at': published, 'next_due_at': due, 'needs_hourly_check': hourly,
+        }, 'FRESH', self.CHECKED.isoformat())
+
+    def render(self, record, now=None, currency='AUD', factor='GDP'):
+        data = {'model_version': live.MODEL, 'status': 'PARTIAL',
+                'last_attempt_at': self.CHECKED.isoformat(), 'completed_at': self.COMPLETED.isoformat(),
+                'currencies': {currency: {factor: record}}}
+        original = copy.deepcopy(data)
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=data), \
+             patch.object(live, 'now_utc', return_value=now or self.COMPLETED):
+            live.render_status(st)
+        self.assertEqual(data, original)
+        rows = st.dataframe.call_args_list[1].args[0]
+        return next(row for row in rows if row['Währung'] == currency and row['Faktor'] == factor)
+
+    def test_known_release_and_earlier_hourly_check_are_shown_separately(self):
+        check_due = self.CHECKED + timedelta(hours=1)
+        for currency, factor in (('USD', 'GDP'), ('AUD', 'Arbeitsmarkt'), ('AUD', 'GDP')):
+            with self.subTest(currency=currency, factor=factor):
+                record = self.record(currency, factor)
+                row = self.render(record, currency=currency, factor=factor)
+                self.assertEqual(row['Nächster Quellentermin'], record['next_due_at'])
+                self.assertEqual(row['Aktualitätsprüfung fällig'],
+                                 'Ab ' + check_due.isoformat() + ' (stündliche Prüfung)')
+                self.assertEqual(row['Veröffentlicht'], record['published_at'])
+                self.assertEqual(row['Status'], 'Verfügbar')
+                self.assertNotIn('Nächste Fälligkeit', row)
+                self.assertTrue(live.eligible(record, check_due - timedelta(microseconds=1),
+                                              factor=factor, currency=currency)[0])
+                at_due = self.render(record, check_due, currency, factor)
+                self.assertEqual(at_due['Status'], 'Gesperrt')
+                self.assertEqual(at_due['Aktualitätsprüfung fällig'],
+                                 'Fällig seit ' + check_due.isoformat() + ' (stündliche Prüfung)')
+
+    def test_unknown_calendar_keeps_release_unknown_and_shows_hourly_check(self):
+        record = self.record(hourly=None)
+        record['next_due_at'] = record['observation']['next_due_at'] = None
+        row = self.render(record)
+        self.assertEqual(row['Nächster Quellentermin'], 'Unbekannt')
+        self.assertEqual(row['Aktualitätsprüfung fällig'],
+                         'Ab ' + (self.CHECKED + timedelta(hours=1)).isoformat() + ' (stündliche Prüfung)')
+
+    def test_known_release_without_hourly_check_uses_calendar_deadline(self):
+        record = self.record('NZD', hourly=False)
+        row = self.render(record, self.CHECKED + timedelta(hours=2), 'NZD')
+        self.assertEqual(row['Status'], 'Verfügbar')
+        self.assertEqual(row['Aktualitätsprüfung fällig'],
+                         'Ab ' + record['next_due_at'] + ' (Quellenfrist)')
+
+    def test_missing_invalid_or_future_check_metadata_has_no_invented_deadline(self):
+        for changes in ({'checked_at': None}, {'checked_at': 'unknown'},
+                        {'checked_at': (self.COMPLETED + timedelta(minutes=1)).isoformat()},
+                        {'expires_at': None}, {'expires_at': 'unknown'}, {'next_due_at': 'unknown'}):
+            with self.subTest(changes=changes):
+                record = self.record()
+                record.update(changes)
+                row = self.render(record)
+                self.assertEqual(row['Status'], 'Gesperrt')
+                self.assertEqual(row['Aktualitätsprüfung fällig'], 'Nicht bestätigt')
+                if changes.get('next_due_at') == 'unknown':
+                    self.assertEqual(row['Nächster Quellentermin'], 'Unbekannt')
+
+    def test_reached_publication_deadline_is_explicitly_due_and_blocked(self):
+        record = self.record('NZD', hourly=False)
+        due = live.timestamp(record['next_due_at'])
+        before = self.render(record, due - timedelta(microseconds=1), 'NZD')
+        self.assertEqual(before['Status'], 'Verfügbar')
+        row = self.render(record, due, 'NZD')
+        self.assertEqual(row['Status'], 'Gesperrt')
+        self.assertEqual(row['Aktualitätsprüfung fällig'],
+                         'Fällig seit ' + due.isoformat() + ' (Quellenfrist)')
+
+    def test_earliest_calendar_or_age_boundary_takes_precedence_over_hourly_check(self):
+        for field, reason in (('next_due_at', 'Quellenfrist'),
+                              ('expires_at', 'Altersgrenze; neuerer Wert erforderlich')):
+            with self.subTest(field=field):
+                record = self.record()
+                due = self.CHECKED + timedelta(minutes=30)
+                record[field] = due.isoformat()
+                row = self.render(record)
+                self.assertEqual(row['Aktualitätsprüfung fällig'],
+                                 'Ab ' + due.isoformat() + ' (' + reason + ')')
+                self.assertTrue(live.eligible(record, due - timedelta(microseconds=1),
+                                              factor='GDP', currency='AUD')[0])
+                row = self.render(record, due)
+                self.assertEqual(row['Status'], 'Gesperrt')
+                self.assertEqual(row['Aktualitätsprüfung fällig'],
+                                 'Fällig seit ' + due.isoformat() + ' (' + reason + ')')
+
+    def test_date_only_release_keeps_conservative_timezone_annotation(self):
+        record = self.record('NZD', hourly=False)
+        record['observation']['next_due_precision'] = 'date_only_start_of_NZ_day'
+        row = self.render(record, currency='NZD')
+        self.assertEqual(row['Nächster Quellentermin'], record['next_due_at'] +
+                         ' (vorsorglich ab Tagesbeginn Neuseeland; Veröffentlichungsuhrzeit unbekannt)')
+        self.assertEqual(row['Aktualitätsprüfung fällig'],
+                         'Ab ' + record['next_due_at'] + ' (Quellenfrist)')
+
+
 class DirectMacroFailureClassificationTests(unittest.TestCase):
     def test_ons_and_quarterly_labour_only_classify_transport_as_outage(self):
         import ast
@@ -1576,6 +1695,35 @@ class PolicyDeadlineCollectorTests(unittest.TestCase):
         self.assertFalse(live.eligible(row, datetime(2026, 9, 15, 22, tzinfo=timezone.utc), factor='Geldpolitik', currency='EUR')[0])
         earlier = self.collect_policy('2026-09-15T21:59:30+00:00')
         self.assertEqual(earlier['next_due_at'], '2026-09-15T21:59:30+00:00')
+
+    def test_pending_effective_change_is_shown_as_source_deadline_not_publication(self):
+        record = self.collect_policy()
+        due = min(live.timestamp(proof['valid_until']) for proof in self.policy['verification_evidence']
+                  if 'valid_until' in proof)
+        self.assertEqual(record['next_due_at'], due.isoformat())
+        data = {'model_version': live.MODEL, 'completed_at': self.now.isoformat(),
+                'currencies': {'EUR': {'Geldpolitik': record}}}
+
+        def render_at(now):
+            st = MagicMock()
+            with patch.object(live, 'load', return_value=data), patch.object(live, 'now_utc', return_value=now):
+                live.render_status(st)
+            rows = st.dataframe.call_args_list[1].args[0]
+            return st, next(row for row in rows if row['Währung'] == 'EUR' and row['Faktor'] == 'Geldpolitik')
+
+        st, before = render_at(self.now)
+        self.assertEqual(before['Status'], 'Verfügbar')
+        self.assertEqual(before['Nächster Quellentermin'], due.isoformat())
+        self.assertNotIn('Nächste Veröffentlichung', before)
+        self.assertEqual(before['Veröffentlicht'], 'Unbekannt')
+        self.assertEqual(before['Aktualitätsprüfung fällig'], 'Ab ' + due.isoformat() + ' (Quellenfrist)')
+        captions = ' '.join(call.args[0] for call in st.caption.call_args_list)
+        self.assertIn('bereits angekündigte wirksame Änderungen', captions)
+        self.assertIn('Die Aktualitätsprüfung kann früher fällig sein.', captions)
+        _, at_due = render_at(due)
+        self.assertEqual(at_due['Status'], 'Gesperrt')
+        self.assertEqual(at_due['Aktualitätsprüfung fällig'],
+                         'Fällig seit ' + due.isoformat() + ' (Quellenfrist)')
 
     def test_invalid_missing_or_expired_proofs_cannot_publish_valid_factor(self):
         from copy import deepcopy
