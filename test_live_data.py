@@ -1425,6 +1425,74 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                 self.assertNotIn('last_error', row)
 
 
+class AbsCpiUnitCollectorIntegrationTests(unittest.TestCase):
+    """Actual ABS parser, app routes and writer; no prevalidated source mock."""
+    def collect_case(self, invalid=False):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        from test_official_inflation import abs_data, abs_release_index
+        now = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        routes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name in {'get_current_official_cpi', 'get_cpi_yoy_details'}]
+        for route in routes: route.decorator_list = []
+        exec(compile(ast.Module(body=routes, type_ignores=[]), '<abs-cpi-routes>', 'exec'), core)
+        data = abs_data()
+        if invalid:
+            data['structure']['attributes']['observation'] = [
+                {'id': 'UNIT_MULT', 'values': [{'id': '3'}]}]
+            data['dataSets'][0]['series']['0:0:0:0:0']['observations']['0'] = [3.5, 0]
+        api = Mock(); api.json.return_value = data
+        calendar = Mock(); calendar.text = abs_release_index()
+        transport = Mock(exceptions=requests.exceptions)
+        transport.get.side_effect = [api, calendar]
+        core.update(datetime=Clock, requests=transport, ESTAT_APP_ID=None)
+        app = SimpleNamespace(FRED_KEY=None, requests=transport,
+                              compute_currency_details=core['compute_currency_details'])
+        previous = live.build_record('Inflation', 10.0, {
+            'value': 2.2, 'date': '2026-07-31', 'reference_period': '2026-07',
+            'source': 'Australian Bureau of Statistics', 'series_id': 'CPI/3.10001.10.50.M',
+            'frequency': 'monthly', 'unit': 'annual percent change',
+            'seasonal_adjustment': 'NSA', 'needs_hourly_check': True,
+        }, 'FRESH', (now - timedelta(minutes=30)).isoformat())
+        self.assertTrue(live.eligible(previous, now, factor='Inflation', currency='AUD')[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'AUD': {'Inflation': previous}}}, path)
+            with patch('official_inflation.datetime', Clock), \
+                 patch.object(live, 'now_utc', return_value=now), \
+                 patch.object(live, 'CURRENCIES', ('AUD',)), \
+                 patch.object(live, 'FACTORS', {'Inflation': live.FACTORS['Inflation']}):
+                live.collect(app, path)
+                batch = live.load(path)
+        self.assertEqual(transport.get.call_count, 1 if invalid else 2)
+        self.assertTrue(batch['completed_at'])
+        return batch['currencies']['AUD']['Inflation'], now
+
+    def test_unscaled_abs_answer_remains_eligible_through_real_collector(self):
+        row, now = self.collect_case()
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['value'], 3.5)
+        self.assertEqual(row['score'], 75.0)
+        self.assertEqual(row['next_due_at'], '2026-09-30T01:30:00+00:00')
+        self.assertTrue(live.eligible(row, now, factor='Inflation', currency='AUD')[0])
+
+    def test_abs_multiplier_answer_revokes_previous_valid_collector_record(self):
+        row, now = self.collect_case(invalid=True)
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertIsNone(row['observation']['value'])
+        self.assertNotIn('last_error', row)
+        self.assertFalse(live.eligible(row, now, factor='Inflation', currency='AUD')[0])
+
+
 class SwissHicpCollectorIntegrationTests(unittest.TestCase):
     """Real CHF inflation route and record persistence, with isolated adapters."""
     def setUp(self):
