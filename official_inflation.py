@@ -103,12 +103,41 @@ def parse_abs_cpi(payload, now=None):
         value = dimension["values"][int(index)]
         if (value["id"], value["name"]) != expected[dimension["id"]]:
             raise ValueError("ABS_SERIES_IDENTITY_INVALID")
-    attrs = structure["attributes"]["series"]
+    attribute_groups = structure["attributes"]
+    # The current CPI contract supplies unscaled percentage points. UNIT_MULT
+    # is not defined by its DSD; do not silently interpret an added multiplier
+    # at any attachment level as the same percentage observation. Its sole
+    # UNIT_MEASURE is series-attached; an additional unit is not this contract.
+    if not isinstance(attribute_groups, dict) or any(
+            not isinstance(group, list) or any(
+                not isinstance(attr, dict) or attr.get("id") == "UNIT_MULT" or
+                (level != "series" and attr.get("id") == "UNIT_MEASURE") for attr in group)
+            for level, group in attribute_groups.items()):
+        raise ValueError("ABS_UNIT_INVALID")
+    attrs = attribute_groups["series"]
+    for level, container in (("dataSet", datasets[0]), ("series", series)):
+        references = container.get("attributes", [])
+        descriptors = attribute_groups.get(level, [])
+        if not isinstance(references, list) or len(references) > len(descriptors):
+            raise ValueError("ABS_UNIT_INVALID")
+        for i, reference in enumerate(references):
+            if reference is None:
+                continue  # Optional metadata is allowed to have no value.
+            values = descriptors[i]["values"]
+            if (not isinstance(values, list) or type(reference) is not int or
+                    not 0 <= reference < len(values)):
+                raise ValueError("ABS_UNIT_INVALID")
     unit_positions = [i for i, attr in enumerate(attrs) if attr["id"] == "UNIT_MEASURE"]
     if len(unit_positions) != 1:
         raise ValueError("ABS_UNIT_INVALID")
     position = unit_positions[0]
-    unit = attrs[position]["values"][series["attributes"][position]]
+    if len(series.get("attributes", [])) <= position:
+        raise ValueError("ABS_UNIT_INVALID")
+    unit_reference = series["attributes"][position]
+    unit_values = attrs[position]["values"]
+    if type(unit_reference) is not int or not 0 <= unit_reference < len(unit_values):
+        raise ValueError("ABS_UNIT_INVALID")
+    unit = unit_values[unit_reference]
     if unit["id"] != "PCT" or unit["name"] != "Percent":
         raise ValueError("ABS_UNIT_INVALID")
     times = structure["dimensions"]["observation"]

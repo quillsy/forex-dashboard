@@ -126,6 +126,84 @@ class OfficialInflationTests(unittest.TestCase):
         data = abs_data(); data["structure"]["dimensions"]["observation"][0]["values"][0]["id"] = "2026-10"
         self.assertEqual(parse_abs_cpi(data, NOW)["refperiod"], "2026-06")
 
+    def test_abs_multiplier_at_any_attachment_level_cannot_be_a_percent_rate(self):
+        for level in ("dataSet", "series", "observation"):
+            for multiplier in ("0", "1", "3"):
+                with self.subTest(level=level, multiplier=multiplier):
+                    data = abs_data()
+                    attrs = data["structure"]["attributes"].setdefault(level, [])
+                    attrs.append({"id": "UNIT_MULT", "values": [{"id": multiplier}]})
+                    # A missing reference still cannot authorize a field outside
+                    # the CPI contract. Both bound and unbound forms must fail.
+                    for reference in (0, None):
+                        series = data["dataSets"][0]["series"]["0:0:0:0:0"]
+                        if level == "series": series["attributes"] = [0, reference]
+                        elif level == "dataSet": data["dataSets"][0]["attributes"] = [reference]
+                        else: series["observations"]["0"] = [3.5, reference]
+                        with self.assertRaisesRegex(ValueError, "ABS_UNIT_INVALID"):
+                            parse_abs_cpi(data, NOW)
+
+    def test_abs_unit_reference_must_select_one_nonnegative_integer_position(self):
+        for reference in (-1, 1, True, False, None, "0", 0.0):
+            with self.subTest(reference=reference):
+                data = abs_data()
+                data["dataSets"][0]["series"]["0:0:0:0:0"]["attributes"] = [reference]
+                with self.assertRaisesRegex(ValueError, "ABS_UNIT_INVALID"):
+                    parse_abs_cpi(data, NOW)
+
+    def test_abs_additional_unit_on_other_attachment_level_is_not_ignored(self):
+        for level in ("dataSet", "observation"):
+            for code, name in (("IX", "Index"), ("PCT", "Percent")):
+                with self.subTest(level=level, code=code):
+                    data = abs_data()
+                    data["structure"]["attributes"][level] = [
+                        {"id": "UNIT_MEASURE", "values": [{"id": code, "name": name}]}]
+                    if level == "dataSet": data["dataSets"][0]["attributes"] = [0]
+                    else: data["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]["0"] = [3.5, 0]
+                    with self.assertRaisesRegex(ValueError, "ABS_UNIT_INVALID"):
+                        parse_abs_cpi(data, NOW)
+
+    def test_abs_unscaled_rates_including_zero_and_deflation_are_preserved(self):
+        for rate in (3.5, 0, -1.2):
+            data = abs_data()
+            data["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]["0"] = [rate]
+            self.assertEqual(parse_abs_cpi(data, NOW)["value"], rate)
+
+    def test_abs_unbound_or_malformed_metadata_references_are_rejected(self):
+        for level in ("dataSet", "series"):
+            for references in ([0, 0], [-1], [True], [1], ["0"], "0"):
+                with self.subTest(level=level, references=references):
+                    data = abs_data()
+                    if level == "dataSet":
+                        data['structure']['attributes']['dataSet'] = [
+                            {'id': 'BASE_PERIOD', 'values': [{'id': '25'}]}]
+                    target = data['dataSets'][0] if level == 'dataSet' else data['dataSets'][0]['series']['0:0:0:0:0']
+                    target['attributes'] = references
+                    with self.assertRaisesRegex(ValueError, 'ABS_UNIT_INVALID'):
+                        parse_abs_cpi(data, NOW)
+        data = abs_data()
+        data['dataSets'][0]['series']['0:0:0:0:0']['attributes'] = []
+        with self.assertRaisesRegex(ValueError, 'ABS_UNIT_INVALID'):
+            parse_abs_cpi(data, NOW)
+
+    def test_abs_optional_metadata_can_be_absent_or_unassigned(self):
+        for references in ([], [None], [0]):
+            data = abs_data()
+            data['structure']['attributes']['dataSet'] = [
+                {'id': 'BASE_PERIOD', 'values': [{'id': '25'}]}]
+            data['dataSets'][0]['attributes'] = references
+            self.assertEqual(parse_abs_cpi(data, NOW)['value'], 3.5)
+
+    def test_abs_invalid_unit_stops_before_calendar_and_has_safe_diagnostic(self):
+        data = abs_data()
+        data["structure"]["attributes"]["observation"] = [
+            {"id": "UNIT_MULT", "values": [{"id": "3", "name": "private-provider-text"}]}]
+        client = Mock(); client.get.return_value.json.return_value = data
+        diagnostic = {}
+        self.assertIsNone(fetch_official_cpi("AUD", client=client, now=NOW, diagnostics=diagnostic))
+        self.assertEqual(diagnostic, {"code": "ABS_UNIT_INVALID"})
+        self.assertEqual(client.get.call_count, 1)
+
     def test_nonfinite_and_conflicting_values_fail(self):
         for value in [float("nan"), float("inf"), 26]:
             data = abs_data(); data["dataSets"][0]["series"]["0:0:0:0:0"]["observations"]["0"] = [value]
