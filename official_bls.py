@@ -1,15 +1,17 @@
 """Official BLS publication checks for the existing FRED USD CORE series.
 
 The scheduled successor is a deadline, never proof of publication. The BLS
-release hosted by the US Department of Labor is primary proof. After an
-unreachable PDF and a 24-hour delay, the official API v1 may prove the exact
-month if its raw observation matches FRED. FRED still supplies the CORE score.
+release hosted by the US Department of Labor is primary proof. Its verified
+BLS Employment Situation PDF is a bounded alternate transport. After
+unreachable PDF transports and a 24-hour delay, the official API v1 may prove
+the exact month if its raw observation matches FRED. FRED supplies the CORE score.
 """
 import re
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -54,7 +56,12 @@ PINNED_DUES = {
         "2026-11": "2026-12-10T13:30:00+00:00",
     },
 }
-USER_AGENT = "Mozilla/5.0 fx-dashboard-source-verification/1.0"
+USER_AGENT = "fx-dashboard-source-verification/1.0 (+https://github.com/quillsy/forex-dashboard)"
+# This exact link is published by BLS on the Employment Situation release page.
+# Verified 2026-10-02: byte-identical to the dated DOL bulletin. No other report
+# or hostname is enabled by inference. The latest-PDF URL still needs the full
+# period, embargo and successor checks on every newly fetched edition.
+BLS_PDF_URLS = {"Arbeitsmarkt": "https://www.bls.gov/news.release/pdf/empsit.pdf"}
 API_BASE = "https://api.bls.gov/publicAPI/v1/timeseries/data/"
 _MONTH = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
 _ROW = re.compile(
@@ -187,6 +194,112 @@ def _pdf_url(factor, published):
     return f"https://www.dol.gov/newsroom/economicdata/{REPORTS[factor]['archive_prefix']}_{local_date}.pdf"
 
 
+def _bls_pdf_url(factor):
+    return BLS_PDF_URLS.get(factor)
+
+
+def _host_blocked(session, host, now):
+    cooldown = getattr(session, "cooldown", None)
+    if isinstance(cooldown, (set, frozenset, tuple, list)) and host in cooldown:
+        return True
+    retry_after = getattr(session, "retry_after", None)
+    deadline = retry_after.get(host) if isinstance(retry_after, dict) else None
+    return (isinstance(deadline, datetime) and deadline.tzinfo is not None
+            and deadline > now)
+
+
+def _validate_pdf_origin(response, url):
+    """An HTTP denial must have the same safe origin as a returned PDF."""
+    status = getattr(response, "status_code", None)
+    if type(status) is not int or not 100 <= status < 600:
+        raise BlsInvalid("BLS_PDF_HTTP_STATUS_INVALID")
+    if 300 <= status < 400 or getattr(response, "history", None):
+        raise BlsInvalid("BLS_PDF_REDIRECT_OR_URL_INVALID")
+    final_url = getattr(response, "url", None)
+    # CollectorTransport deliberately reduces HTTP error URLs to the host.
+    # Never treat a denial from another scheme/host as a permitted outage.
+    if isinstance(final_url, str):
+        target = urlsplit(final_url)
+        expected = urlsplit(url)
+        if (target.scheme, target.netloc) != (expected.scheme, expected.netloc):
+            raise BlsInvalid("BLS_PDF_REDIRECT_OR_URL_INVALID")
+
+
+def _request_pdf(session, url, now, diagnostics, status_key):
+    """One direct GET, retaining the transport's locks and attempt accounting."""
+    host = urlsplit(url).hostname
+    if _host_blocked(session, host, now):
+        if isinstance(diagnostics, dict):
+            diagnostics[status_key] = "PROVIDER_COOLDOWN"
+        raise requests.RequestException("PROVIDER_COOLDOWN")
+    usage = getattr(session, "usage", None)
+    before = (usage.get(host, {}).get("requests_this_run", 0)
+              if isinstance(usage, dict) else None)
+    try:
+        # An explicit empty Cookie header prevents a supplied requests.Session
+        # from attaching its cookie jar. No cookies or redirect destinations
+        # are used to obtain a document after a blocked request.
+        response = session.get(url, headers={"User-Agent": USER_AGENT, "Cookie": ""},
+                               cookies={}, allow_redirects=False, timeout=20)
+    except requests.exceptions.RequestException as error:
+        if isinstance(diagnostics, dict):
+            diagnostics[status_key] = ("PROVIDER_COOLDOWN" if error.args == ("PROVIDER_COOLDOWN",)
+                                       else "TRANSPORT_ERROR")
+        error_response = getattr(error, "response", None)
+        if error_response is not None:
+            _validate_pdf_origin(error_response, url)
+        raise
+    finally:
+        after = (usage.get(host, {}).get("requests_this_run", 0)
+                 if isinstance(usage, dict) else None)
+        attempted = after > before if isinstance(before, int) and isinstance(after, int) else True
+        if attempted and isinstance(diagnostics, dict):
+            diagnostics["pdf_attempted"] = True
+            if status_key == "bls_pdf_status":
+                diagnostics["bls_pdf_attempted"] = True
+    if isinstance(diagnostics, dict):
+        status = getattr(response, "status_code", None)
+        diagnostics[status_key] = "HTTP_" + str(status) if type(status) is int else "UNKNOWN"
+    _validate_pdf_origin(response, url)
+    response.raise_for_status()
+    return response
+
+
+def _pdf_unreachable(error, session, host, diagnostics, status_key):
+    if isinstance(error, requests.exceptions.SSLError):
+        return False
+    usage = getattr(session, "usage", None)
+    cooldown = getattr(session, "cooldown", None)
+    prior_403 = (error.args == ("PROVIDER_COOLDOWN",)
+                 and isinstance(usage, dict)
+                 and usage.get(host, {}).get("outcomes_this_run", {}).get("HTTP_403", 0) >= 1
+                 and isinstance(cooldown, (set, frozenset, tuple, list)) and host in cooldown)
+    if prior_403 and isinstance(diagnostics, dict):
+        diagnostics[status_key] = "PRIOR_HTTP_403_COOLDOWN"
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)) or prior_403 or (
+                type(status) is int and (status in (403, 408, 425, 429) or 500 <= status < 600))
+
+
+def _pdf_state(response, factor, now, period, published, url):
+    """Both PDF transports must prove the same unchanged release contract."""
+    if (300 <= response.status_code < 400 or response.history
+            or response.url != url):
+        raise BlsInvalid("BLS_PDF_REDIRECT_OR_URL_INVALID")
+    if response.status_code != 200:
+        raise BlsInvalid("BLS_PDF_HTTP_STATUS_INVALID")
+    content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/pdf":
+        raise BlsInvalid("BLS_PDF_CONTENT_TYPE_INVALID")
+    state = parse_pdf_release(_pdf_text(response.content), factor, now)
+    if state["period"] != period or state["embargo_ends_at"] != published.isoformat():
+        raise BlsInvalid("BLS_PDF_RELEASE_CONFLICT")
+    pinned_next = PINNED_DUES[factor].get(_successor(period))
+    if pinned_next is not None and state["next_due_at"] != pinned_next:
+        raise BlsInvalid("BLS_PDF_SCHEDULE_CONFLICT")
+    return {**state, "release_url": url, "schedule_url": REPORTS[factor]["schedule"]}
+
+
 def _api_url(factor):
     return API_BASE + REPORTS[factor]["api_series"]
 
@@ -276,7 +389,12 @@ def _verified_previous(factor, state):
                 return None
         except BlsInvalid:
             return None
-    elif state.get("release_url") != _pdf_url(factor, published):
+    elif state.get("proof_source") == "BLS_PDF":
+        if (factor != "Arbeitsmarkt" or period not in pinned or _successor(period) not in pinned
+                or state.get("release_url") != _bls_pdf_url(factor)):
+            return None
+    elif (state.get("proof_source") not in (None, "DOL_PDF")
+          or state.get("release_url") != _pdf_url(factor, published)):
         return None
     return period, published, due
 
@@ -284,11 +402,13 @@ def _verified_previous(factor, state):
 def fetch_release_state(factor, *, session=requests, now=None, previous_state=None,
                         last_pdf_attempt=None, last_api_attempt=None, api_budget_blocked=False,
                         diagnostics=None):
-    """Confirm the current report from its DOL bulletin or bounded API v1.
+    """Confirm the report from DOL, its verified BLS PDF or bounded API v1.
 
-    A PDF attempt always comes first. Only an unreachable DOL transport may
-    use API v1 after the pinned release plus 24 hours. Persisted attempt times
-    limit completed collector runs to one API request per factor and UTC day.
+    A DOL PDF attempt always comes first. Only its genuine transport failure
+    allows one direct, verified BLS PDF transport. Content or security failures
+    never allow another source. API v1 retains the pinned release plus 24 hours.
+    Persisted attempt times limit completed collector runs to one API request
+    per factor and UTC day.
     Neither a planned date nor old FRED data proves publication.
     """
     report = REPORTS[factor]
@@ -318,42 +438,25 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
     if (last_pdf_attempt is not None and
             timedelta(0) <= now - last_pdf_attempt < timedelta(hours=1)):
         raise BlsInvalid("BLS_PDF_RECHECK_COOLDOWN")
-    usage = getattr(session, "usage", None)
-    before = (usage.get("www.dol.gov", {}).get("requests_this_run", 0)
-              if isinstance(usage, dict) else None)
-    request_error = None
     try:
-        response = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+        response = _request_pdf(session, url, now, diagnostics, "pdf_status")
     except requests.exceptions.RequestException as error:
-        request_error = error
-        if isinstance(diagnostics, dict):
-            diagnostics["pdf_status"] = "TRANSPORT_ERROR"
-    finally:
-        after = (usage.get("www.dol.gov", {}).get("requests_this_run", 0)
-                 if isinstance(usage, dict) else None)
-        attempted = after > before if isinstance(before, int) and isinstance(after, int) else True
-        if attempted and isinstance(diagnostics, dict):
-            diagnostics["pdf_attempted"] = True
-    try:
-        if request_error is not None:
-            raise request_error
-        if isinstance(diagnostics, dict):
-            status_code = getattr(response, "status_code", None)
-            diagnostics["pdf_status"] = "HTTP_" + str(status_code) if type(status_code) is int else "UNKNOWN"
-        response.raise_for_status()
-    except requests.exceptions.RequestException as error:
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        prior_dol_403 = (error.args == ("PROVIDER_COOLDOWN",)
-                         and isinstance(usage, dict)
-                         and usage.get("www.dol.gov", {}).get("outcomes_this_run", {}).get("HTTP_403", 0) >= 1
-                         and "www.dol.gov" in getattr(session, "cooldown", ()))
-        if prior_dol_403 and isinstance(diagnostics, dict):
-            diagnostics["pdf_status"] = "PRIOR_HTTP_403_COOLDOWN"
-        unreachable = (isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
-                       and not isinstance(error, requests.exceptions.SSLError)) or prior_dol_403 or (
-                           type(status) is int and (status in (403, 408, 425, 429) or 500 <= status < 600))
-        if not unreachable:
+        if not _pdf_unreachable(error, session, "www.dol.gov", diagnostics, "pdf_status"):
             raise
+        alternate_url = _bls_pdf_url(factor)
+        if alternate_url is not None:
+            try:
+                alternate = _request_pdf(session, alternate_url, now, diagnostics, "bls_pdf_status")
+            except requests.exceptions.RequestException as alternate_error:
+                if isinstance(alternate_error, requests.exceptions.SSLError):
+                    raise
+                if not (_pdf_unreachable(alternate_error, session, "www.bls.gov", diagnostics, "bls_pdf_status")
+                        or (alternate_error.args == ("PROVIDER_COOLDOWN",)
+                            and _host_blocked(session, "www.bls.gov", now))):
+                    raise
+            else:
+                state = _pdf_state(alternate, factor, now, period, published, alternate_url)
+                return {**state, "proof_source": "BLS_PDF"}
         if (period not in PINNED_DUES[factor]
                 or _successor(period) not in PINNED_DUES[factor]
                 or now >= _parse_aware(PINNED_DUES[factor][_successor(period)])):
@@ -395,12 +498,4 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
                 "first_observed_at": observed.isoformat(), "raw_value": raw_value,
                 "proof_source": "BLS_API_V1", "release_url": api_url,
                 "schedule_url": report["schedule"]}
-    if "pdf" not in response.headers.get("Content-Type", "").lower():
-        raise BlsInvalid("BLS_PDF_CONTENT_TYPE_INVALID")
-    state = parse_pdf_release(_pdf_text(response.content), factor, now)
-    if state["period"] != period or state["embargo_ends_at"] != published.isoformat():
-        raise BlsInvalid("BLS_PDF_RELEASE_CONFLICT")
-    pinned_next = PINNED_DUES[factor].get(_successor(period))
-    if pinned_next is not None and state["next_due_at"] != pinned_next:
-        raise BlsInvalid("BLS_PDF_SCHEDULE_CONFLICT")
-    return {**state, "release_url": url, "schedule_url": report["schedule"]}
+    return _pdf_state(response, factor, now, period, published, url)

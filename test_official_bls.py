@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 import os
+import calendar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -11,7 +12,8 @@ import pandas as pd
 
 import live_data
 from provider_transport import CollectorTransport
-from official_bls import (BlsInvalid, PINNED_DUES, _api_url, _pdf_url, fetch_release_state,
+from official_bls import (BlsInvalid, PINNED_DUES, USER_AGENT, _api_url, _bls_pdf_url,
+                          _pdf_url, _verified_previous, fetch_release_state,
                           parse_api_latest, parse_pdf_release, parse_schedule)
 
 NOW = datetime(2026, 9, 27, 19, tzinfo=timezone.utc)
@@ -41,21 +43,25 @@ def bulletin(factor, *, period="August 2026", embargo="September 4, 2026",
             f"{due}, at 8:30 a.m. (ET).")
 
 
-def pdf_response(status=200):
+def pdf_response(status=200, *, url=None):
     response = Mock()
     response.status_code = status
     response.headers = {"Content-Type": "application/pdf"}
     response.content = b"%PDF-1.7 fixture"
-    if status != 200:
+    response.url = url if status >= 400 else url or states()["Arbeitsmarkt"]["release_url"]
+    response.history = []
+    if status >= 400:
         response.raise_for_status.side_effect = requests.exceptions.HTTPError(response=response)
     return response
 
 
 def api_payload(factor, *, period="M08", value=None, year="2026"):
     # Synthetic values exercise equality checks, not a claim about the live index.
+    month = int(period[1:])
+    period_name = calendar.month_name[month] if 1 <= month <= 12 else "Annual"
     return {"status": "REQUEST_SUCCEEDED", "message": [], "Results": {"series": [{
         "seriesID": "LNS14000000" if factor == "Arbeitsmarkt" else "CUUR0000SA0",
-        "data": [{"year": year, "period": period, "periodName": "August",
+        "data": [{"year": year, "period": period, "periodName": period_name,
                   "latest": "true", "footnotes": [{}],
                   "value": value or ("4.1" if factor == "Arbeitsmarkt" else "321.123")}] }]}}
 
@@ -115,7 +121,7 @@ class BlsBulletinTests(unittest.TestCase):
                                                    due="October 14, 2026"))):
             with self.subTest(factor=factor):
                 client = Mock()
-                client.get.return_value = pdf_response()
+                client.get.return_value = pdf_response(url=states()[factor]["release_url"])
                 with patch("official_bls._pdf_text", return_value=text):
                     state = fetch_release_state(factor, session=client, now=NOW)
                 self.assertEqual(state["period"], "2026-08")
@@ -144,7 +150,7 @@ class BlsBulletinTests(unittest.TestCase):
                                  now=datetime.fromisoformat(due) - timedelta(seconds=1),
                                  previous_state=old)["period"], "2026-08")
                 client.get.assert_not_called()
-                client.get.return_value = pdf_response()
+                client.get.return_value = pdf_response(url=_pdf_url(factor, datetime.fromisoformat(due)))
                 text = bulletin(factor, period="September 2026", embargo=embargo,
                                 successor="October 2026", due=next_due)
                 with patch("official_bls._pdf_text", return_value=text):
@@ -167,11 +173,11 @@ class BlsBulletinTests(unittest.TestCase):
         with self.assertRaisesRegex(BlsInvalid, "BLS_PDF_RECHECK_COOLDOWN"):
             fetch_release_state("Arbeitsmarkt", session=client, now=due + timedelta(minutes=30),
                                 previous_state=states()["Arbeitsmarkt"], last_pdf_attempt=due)
-        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_count, 2)
         with self.assertRaisesRegex(BlsInvalid, "BLS_API_WAIT_24H"):
             fetch_release_state("Arbeitsmarkt", session=client, now=due + timedelta(hours=1),
                                 previous_state=states()["Arbeitsmarkt"], last_pdf_attempt=due)
-        self.assertEqual(client.get.call_count, 2)
+        self.assertEqual(client.get.call_count, 4)
 
     def test_bls_api_exact_latest_month_and_m13_rejected(self):
         for factor in ("Arbeitsmarkt", "Inflation"):
@@ -210,20 +216,22 @@ class BlsBulletinTests(unittest.TestCase):
         for factor in ("Arbeitsmarkt", "Inflation"):
             with self.subTest(factor=factor):
                 client = Mock()
-                client.get.side_effect = [pdf_response(403), api_response(factor)]
+                client.get.side_effect = ([pdf_response(403)]
+                                         + ([pdf_response(403)] if factor == "Arbeitsmarkt" else [])
+                                         + [api_response(factor)])
                 state = fetch_release_state(factor, session=client, now=NOW)
                 self.assertEqual(state["period"], "2026-08")
                 self.assertEqual(state["proof_source"], "BLS_API_V1")
                 self.assertEqual(state["first_observed_at"], NOW.isoformat())
                 self.assertEqual(state["next_due_at"], PINNED_DUES[factor]["2026-09"])
-                self.assertEqual(client.get.call_args_list[1].args[0], _api_url(factor))
+                self.assertEqual(client.get.call_args_list[-1].args[0], _api_url(factor))
 
     def test_dol_timeout_can_use_api_but_pdf_schema_error_cannot(self):
         client = Mock()
-        client.get.side_effect = [requests.exceptions.Timeout(), api_response("Arbeitsmarkt")]
+        client.get.side_effect = [requests.exceptions.Timeout(), pdf_response(403), api_response("Arbeitsmarkt")]
         state = fetch_release_state("Arbeitsmarkt", session=client, now=NOW)
         self.assertEqual(state["proof_source"], "BLS_API_V1")
-        self.assertEqual(client.get.call_count, 2)
+        self.assertEqual(client.get.call_count, 3)
 
     def test_api_daily_cap_and_unknown_schedule_fail_closed(self):
         client = Mock()
@@ -231,7 +239,7 @@ class BlsBulletinTests(unittest.TestCase):
         with self.assertRaisesRegex(BlsInvalid, "BLS_API_DAILY_LIMIT"):
             fetch_release_state("Arbeitsmarkt", session=client, now=NOW,
                                 last_api_attempt=NOW - timedelta(hours=1))
-        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_count, 2)
         client.reset_mock()
         client.get.return_value = pdf_response(403)
         with self.assertRaisesRegex(BlsInvalid, "BLS_API_ATTEMPT_STATE_INVALID"):
@@ -241,7 +249,7 @@ class BlsBulletinTests(unittest.TestCase):
         with self.assertRaisesRegex(BlsInvalid, "BLS_API_SCHEDULE_UNKNOWN"):
             fetch_release_state("Arbeitsmarkt", session=client,
                                 now=datetime(2026, 12, 5, 15, tzinfo=timezone.utc))
-        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_count, 2)
 
     def test_api_is_not_used_for_unverified_pdf_content_or_unauthorized_http(self):
         client = Mock()
@@ -263,7 +271,7 @@ class BlsBulletinTests(unittest.TestCase):
         client = Mock()
         bad = api_response("Arbeitsmarkt")
         bad.json.return_value["status"] = "REQUEST_NOT_PROCESSED"
-        client.get.side_effect = [pdf_response(403), bad]
+        client.get.side_effect = [pdf_response(403), pdf_response(403), bad]
         diagnostic = {}
         with self.assertRaisesRegex(BlsInvalid, "BLS_API_STATUS_INVALID"):
             fetch_release_state("Arbeitsmarkt", session=client, now=now,
@@ -290,7 +298,7 @@ class BlsBulletinTests(unittest.TestCase):
                  "release_url": "https://www.dol.gov/newsroom/economicdata/empsit_12042026.pdf"}
         now = datetime(2027, 1, 8, 14, tzinfo=timezone.utc)
         client = Mock()
-        client.get.return_value = pdf_response()
+        client.get.return_value = pdf_response(url="https://www.dol.gov/newsroom/economicdata/empsit_01082027.pdf")
         text = bulletin("Arbeitsmarkt", period="December 2026", embargo="January 8, 2027",
                         successor="January 2027", due="February 5, 2027")
         with patch("official_bls._pdf_text", return_value=text):
@@ -302,7 +310,7 @@ class BlsBulletinTests(unittest.TestCase):
                                 embargo="December 4, 2026", successor="December 2026",
                                 due="January 8, 2027")
         cold_client = Mock()
-        cold_client.get.return_value = pdf_response()
+        cold_client.get.return_value = pdf_response(url=prior["release_url"])
         with patch("official_bls._pdf_text", return_value=old_bulletin), \
              self.assertRaisesRegex(BlsInvalid, "BLS_PDF_RELEASE_NOT_CURRENT"):
             fetch_release_state("Arbeitsmarkt", session=cold_client,
@@ -334,6 +342,497 @@ class BlsBulletinTests(unittest.TestCase):
         labor = next(row for row in rows if row["Währung"] == "USD" and row["Faktor"] == "Arbeitsmarkt")
         self.assertEqual(labor["Veröffentlicht"],
                          state["embargo_ends_at"] + " (Embargo-Ende; Uploadzeit unbekannt)")
+
+
+class BlsPdfFallbackTests(unittest.TestCase):
+    DUE = datetime(2026, 10, 2, 12, 30, tzinfo=timezone.utc)
+    CURRENT = DUE + timedelta(hours=1)
+    URL = "https://www.bls.gov/news.release/pdf/empsit.pdf"
+    TEXT = bulletin("Arbeitsmarkt", period="September 2026", embargo="October 2, 2026",
+                    successor="October 2026", due="November 6, 2026")
+
+    def test_verified_bls_pdf_after_dol_outage_keeps_exact_release_contract(self):
+        for failure in [pdf_response(status) for status in (403, 408, 425, 429, 500, 503)] + [
+                requests.exceptions.Timeout(), requests.exceptions.ConnectionError()]:
+            with self.subTest(failure=type(failure).__name__):
+                client = Mock()
+                client.get.side_effect = [failure, pdf_response(url=self.URL)]
+                diagnostics = {}
+                with patch("official_bls._pdf_text", return_value=self.TEXT):
+                    state = fetch_release_state("Arbeitsmarkt", session=client,
+                                                now=self.CURRENT, diagnostics=diagnostics)
+                self.assertEqual(state["proof_source"], "BLS_PDF")
+                self.assertEqual(state["release_url"], self.URL)
+                self.assertEqual(state["period"], "2026-09")
+                self.assertEqual(state["embargo_ends_at"], self.DUE.isoformat())
+                self.assertEqual(state["next_due_at"], "2026-11-06T13:30:00+00:00")
+                self.assertNotIn("first_observed_at", state)
+                self.assertTrue(diagnostics["pdf_attempted"])
+                self.assertTrue(diagnostics["bls_pdf_attempted"])
+                self.assertEqual(diagnostics["bls_pdf_status"], "HTTP_200")
+                self.assertEqual([call.args[0] for call in client.get.call_args_list],
+                                 [_pdf_url("Arbeitsmarkt", self.DUE), self.URL])
+                for call in client.get.call_args_list:
+                    self.assertFalse(call.kwargs["allow_redirects"])
+                    self.assertEqual(call.kwargs["cookies"], {})
+                    self.assertEqual(call.kwargs["headers"]["Cookie"], "")
+                    self.assertEqual(call.kwargs["headers"]["User-Agent"], USER_AGENT)
+
+    def test_identified_bot_never_sends_a_supplied_session_cookie_or_follows_redirects(self):
+        session = requests.Session()
+        session.cookies.set("fixture_cookie", "fixture_value", domain=".bls.gov")
+        sent = []
+        def send(prepared, **kwargs):
+            sent.append((prepared, kwargs))
+            response = requests.Response()
+            response.url = prepared.url
+            response.status_code = 403 if prepared.url.startswith("https://www.dol.gov/") else 200
+            response.headers = {"Content-Type": "application/pdf"}
+            response._content = b"%PDF-1.7 fixture"
+            return response
+        with patch.object(session, "send", side_effect=send), \
+             patch("official_bls._pdf_text", return_value=self.TEXT):
+            fetch_release_state("Arbeitsmarkt", session=session, now=self.CURRENT)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("https://github.com/quillsy/forex-dashboard", USER_AGENT)
+        self.assertNotIn("Mozilla", USER_AGENT)
+        for prepared, options in sent:
+            self.assertEqual(prepared.headers.get("Cookie"), "")
+            self.assertEqual(prepared.headers["User-Agent"], USER_AGENT)
+            self.assertFalse(options["allow_redirects"])
+
+    def test_primary_security_and_unapproved_http_errors_never_open_another_transport(self):
+        for error in (requests.exceptions.SSLError(), pdf_response(401), pdf_response(404),
+                      requests.RequestException("PROVIDER_COOLDOWN")):
+            with self.subTest(error=type(error).__name__):
+                client = Mock()
+                client.get.side_effect = [error, pdf_response(url=self.URL)]
+                with self.assertRaises(requests.RequestException):
+                    fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT)
+                self.assertEqual(client.get.call_count, 1)
+
+    def test_primary_invalid_content_and_redirects_are_never_hidden_by_bls(self):
+        for invalid in ("type", "redirect", "url", "bytes", "contract"):
+            with self.subTest(invalid=invalid):
+                response = pdf_response(url=_pdf_url("Arbeitsmarkt", self.DUE))
+                if invalid == "type":
+                    response.headers = {"Content-Type": "text/html"}
+                elif invalid == "redirect":
+                    response.status_code = 302
+                    response.headers["Location"] = self.URL
+                elif invalid == "url":
+                    response.url = self.URL
+                client = Mock()
+                client.get.return_value = response
+                parse_error = BlsInvalid("BLS_PDF_INVALID" if invalid == "bytes" else "BLS_PDF_RELEASE_SCHEMA_INVALID")
+                with patch("official_bls._pdf_text", side_effect=parse_error), self.assertRaises(BlsInvalid):
+                    fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT)
+                self.assertEqual(client.get.call_count, 1)
+
+    def test_bls_wrong_stale_future_and_calendar_conflicting_editions_never_use_api(self):
+        for text in (
+                bulletin("Arbeitsmarkt"),
+                bulletin("Arbeitsmarkt", period="October 2026", embargo="November 6, 2026",
+                         successor="November 2026", due="December 4, 2026"),
+                bulletin("Arbeitsmarkt", period="September 2026", embargo="October 3, 2026",
+                         successor="October 2026", due="November 6, 2026"),
+                bulletin("Arbeitsmarkt", period="September 2026", embargo="October 1, 2026",
+                         successor="October 2026", due="November 6, 2026"),
+                bulletin("Arbeitsmarkt", period="September 2026", embargo="October 2, 2026",
+                         successor="October 2026", due="November 7, 2026"),
+                self.TEXT.replace("THE EMPLOYMENT SITUATION", "CONSUMER PRICE INDEX"),
+                self.TEXT + self.TEXT):
+            with self.subTest(text=text[:75]):
+                client = Mock()
+                client.get.side_effect = [pdf_response(403), pdf_response(url=self.URL)]
+                with patch("official_bls._pdf_text", return_value=text), self.assertRaises(BlsInvalid):
+                    fetch_release_state("Arbeitsmarkt", session=client,
+                                        now=self.DUE + timedelta(days=1))
+                self.assertEqual(client.get.call_count, 2)
+
+    def test_bls_redirect_or_unapproved_final_url_never_followed_or_used_as_proof(self):
+        for status, target, history in (
+                (301, self.URL, []), (302, self.URL, []), (307, self.URL, []), (308, self.URL, []),
+                (200, "https://example.invalid/empsit.pdf", []),
+                (200, "https://data.bls.gov/empsit.pdf", []),
+                (200, self.URL + "?edition=202609", []),
+                (200, self.URL, [Mock(status_code=302)])):
+            with self.subTest(status=status, target=target):
+                alternate = pdf_response(status, url=target)
+                alternate.history = history
+                alternate.headers["Location"] = "https://example.invalid/target.pdf"
+                client = Mock()
+                client.get.side_effect = [pdf_response(403), alternate]
+                with self.assertRaisesRegex(BlsInvalid, "BLS_PDF_REDIRECT_OR_URL_INVALID"):
+                    fetch_release_state("Arbeitsmarkt", session=client,
+                                        now=self.DUE + timedelta(days=1))
+                self.assertEqual(client.get.call_count, 2)
+                self.assertEqual(client.get.call_args.args[0], self.URL)
+                self.assertFalse(client.get.call_args.kwargs["allow_redirects"])
+
+    def test_bls_content_type_bytes_and_tls_fail_closed_without_api(self):
+        for invalid in ("type", "bytes", "tls"):
+            with self.subTest(invalid=invalid):
+                alternate = pdf_response(url=self.URL)
+                if invalid == "type":
+                    alternate.headers = {"Content-Type": "text/html; application/pdf"}
+                elif invalid == "bytes":
+                    alternate.content = b"<html>not a bulletin</html>"
+                else:
+                    alternate = requests.exceptions.SSLError()
+                client = Mock()
+                client.get.side_effect = [pdf_response(403), alternate]
+                with self.assertRaises((BlsInvalid, requests.RequestException)):
+                    fetch_release_state("Arbeitsmarkt", session=client,
+                                        now=self.DUE + timedelta(days=1))
+                self.assertEqual(client.get.call_count, 2)
+
+    def test_error_response_from_redirect_or_another_target_does_not_open_more_sources(self):
+        for origin in ("dol", "bls"):
+            for invalid in ("redirect", "target"):
+                with self.subTest(origin=origin, invalid=invalid):
+                    denied = pdf_response(403, url=(self.URL if origin == "bls"
+                                                   else _pdf_url("Arbeitsmarkt", self.DUE)))
+                    if invalid == "redirect":
+                        denied.history = [Mock(status_code=302)]
+                    else:
+                        denied.url = "https://example.invalid/denied.pdf"
+                    client = Mock()
+                    client.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [denied]
+                    with self.assertRaisesRegex(BlsInvalid, "BLS_PDF_REDIRECT_OR_URL_INVALID"):
+                        fetch_release_state("Arbeitsmarkt", session=client,
+                                            now=self.DUE + timedelta(days=1))
+                    self.assertEqual(client.get.call_count, 2 if origin == "bls" else 1)
+
+    def test_tls_with_attached_http_denial_never_opens_another_source(self):
+        for origin in ("dol", "bls"):
+            for status in (403, 429, 503):
+                with self.subTest(origin=origin, status=status):
+                    denied = pdf_response(status, url=(self.URL if origin == "bls"
+                                                       else _pdf_url("Arbeitsmarkt", self.DUE)))
+                    error = requests.exceptions.SSLError("TLS_FAILURE", response=denied)
+                    client = Mock()
+                    client.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                        error, api_response("Arbeitsmarkt", period="M09") if origin == "bls"
+                        else pdf_response(url=self.URL)]
+                    diagnostics = {}
+                    with patch("official_bls._pdf_text", return_value=self.TEXT), \
+                         self.assertRaises(requests.exceptions.SSLError):
+                        fetch_release_state("Arbeitsmarkt", session=client,
+                                            now=self.DUE + timedelta(days=1), diagnostics=diagnostics)
+                    self.assertEqual(client.get.call_count, 2 if origin == "bls" else 1)
+                    self.assertTrue(diagnostics["pdf_attempted"])
+                    self.assertEqual(diagnostics.get("bls_pdf_attempted", False), origin == "bls")
+                    self.assertNotIn("api_attempted", diagnostics)
+
+    def test_raised_http_denial_with_unsafe_metadata_never_opens_another_source(self):
+        for origin in ("dol", "bls"):
+            for invalid in ("redirect_history", "redirect_status", "scheme", "host", "credentials"):
+                with self.subTest(origin=origin, invalid=invalid):
+                    url = self.URL if origin == "bls" else _pdf_url("Arbeitsmarkt", self.DUE)
+                    denied = pdf_response(403, url=url)
+                    if invalid == "redirect_history":
+                        denied.history = [Mock(status_code=302)]
+                    elif invalid == "redirect_status":
+                        denied.status_code = 302
+                    elif invalid == "scheme":
+                        denied.url = url.replace("https:", "http:")
+                    elif invalid == "host":
+                        denied.url = "https://example.invalid/denied.pdf"
+                    else:
+                        denied.url = url.replace("https://", "https://user:private@")
+                    error = requests.exceptions.HTTPError(response=denied)
+                    client = Mock()
+                    client.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                        error, api_response("Arbeitsmarkt", period="M09") if origin == "bls"
+                        else pdf_response(url=self.URL)]
+                    diagnostics = {}
+                    with patch("official_bls._pdf_text", return_value=self.TEXT), \
+                         self.assertRaisesRegex(BlsInvalid, "BLS_PDF_REDIRECT_OR_URL_INVALID"):
+                        fetch_release_state("Arbeitsmarkt", session=client,
+                                            now=self.DUE + timedelta(days=1), diagnostics=diagnostics)
+                    self.assertEqual(client.get.call_count, 2 if origin == "bls" else 1)
+                    self.assertTrue(diagnostics["pdf_attempted"])
+                    self.assertNotIn("api_attempted", diagnostics)
+
+    def test_raised_denial_with_invalid_http_status_is_not_a_transport_outage(self):
+        for origin in ("dol", "bls"):
+            for status in (None, "403", True):
+                with self.subTest(origin=origin, status=status):
+                    denied = pdf_response(403, url=(self.URL if origin == "bls"
+                                                   else _pdf_url("Arbeitsmarkt", self.DUE)))
+                    denied.status_code = status
+                    client = Mock()
+                    client.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                        requests.exceptions.HTTPError(response=denied), pdf_response(url=self.URL)]
+                    with self.assertRaisesRegex(BlsInvalid, "BLS_PDF_HTTP_STATUS_INVALID"):
+                        fetch_release_state("Arbeitsmarkt", session=client,
+                                            now=self.DUE + timedelta(days=1))
+                    self.assertEqual(client.get.call_count, 2 if origin == "bls" else 1)
+
+    def test_safe_raised_http_denial_preserves_bounded_fallback_and_attempts(self):
+        for origin in ("dol", "bls"):
+            with self.subTest(origin=origin):
+                denied = pdf_response(403, url=(self.URL if origin == "bls"
+                                               else _pdf_url("Arbeitsmarkt", self.DUE)))
+                client = Mock()
+                client.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                    requests.exceptions.HTTPError(response=denied),
+                    api_response("Arbeitsmarkt", period="M09") if origin == "bls"
+                    else pdf_response(url=self.URL)]
+                diagnostics = {}
+                with patch("official_bls._pdf_text", return_value=self.TEXT):
+                    state = fetch_release_state("Arbeitsmarkt", session=client,
+                                                now=self.DUE + timedelta(days=1), diagnostics=diagnostics)
+                self.assertEqual(state["proof_source"], "BLS_API_V1" if origin == "bls" else "BLS_PDF")
+                self.assertEqual(client.get.call_count, 3 if origin == "bls" else 2)
+                self.assertTrue(diagnostics["pdf_attempted"])
+                self.assertTrue(diagnostics["bls_pdf_attempted"])
+                self.assertEqual(diagnostics.get("api_attempted", False), origin == "bls")
+
+    def test_collector_tls_failure_keeps_attempt_accounting_and_never_falls_back(self):
+        for origin in ("dol", "bls"):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as directory:
+                host = "www.bls.gov" if origin == "bls" else "www.dol.gov"
+                denied = pdf_response(403, url=(self.URL if origin == "bls"
+                                               else _pdf_url("Arbeitsmarkt", self.DUE)))
+                underlying = Mock()
+                underlying.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                    requests.exceptions.SSLError("TLS_FAILURE", response=denied)]
+                transport = CollectorTransport(client=underlying, clock=lambda: self.CURRENT,
+                                               status_path=Path(directory) / "status.json")
+                diagnostics = {}
+                with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), self.assertRaises(requests.RequestException):
+                    fetch_release_state("Arbeitsmarkt", session=transport,
+                                        now=self.CURRENT, diagnostics=diagnostics)
+                self.assertEqual(underlying.get.call_count, 2 if origin == "bls" else 1)
+                self.assertEqual(transport.usage[host]["requests_this_run"], 1)
+                self.assertEqual(transport.usage[host]["outcomes_this_run"]["TLS_ERROR"], 1)
+                self.assertTrue(diagnostics["pdf_attempted"])
+                self.assertEqual(diagnostics.get("bls_pdf_attempted", False), origin == "bls")
+                self.assertNotIn("api_attempted", diagnostics)
+
+    def test_tls_failure_cannot_masquerade_as_a_confirmed_provider_cooldown(self):
+        for origin in ("dol", "bls"):
+            with self.subTest(origin=origin):
+                host = "www.bls.gov" if origin == "bls" else "www.dol.gov"
+                denied = pdf_response(403, url=(self.URL if origin == "bls"
+                                               else _pdf_url("Arbeitsmarkt", self.DUE)))
+                client = Mock(cooldown=set(), usage={})
+                def response(url, **kwargs):
+                    target = "www.bls.gov" if url == self.URL else "www.dol.gov"
+                    client.usage[target] = {"requests_this_run": 1,
+                                            "outcomes_this_run": {"HTTP_403": 1}}
+                    if target == host:
+                        client.cooldown.add(host)
+                        raise requests.exceptions.SSLError("PROVIDER_COOLDOWN", response=denied)
+                    return pdf_response(403, url=url)
+                client.get.side_effect = response
+                with self.assertRaises(requests.exceptions.SSLError):
+                    fetch_release_state("Arbeitsmarkt", session=client,
+                                        now=self.DUE + timedelta(days=1))
+                self.assertEqual(client.get.call_count, 2 if origin == "bls" else 1)
+
+    def test_collector_transient_failures_preserve_bounded_fallback_and_attempts(self):
+        for origin in ("dol", "bls"):
+            for transient in (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                with self.subTest(origin=origin, transient=transient.__name__), \
+                     tempfile.TemporaryDirectory() as directory:
+                    at = self.DUE + timedelta(days=1)
+                    underlying = Mock()
+                    underlying.get.side_effect = ([pdf_response(403)] if origin == "bls" else []) + [
+                        transient(), api_response("Arbeitsmarkt", period="M09") if origin == "bls"
+                        else pdf_response(url=self.URL)]
+                    transport = CollectorTransport(client=underlying, clock=lambda: at,
+                                                   status_path=Path(directory) / "status.json")
+                    diagnostics = {}
+                    with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), \
+                         patch("official_bls._pdf_text", return_value=self.TEXT):
+                        state = fetch_release_state("Arbeitsmarkt", session=transport,
+                                                    now=at, diagnostics=diagnostics)
+                    self.assertEqual(state["proof_source"], "BLS_API_V1" if origin == "bls" else "BLS_PDF")
+                    self.assertEqual(underlying.get.call_count, 3 if origin == "bls" else 2)
+                    self.assertEqual(transport.usage["www.dol.gov"]["requests_this_run"], 1)
+                    self.assertEqual(transport.usage["www.bls.gov"]["requests_this_run"], 1)
+                    self.assertTrue(diagnostics["pdf_attempted"])
+                    self.assertTrue(diagnostics["bls_pdf_attempted"])
+                    self.assertEqual(diagnostics.get("api_attempted", False), origin == "bls")
+
+    def test_two_pdf_denials_keep_exact_api_24h_daily_and_budget_boundaries(self):
+        for status in (403, 429):
+            for elapsed, expected in ((timedelta(hours=24, microseconds=-1), "BLS_API_WAIT_24H"),
+                                      (timedelta(hours=24), None)):
+                with self.subTest(status=status, elapsed=elapsed):
+                    client = Mock()
+                    client.get.side_effect = [pdf_response(status), pdf_response(status),
+                                             api_response("Arbeitsmarkt", period="M09", value="4.2")]
+                    at = self.DUE + elapsed
+                    if expected:
+                        with self.assertRaisesRegex(BlsInvalid, expected):
+                            fetch_release_state("Arbeitsmarkt", session=client, now=at)
+                        self.assertEqual(client.get.call_count, 2)
+                    else:
+                        state = fetch_release_state("Arbeitsmarkt", session=client, now=at)
+                        self.assertEqual(state["proof_source"], "BLS_API_V1")
+                        self.assertEqual(state["first_observed_at"], at.isoformat())
+                        self.assertEqual(client.get.call_count, 3)
+                        self.assertEqual(client.get.call_args.args[0], _api_url("Arbeitsmarkt"))
+        for options, expected in (({"last_api_attempt": self.DUE + timedelta(days=1)}, "BLS_API_DAILY_LIMIT"),
+                                  ({"api_budget_blocked": True}, "BLS_API_ATTEMPT_STATE_INVALID")):
+            client = Mock(get=Mock(return_value=pdf_response(403)))
+            with self.assertRaisesRegex(BlsInvalid, expected):
+                fetch_release_state("Arbeitsmarkt", session=client,
+                                    now=self.DUE + timedelta(days=1, hours=1), **options)
+            self.assertEqual(client.get.call_count, 2)
+
+    def test_outer_hourly_pdf_cooldown_covers_the_alternate_attempt(self):
+        client = Mock(get=Mock(return_value=pdf_response(403)))
+        diagnostics = {}
+        with self.assertRaisesRegex(BlsInvalid, "BLS_PDF_RECHECK_COOLDOWN"):
+            fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT,
+                                last_pdf_attempt=self.CURRENT - timedelta(hours=1, microseconds=-1),
+                                diagnostics=diagnostics)
+        client.get.assert_not_called()
+        self.assertNotIn("pdf_attempted", diagnostics)
+        with self.assertRaisesRegex(BlsInvalid, "BLS_API_WAIT_24H"):
+            fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT,
+                                last_pdf_attempt=self.CURRENT - timedelta(hours=1))
+        self.assertEqual(client.get.call_count, 2)
+
+    def test_verified_alternate_cache_has_no_redundant_get_and_expires_at_next_release(self):
+        previous = {"period": "2026-09", "embargo_ends_at": self.DUE.isoformat(),
+                    "next_due_at": "2026-11-06T13:30:00+00:00", "release_url": self.URL,
+                    "proof_source": "BLS_PDF"}
+        client = Mock()
+        self.assertEqual(fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT,
+                                            previous_state=previous), previous)
+        client.get.assert_not_called()
+        next_due = datetime.fromisoformat(previous["next_due_at"])
+        client.get.return_value = pdf_response(url=_pdf_url("Arbeitsmarkt", next_due))
+        current = bulletin("Arbeitsmarkt", period="October 2026", embargo="November 6, 2026",
+                           successor="November 2026", due="December 4, 2026")
+        with patch("official_bls._pdf_text", return_value=current):
+            state = fetch_release_state("Arbeitsmarkt", session=client, now=next_due,
+                                        previous_state=previous)
+        self.assertEqual(state["period"], "2026-10")
+        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_args.args[0], _pdf_url("Arbeitsmarkt", next_due))
+
+    def test_unknown_factor_url_or_proof_does_not_enable_a_source(self):
+        previous = {**states()["Arbeitsmarkt"], "release_url": self.URL, "proof_source": "BLS_PDF"}
+        self.assertIsNotNone(_verified_previous("Arbeitsmarkt", previous))
+        for changes in ({"release_url": self.URL + "?v=1"}, {"release_url": _api_url("Arbeitsmarkt")},
+                        {"proof_source": "NEW_PDF"}, {"proof_source": None}):
+            self.assertIsNone(_verified_previous("Arbeitsmarkt", {**previous, **changes}))
+        self.assertIsNone(_verified_previous("Inflation", {**states()["Inflation"],
+                                                          "release_url": self.URL, "proof_source": "BLS_PDF"}))
+        self.assertIsNone(_bls_pdf_url("Inflation"))
+        self.assertIsNone(_bls_pdf_url("GDP"))
+
+    def test_bls_cached_proof_requires_both_pinned_release_dates(self):
+        for previous in (
+                {"period": "2026-05", "embargo_ends_at": "2026-06-05T12:30:00+00:00",
+                 "next_due_at": "2099-01-01T00:00:00+00:00"},
+                {"period": "2026-11", "embargo_ends_at": "2026-12-04T13:30:00+00:00",
+                 "next_due_at": "2099-01-01T00:00:00+00:00"},
+                {"period": "2030-01", "embargo_ends_at": "2030-02-01T13:30:00+00:00",
+                 "next_due_at": "2030-03-01T13:30:00+00:00"}):
+            with self.subTest(period=previous["period"]):
+                self.assertIsNone(_verified_previous("Arbeitsmarkt", {
+                    **previous, "release_url": self.URL, "proof_source": "BLS_PDF"}))
+
+    def test_unknown_bls_cache_cannot_suppress_primary_reconfirmation(self):
+        previous = {"period": "2026-05", "embargo_ends_at": "2026-06-05T12:30:00+00:00",
+                    "next_due_at": "2099-01-01T00:00:00+00:00", "release_url": self.URL,
+                    "proof_source": "BLS_PDF"}
+        client = Mock(get=Mock(return_value=pdf_response(url=_pdf_url("Arbeitsmarkt", self.DUE))))
+        with patch("official_bls._pdf_text", return_value=self.TEXT):
+            state = fetch_release_state("Arbeitsmarkt", session=client, now=self.CURRENT,
+                                        previous_state=previous)
+        self.assertEqual(state["period"], "2026-09")
+        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_args.args[0], _pdf_url("Arbeitsmarkt", self.DUE))
+
+    def test_collector_host_cooldown_and_retry_after_skip_bls_without_resetting_limits(self):
+        for blocked_by in ("cooldown", "retry_after"):
+            with self.subTest(blocked_by=blocked_by), tempfile.TemporaryDirectory() as directory:
+                at = self.DUE + timedelta(days=1)
+                underlying = Mock()
+                underlying.get.side_effect = [pdf_response(403),
+                                              api_response("Arbeitsmarkt", period="M09", value="4.2")]
+                transport = CollectorTransport(client=underlying, clock=lambda: at,
+                                               status_path=Path(directory) / "status.json")
+                if blocked_by == "cooldown":
+                    transport.cooldown.add("www.bls.gov")
+                else:
+                    transport.retry_after["www.bls.gov"] = at + timedelta(hours=2)
+                diagnostics = {}
+                with patch.dict(os.environ, {"FX_COLLECTOR": "1"}):
+                    state = fetch_release_state("Arbeitsmarkt", session=transport,
+                                                now=at, diagnostics=diagnostics)
+                self.assertEqual(state["proof_source"], "BLS_API_V1")
+                self.assertEqual(diagnostics["bls_pdf_status"], "PROVIDER_COOLDOWN")
+                self.assertNotIn("bls_pdf_attempted", diagnostics)
+                self.assertEqual([call.args[0] for call in underlying.get.call_args_list],
+                                 [_pdf_url("Arbeitsmarkt", self.DUE), _api_url("Arbeitsmarkt")])
+                self.assertIn("www.dol.gov", transport.cooldown)
+                if blocked_by == "cooldown":
+                    self.assertIn("www.bls.gov", transport.cooldown)
+                else:
+                    self.assertEqual(transport.retry_after["www.bls.gov"], at + timedelta(hours=2))
+
+    def test_dol_retry_after_without_a_confirmed_outage_never_opens_another_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            underlying = Mock()
+            transport = CollectorTransport(client=underlying, clock=lambda: self.CURRENT,
+                                           status_path=Path(directory) / "status.json")
+            transport.retry_after["www.dol.gov"] = self.CURRENT + timedelta(hours=1)
+            diagnostics = {}
+            with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), self.assertRaises(requests.RequestException):
+                fetch_release_state("Arbeitsmarkt", session=transport,
+                                    now=self.CURRENT, diagnostics=diagnostics)
+            underlying.get.assert_not_called()
+            self.assertNotIn("pdf_attempted", diagnostics)
+
+    def test_collector_deduplicates_both_pdf_transports_without_repeating_403(self):
+        with tempfile.TemporaryDirectory() as directory:
+            underlying = Mock()
+            underlying.get.side_effect = lambda url, **kwargs: pdf_response(
+                403 if url.startswith("https://www.dol.gov/") else 200, url=url)
+            transport = CollectorTransport(client=underlying, clock=lambda: self.CURRENT,
+                                           status_path=Path(directory) / "status.json")
+            with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), \
+                 patch("official_bls._pdf_text", return_value=self.TEXT):
+                first = fetch_release_state("Arbeitsmarkt", session=transport, now=self.CURRENT)
+                diagnostics = {}
+                second = fetch_release_state("Arbeitsmarkt", session=transport,
+                                             now=self.CURRENT, diagnostics=diagnostics)
+            self.assertEqual(first, second)
+            self.assertEqual(underlying.get.call_count, 2)
+            self.assertEqual(transport.usage["www.dol.gov"]["requests_this_run"], 1)
+            self.assertEqual(transport.usage["www.bls.gov"]["requests_this_run"], 1)
+            self.assertNotIn("pdf_attempted", diagnostics)
+
+    def test_collector_bls_429_retry_after_is_not_retried_even_after_pdf_hour_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = [self.CURRENT]
+            underlying = Mock()
+            retry = pdf_response(429, url=self.URL)
+            retry.headers["Retry-After"] = "7200"
+            underlying.get.side_effect = [pdf_response(403), retry]
+            transport = CollectorTransport(client=underlying, clock=lambda: current[0],
+                                           status_path=Path(directory) / "status.json")
+            with patch.dict(os.environ, {"FX_COLLECTOR": "1"}):
+                with self.assertRaisesRegex(BlsInvalid, "BLS_API_WAIT_24H"):
+                    fetch_release_state("Arbeitsmarkt", session=transport, now=current[0])
+                current[0] += timedelta(hours=1)
+                diagnostics = {}
+                with self.assertRaisesRegex(BlsInvalid, "BLS_API_WAIT_24H"):
+                    fetch_release_state("Arbeitsmarkt", session=transport, now=current[0],
+                                        last_pdf_attempt=self.CURRENT, diagnostics=diagnostics)
+            self.assertEqual(underlying.get.call_count, 2)
+            self.assertNotIn("bls_pdf_attempted", diagnostics)
+            self.assertEqual(transport.retry_after["www.bls.gov"], self.CURRENT + timedelta(hours=2))
 
 
 class BlsCollectorTests(unittest.TestCase):
@@ -537,6 +1036,8 @@ class BlsCollectorTests(unittest.TestCase):
         def response(url, **kwargs):
             if url.startswith("https://www.dol.gov/"):
                 return pdf_response(403)
+            if url == _bls_pdf_url("Arbeitsmarkt"):
+                return pdf_response(403, url=url)
             if url == _api_url("Arbeitsmarkt"):
                 return api_response("Arbeitsmarkt")
             if url == _api_url("Inflation"):
