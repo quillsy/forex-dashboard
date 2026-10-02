@@ -410,6 +410,23 @@ def _statcan_object(payload):
     return item
 
 
+def _statcan_publication_time(raw):
+    """Convert a WDS Toronto wall time only when it has one real UTC instant."""
+    from zoneinfo import ZoneInfo
+    if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
+        raise ValueError('Invalid StatCan release time')
+    local = datetime.strptime(raw, '%Y-%m-%dT%H:%M')
+    zone = ZoneInfo('America/Toronto')
+    instants = set()
+    for fold in (0, 1):
+        candidate = local.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+        if candidate.astimezone(zone).replace(tzinfo=None) == local:
+            instants.add(candidate)
+    if len(instants) != 1:
+        raise ValueError('Invalid or ambiguous StatCan release time')
+    return next(iter(instants))
+
+
 STATCAN_CPI_COORD = '2.2.0.0.0.0.0.0.0.0'
 STATCAN_CPI_TITLE = 'Canada;All-items'
 
@@ -422,7 +439,6 @@ def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None
     not qualify. releaseTime is the current publication/revision, not a PIT
     vintage guarantee. No scaling or annual-rate transformation is added.
     """
-    from zoneinfo import ZoneInfo
     checked = _utc_now(now)
     series, data, cube = map(_statcan_object, (series_payload, data_payload, cube_payload))
     for item in (series, data):
@@ -456,20 +472,10 @@ def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None
             raise ValueError('STATCAN_CPI_MEMBER_INVALID')
 
     def publication(raw):
-        if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
-            raise ValueError('STATCAN_CPI_RELEASE_INVALID')
-        local = datetime.strptime(raw, '%Y-%m-%dT%H:%M')
-        zone = ZoneInfo('America/Toronto')
-        # Attaching ZoneInfo alone accepts missing/repeated DST wall times.
-        # Require one unambiguous UTC instant, just like the existing loader.
-        instants = set()
-        for fold in (0, 1):
-            candidate = local.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
-            if candidate.astimezone(zone).replace(tzinfo=None) == local:
-                instants.add(candidate)
-        if len(instants) != 1:
-            raise ValueError('STATCAN_CPI_RELEASE_INVALID')
-        published = next(iter(instants))
+        try:
+            published = _statcan_publication_time(raw)
+        except ValueError:
+            raise ValueError('STATCAN_CPI_RELEASE_INVALID') from None
         if published > checked:
             raise ValueError('STATCAN_CPI_FUTURE_RELEASE')
         return published
@@ -555,9 +561,7 @@ def parse_statcan_labour(series_payload, data_payload, cube_payload, *, now=None
             raise ValueError('Wrong StatCan unemployment unit')
 
     def publication(raw):
-        if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
-            raise ValueError('Invalid StatCan release time')
-        value = datetime.strptime(raw, '%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        value = _statcan_publication_time(raw)
         if value > checked:
             raise ValueError('Future StatCan publication')
         return value
@@ -892,9 +896,7 @@ def parse_statcan_gdp(series_payload, data_payload, cube_payload, *, now=None):
             raise ValueError('Wrong StatCan GDP unit')
 
     def publication(raw):
-        if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
-            raise ValueError('Invalid StatCan release time')
-        value = datetime.strptime(raw, '%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        value = _statcan_publication_time(raw)
         if value > checked:
             raise ValueError('Future StatCan publication')
         return value

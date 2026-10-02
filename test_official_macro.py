@@ -798,3 +798,67 @@ class StatCanGDPTests(unittest.TestCase):
         self.assertTrue(result['needs_hourly_check'])
         with self.assertRaisesRegex(ValueError, 'Scheduled StatCan GDP'):
             parse_statcan_gdp(*statcan_gdp_fixture(), now=datetime(2026,11,30,5,tzinfo=timezone.utc))
+
+
+class StatCanReleaseTimeTests(unittest.TestCase):
+    cases = (('Arbeitsmarkt', statcan_fixture, parse_statcan_labour, fetch_statcan_labour),
+             ('GDP', statcan_gdp_fixture, parse_statcan_gdp, fetch_statcan_gdp))
+    clock = datetime(2026, 11, 1, 6, tzinfo=timezone.utc)
+
+    @staticmethod
+    def release_payload(factor, fixture, wall_time):
+        payloads = fixture()
+        if factor == 'Arbeitsmarkt':
+            payloads[1][0]['object']['vectorDataPoint'][0]['refPer'] = '2026-09-01'
+            payloads[2][0]['object']['cubeEndDate'] = '2026-09-01'
+        payloads[2][0]['object']['releaseTime'] = wall_time
+        for point in payloads[1][0]['object']['vectorDataPoint']:
+            point['releaseTime'] = wall_time
+        return payloads
+
+    def test_ambiguous_latest_release_cannot_qualify_before_second_instant(self):
+        # Toronto 01:30 occurs at both 05:30Z and 06:30Z on this date.
+        for factor, fixture, parser, _ in self.cases:
+            payloads = self.release_payload(factor, fixture, '2026-11-01T01:30')
+            with self.subTest(factor=factor), self.assertRaisesRegex(ValueError, 'ambiguous.*release time'):
+                parser(*payloads, now=self.clock)
+
+    def test_nonexistent_historical_release_is_rejected(self):
+        for factor, fixture, parser, _ in self.cases:
+            payloads = fixture()
+            point = payloads[1][0]['object']['vectorDataPoint'][-1 if factor == 'Arbeitsmarkt' else 0]
+            if factor == 'Arbeitsmarkt':
+                point['refPer'] = '2026-02-01'
+            point['releaseTime'] = '2026-03-08T02:30'
+            with self.subTest(factor=factor), self.assertRaisesRegex(ValueError, 'release time'):
+                parser(*payloads, now=NOW)
+
+    def test_valid_dst_neighbors_and_future_deadline_are_preserved(self):
+        for factor, fixture, parser, _ in self.cases:
+            payloads = self.release_payload(factor, fixture, '2026-11-01T00:30')
+            with self.subTest(factor=factor):
+                result = parser(*payloads, now=self.clock)
+                self.assertEqual(result['published_at'], '2026-11-01T04:30:00+00:00')
+                payloads = self.release_payload(factor, fixture, '2026-11-01T02:30')
+                with self.assertRaisesRegex(ValueError, 'Future StatCan publication'):
+                    parser(*payloads, now=self.clock)
+                later = parser(*payloads, now=datetime(2026,11,1,8,tzinfo=timezone.utc))
+                self.assertEqual(later['published_at'], '2026-11-01T07:30:00+00:00')
+                self.assertEqual(later['value'], result['value'])
+
+    def test_fetch_rejects_bad_time_and_invalid_record_revokes_previous_value(self):
+        import live_data
+        for factor, fixture, parser, fetch in self.cases:
+            good = self.release_payload(factor, fixture, '2026-11-01T00:30')
+            observation = parser(*good, now=self.clock)
+            prior = live_data.build_record(factor,25,observation,'FRESH',self.clock.isoformat())
+            self.assertTrue(live_data.eligible(prior,self.clock,factor=factor,currency='CAD')[0])
+            bad = self.release_payload(factor, fixture, '2026-11-01T01:30')
+            session = Mock()
+            session.post.side_effect = [Mock(json=Mock(return_value=p)) for p in bad]
+            with self.subTest(factor=factor), self.assertRaisesRegex(ValueError, 'release time'):
+                fetch(now=self.clock,session=session)
+            self.assertEqual(session.post.call_count,3)
+            record = live_data.build_record(factor,None,{},'UNAVAILABLE',self.clock.isoformat(),
+                                           prior,'UNVERIFIED','Invalid StatCan publication')
+            self.assertFalse(live_data.eligible(record,self.clock,factor=factor,currency='CAD')[0])
