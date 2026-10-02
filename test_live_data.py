@@ -222,6 +222,18 @@ class LiveDataTests(unittest.TestCase):
     def record(self):
         return live.build_record('GDP', 20, {'value': 1.8, 'date': '2026-06-30', 'source': 'Eurostat', 'frequency': 'quarterly'}, 'FRESH', NOW.isoformat())
 
+    def usd_labour_fixture(self):
+        from test_official_bls import states
+        release = states()['Arbeitsmarkt']
+        row = live.build_record('Arbeitsmarkt', 20, {
+            'value': 4.1, 'date': '2026-08-01', 'source': 'FRED', 'series_id': 'UNRATE',
+            'frequency': 'monthly', 'unit': 'percent of labour force', 'seasonal_adjustment': 'SA',
+            'published_at': release['embargo_ends_at'], 'next_due_at': release['next_due_at'],
+            'bls_release_period': release['period'], 'bls_release_url': release['release_url'],
+            'bls_embargo_ends_at': release['embargo_ends_at'], 'needs_hourly_check': True,
+        }, 'FRESH', NOW.isoformat())
+        return row, release
+
     def test_known_release_blocks_successful_but_older_mirror_observation(self):
         release = datetime(2026, 9, 2, 1, 30, tzinfo=timezone.utc)
         old = live.build_record('GDP', 20, {'value': 2.5, 'date': '2026-03-31',
@@ -680,12 +692,10 @@ class LiveDataTests(unittest.TestCase):
             data['completed_at'] = timestamp
             self.assertFalse(live.details('EUR', NOW, data)['_live_checked'])
 
-    def test_collector_metadata_outage_cannot_hide_new_raw_score(self):
-        previous = self.record()
-        previous['factor'] = 'Arbeitsmarkt'
-        previous['observation']['series_id'] = 'TEST_GDP'
-        previous['observation']['needs_hourly_check'] = True
-        previous['next_due_at'] = (NOW + timedelta(days=1)).isoformat()
+    @patch('official_bls.fetch_release_state')
+    def test_collector_metadata_outage_cannot_hide_new_raw_score(self, bls):
+        previous, release = self.usd_labour_fixture()
+        bls.return_value = release
         app = Mock()
         app.FRED_KEY = 'test-only'
         app.compute_currency_details.return_value = {
@@ -700,7 +710,10 @@ class LiveDataTests(unittest.TestCase):
                 app.requests.get.return_value = Mock()
                 if outage == "invalid_json":
                     app.requests.get.return_value.json.side_effect = requests.exceptions.JSONDecodeError("bad", "invalid", 0)
-                with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), patch('source_contracts.validate_fred_metadata', return_value=False):
+                with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), \
+                     patch.object(live, 'CURRENCIES', ('USD',)), \
+                     patch.object(live, 'FACTORS', {'Arbeitsmarkt': 20}), \
+                     patch('source_contracts.validate_fred_metadata', return_value=False):
                     live.collect(app, path)
                 result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
                 self.assertEqual(result['validation'], 'UNVERIFIED')
@@ -717,16 +730,18 @@ class LiveDataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'live.json'
             live.save({'model_version': live.MODEL, 'currencies': {'USD': {'Arbeitsmarkt': previous}}}, path)
-            with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)):
+            with patch.object(live, 'now_utc', return_value=NOW + timedelta(minutes=30)), \
+                 patch.object(live, 'CURRENCIES', ('USD',)), \
+                 patch.object(live, 'FACTORS', {'Arbeitsmarkt': 20}):
                 live.collect(app, path)
             result = live.load(path)['currencies']['USD']['Arbeitsmarkt']
             self.assertEqual(result['validation'], 'UNVERIFIED')
             self.assertIsNone(result['score'])
 
-    def test_fred_missing_key_or_permanent_http_error_cannot_retain_old_score(self):
-        previous = self.record()
-        previous['factor'] = 'Arbeitsmarkt'
-        previous['observation']['series_id'] = 'TEST_LABOUR'
+    @patch('official_bls.fetch_release_state')
+    def test_fred_missing_key_or_permanent_http_error_cannot_retain_old_score(self, bls):
+        previous, release = self.usd_labour_fixture()
+        bls.return_value = release
         app = Mock()
         app.compute_currency_details.return_value = {
             'Arbeitsmarkt': 99,

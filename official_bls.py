@@ -225,7 +225,17 @@ def _validate_pdf_origin(response, url):
             raise BlsInvalid("BLS_PDF_REDIRECT_OR_URL_INVALID")
 
 
-def _request_pdf(session, url, now, diagnostics, status_key):
+def _attempt_callbacks(session, recorder, kind):
+    from provider_transport import CollectorTransport
+    if recorder is None or not isinstance(session, CollectorTransport) or not session.durable:
+        return {}
+    # The transport invokes these only after its guards and deduplication.
+    # A BaseException/kill during I/O leaves the reservation open.
+    return {"before_request": lambda at: recorder(kind, True, at),
+            "after_request": lambda at: recorder(kind, False, at)}
+
+
+def _request_pdf(session, url, now, diagnostics, status_key, attempt_recorder=None):
     """One direct GET, retaining the transport's locks and attempt accounting."""
     host = urlsplit(url).hostname
     if _host_blocked(session, host, now):
@@ -240,7 +250,8 @@ def _request_pdf(session, url, now, diagnostics, status_key):
         # from attaching its cookie jar. No cookies or redirect destinations
         # are used to obtain a document after a blocked request.
         response = session.get(url, headers={"User-Agent": USER_AGENT, "Cookie": ""},
-                               cookies={}, allow_redirects=False, timeout=20)
+                               cookies={}, allow_redirects=False, timeout=20,
+                               **_attempt_callbacks(session, attempt_recorder, "pdf"))
     except requests.exceptions.RequestException as error:
         if isinstance(diagnostics, dict):
             diagnostics[status_key] = ("PROVIDER_COOLDOWN" if error.args == ("PROVIDER_COOLDOWN",)
@@ -401,14 +412,14 @@ def _verified_previous(factor, state):
 
 def fetch_release_state(factor, *, session=requests, now=None, previous_state=None,
                         last_pdf_attempt=None, last_api_attempt=None, api_budget_blocked=False,
-                        diagnostics=None):
+                        pdf_budget_blocked=False, diagnostics=None, attempt_recorder=None):
     """Confirm the report from DOL, its verified BLS PDF or bounded API v1.
 
     A DOL PDF attempt always comes first. Only its genuine transport failure
     allows one direct, verified BLS PDF transport. Content or security failures
     never allow another source. API v1 retains the pinned release plus 24 hours.
-    Persisted attempt times limit completed collector runs to one API request
-    per factor and UTC day.
+    Persisted attempts and open reservations limit the durable collector to
+    one API request per factor and UTC day, including interrupted runs.
     Neither a planned date nor old FRED data proves publication.
     """
     report = REPORTS[factor]
@@ -435,18 +446,20 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
         raise BlsInvalid("BLS_PDF_RELEASE_DATE_UNKNOWN")
     published, period = max(candidates)
     url = _pdf_url(factor, published)
+    if pdf_budget_blocked:
+        raise BlsInvalid("BLS_PDF_ATTEMPT_STATE_INVALID")
     if (last_pdf_attempt is not None and
             timedelta(0) <= now - last_pdf_attempt < timedelta(hours=1)):
         raise BlsInvalid("BLS_PDF_RECHECK_COOLDOWN")
     try:
-        response = _request_pdf(session, url, now, diagnostics, "pdf_status")
+        response = _request_pdf(session, url, now, diagnostics, "pdf_status", attempt_recorder)
     except requests.exceptions.RequestException as error:
         if not _pdf_unreachable(error, session, "www.dol.gov", diagnostics, "pdf_status"):
             raise
         alternate_url = _bls_pdf_url(factor)
         if alternate_url is not None:
             try:
-                alternate = _request_pdf(session, alternate_url, now, diagnostics, "bls_pdf_status")
+                alternate = _request_pdf(session, alternate_url, now, diagnostics, "bls_pdf_status", attempt_recorder)
             except requests.exceptions.RequestException as alternate_error:
                 if isinstance(alternate_error, requests.exceptions.SSLError):
                     raise
@@ -472,7 +485,8 @@ def fetch_release_state(factor, *, session=requests, now=None, previous_state=No
         before = (usage.get("api.bls.gov", {}).get("requests_this_run", 0)
                   if isinstance(usage, dict) else None)
         try:
-            api_response = session.get(api_url, headers={"User-Agent": USER_AGENT}, timeout=15)
+            api_response = session.get(api_url, headers={"User-Agent": USER_AGENT}, timeout=15,
+                                       **_attempt_callbacks(session, attempt_recorder, "api"))
             if isinstance(diagnostics, dict):
                 status_code = getattr(api_response, "status_code", None)
                 diagnostics["api_status"] = "HTTP_" + str(status_code) if type(status_code) is int else "UNKNOWN"

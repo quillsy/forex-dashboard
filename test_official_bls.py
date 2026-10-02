@@ -3,6 +3,8 @@ import tempfile
 import unittest
 import os
 import calendar
+import copy
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -1091,6 +1093,222 @@ class BlsCollectorTests(unittest.TestCase):
         captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
         self.assertIn("1/2 lokal gespeicherte Faktorversuche", captions)
         self.assertIn("Prozessabbruch", captions)
+
+
+class DurableBlsCollectorTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "live.json"
+        self.status_path = Path(self.directory.name) / "status.json"
+        self.at = NOW
+        checked = (NOW - timedelta(hours=2)).isoformat()
+        self.previous = {"model_version": live_data.MODEL, "completed_at": checked,
+                         "last_attempt_at": checked, "currencies": {"USD": {
+                             "Arbeitsmarkt": {"factor": "Arbeitsmarkt", "validation": "VALID", "score": 0,
+                                 "checked_at": checked, "observation": {"value": 4.1, "date": "2026-08-01"}}}}}
+        live_data.save(self.previous, self.path)
+        self.client = Mock()
+        self.client.get.side_effect = self.response
+        self.abort_at = None
+        self.inspect_api = None
+
+    def response(self, url, **kwargs):
+        if self.abort_at == "pdf" and url.startswith("https://www.dol.gov/"):
+            self.assert_preserved_batch()
+            saved = live_data.load(self.path)
+            self.assertEqual(saved["bls_pdf_reservations"]["Arbeitsmarkt"], self.at.isoformat())
+            self.assertNotIn("Arbeitsmarkt", saved["bls_pdf_attempts"])
+            raise KeyboardInterrupt()
+        if url.startswith("https://www.dol.gov/") or url == _bls_pdf_url("Arbeitsmarkt"):
+            return pdf_response(403, url=url)
+        if url == _api_url("Arbeitsmarkt"):
+            self.assert_preserved_batch()
+            saved = live_data.load(self.path)
+            self.assertEqual(saved["bls_api_reservations"]["Arbeitsmarkt"], self.at.isoformat())
+            self.assertNotEqual(saved["bls_api_attempts"].get("Arbeitsmarkt"), self.at.isoformat())
+            self.assertEqual(saved["bls_pdf_attempts"]["Arbeitsmarkt"], self.at.isoformat())
+            if self.inspect_api:
+                self.inspect_api(saved)
+            if self.abort_at == "api":
+                raise KeyboardInterrupt()
+            return api_response("Arbeitsmarkt")
+        response = Mock(status_code=200)
+        response.json.return_value = {}
+        return response
+
+    def assert_preserved_batch(self):
+        saved = live_data.load(self.path)
+        for field, value in self.previous.items():
+            self.assertEqual(saved[field], value)
+        self.assertNotIn("bls_release_states", saved)
+
+    def collect(self, *, abort_after_reports=False, valid=False, durable=True):
+        transport = CollectorTransport(self.client, status_path=self.status_path,
+                                       clock=lambda: self.at, durable=durable)
+        app = Mock(FRED_KEY="test-only", requests=transport)
+        if abort_after_reports:
+            app.compute_currency_details.side_effect = KeyboardInterrupt()
+        elif valid:
+            app.compute_currency_details.return_value = {
+                "Arbeitsmarkt": 0, "_freshness": {"Arbeitsmarkt": "FRESH"},
+                "_observations": {"Arbeitsmarkt": {"value": 4.1, "date": "2026-08-01",
+                    "series_id": "UNRATE", "source": "FRED", "frequency": "monthly"}}}
+        else:
+            app.compute_currency_details.return_value = {}
+        with patch.dict(os.environ, {"FX_COLLECTOR": "1"}), \
+             patch.object(live_data, "CURRENCIES", ("USD",)), \
+             patch.object(live_data, "FACTORS", {"Arbeitsmarkt": 20}), \
+             patch.object(live_data, "now_utc", side_effect=lambda: self.at), \
+             patch("source_contracts.validate_fred_metadata", return_value=True):
+            return live_data.collect(app, self.path)
+
+    def test_pdf_kill_retains_open_reservation_and_hourly_gate(self):
+        self.abort_at = "pdf"
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect()
+        self.assert_preserved_batch()
+        saved = live_data.load(self.path)
+        self.assertEqual(saved["bls_pdf_reservations"]["Arbeitsmarkt"], NOW.isoformat())
+        usage = json.loads(self.status_path.read_text())["providers"]["www.dol.gov"]
+        self.assertEqual(usage["requests_uncertain_utc_day"], 1)
+        self.assertEqual(usage["requests_observed_utc_day"], 0)
+        self.client.get.reset_mock(); self.abort_at = None
+        self.at += timedelta(minutes=31)
+        self.collect()
+        self.client.get.assert_not_called()
+        saved = live_data.load(self.path)
+        self.assertEqual(saved["bls_pdf_reservations"]["Arbeitsmarkt"], NOW.isoformat())
+
+    def test_api_kill_and_post_report_abort_both_retain_daily_budget(self):
+        for inside_api in (True, False):
+            with self.subTest(inside_api=inside_api):
+                self.at = NOW; self.abort_at = "api" if inside_api else None
+                self.status_path.unlink(missing_ok=True)
+                live_data.save(self.previous, self.path)
+                with self.assertRaises(KeyboardInterrupt):
+                    self.collect(abort_after_reports=not inside_api)
+                self.assert_preserved_batch()
+                saved = live_data.load(self.path)
+                field = "bls_api_reservations" if inside_api else "bls_api_attempts"
+                self.assertEqual(saved[field]["Arbeitsmarkt"], NOW.isoformat())
+                other = "bls_api_attempts" if inside_api else "bls_api_reservations"
+                self.assertNotIn("Arbeitsmarkt", saved[other])
+                # A full hour permits PDF checking, but neither path can spend
+                # another API request for this factor on the same UTC day.
+                self.client.get.reset_mock(); self.abort_at = None
+                self.at = NOW + timedelta(minutes=61)
+                self.collect()
+                self.assertEqual(self.client.get.call_count, 2)
+                self.assertFalse(any(call.args[0] == _api_url("Arbeitsmarkt")
+                                     for call in self.client.get.call_args_list))
+                self.assertEqual(live_data.load(self.path)[field]["Arbeitsmarkt"], NOW.isoformat())
+
+    def test_successful_durable_api_proof_preserves_zero_and_requires_fred_match(self):
+        result = self.collect(valid=True)
+        saved = live_data.load(self.path)
+        row = saved["currencies"]["USD"]["Arbeitsmarkt"]
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(row["score"], 0)
+        self.assertEqual(row["observation"]["value"], 4.1)
+        self.assertEqual(saved["bls_release_states"]["Arbeitsmarkt"]["fred_raw_value"], "4.1")
+        self.assertEqual(saved["bls_api_attempts"]["Arbeitsmarkt"], NOW.isoformat())
+        self.assertEqual(saved["bls_api_reservations"], {})
+        self.assertEqual(saved["bls_pdf_reservations"], {})
+        self.assertTrue(live_data.eligible(row, NOW, factor="Arbeitsmarkt", currency="USD")[0])
+        self.client.get.reset_mock()
+        self.collect(valid=True)
+        self.client.get.assert_not_called()
+
+    def test_hour_boundary_and_next_utc_day_allow_only_the_existing_budgets(self):
+        self.abort_at = "pdf"
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect()
+        self.abort_at = None; self.client.get.reset_mock()
+        self.at = NOW + timedelta(hours=1)
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect(abort_after_reports=True)
+        self.assertEqual(self.client.get.call_count, 3)
+        self.assertEqual(live_data.load(self.path)["bls_api_attempts"]["Arbeitsmarkt"], self.at.isoformat())
+        # The pending/observed previous day's API budget does not consume the
+        # next UTC day's single allowance. Publication's 24-hour rule remains.
+        self.client.get.reset_mock(); self.at = NOW + timedelta(days=1)
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect(abort_after_reports=True)
+        self.assertEqual(self.client.get.call_count, 3)
+        saved = live_data.load(self.path)
+        self.assertEqual(saved["bls_api_attempts"]["Arbeitsmarkt"], self.at.isoformat())
+        self.assertEqual(saved["bls_api_reservations"], {})
+
+    def test_24_hour_wait_does_not_reserve_an_api_request(self):
+        self.at = datetime.fromisoformat(PINNED_DUES["Arbeitsmarkt"]["2026-09"]) + timedelta(hours=1)
+        self.collect()
+        self.assertEqual(self.client.get.call_count, 2)
+        saved = live_data.load(self.path)
+        self.assertEqual(saved["bls_api_attempts"], {})
+        self.assertEqual(saved["bls_api_reservations"], {})
+        self.assertEqual(saved["bls_provider_status"]["Arbeitsmarkt"]["proof"], "BLS_API_WAIT_24H")
+
+    def test_failed_bls_reservation_save_prevents_http_and_leaves_budget_unused(self):
+        original = live_data.save
+        count = [0]
+        def save(data, path=live_data.PATH):
+            count[0] += 1
+            if count[0] == 1:
+                raise OSError("private-path")
+            return original(data, path)
+        with patch.object(live_data, "save", side_effect=save):
+            self.collect()
+        self.client.get.assert_not_called()
+        self.assertFalse(self.status_path.exists())
+        saved = live_data.load(self.path)
+        for field in live_data.BLS_ATTEMPT_FIELDS:
+            self.assertEqual(saved[field], {})
+        self.assertEqual(saved["currencies"]["USD"]["Arbeitsmarkt"]["validation"], "UNVERIFIED")
+
+    def test_newer_repository_seed_cannot_erase_real_daily_or_open_pdf_attempt(self):
+        self.abort_at = "api"
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect()
+        from run_data_collection import _seed_fallback_live
+        remote = copy.deepcopy(self.previous)
+        remote["completed_at"] = (NOW + timedelta(minutes=5)).isoformat()
+        remote["currencies"]["USD"]["Arbeitsmarkt"]["score"] = 90
+        remote["bls_pdf_attempts"] = {"Arbeitsmarkt": (NOW - timedelta(minutes=50)).isoformat()}
+        source = Path(self.directory.name) / "repository.json"
+        live_data.save(remote, source)
+        _seed_fallback_live(source, self.path)
+        seeded = live_data.load(self.path)
+        self.assertEqual(seeded["currencies"], remote["currencies"])
+        self.assertEqual(seeded["completed_at"], remote["completed_at"])
+        self.assertEqual(seeded["bls_pdf_attempts"]["Arbeitsmarkt"], NOW.isoformat())
+        self.assertEqual(seeded["bls_api_reservations"]["Arbeitsmarkt"], NOW.isoformat())
+        self.at += timedelta(minutes=36); self.abort_at = None; self.client.get.reset_mock()
+        self.collect()
+        self.client.get.assert_not_called()
+
+    def test_invalid_or_future_pdf_reservation_never_grants_an_attempt(self):
+        for value in ("invalid", None, (NOW + timedelta(days=1)).isoformat()):
+            with self.subTest(value=value):
+                previous = copy.deepcopy(self.previous)
+                previous["bls_pdf_reservations"] = {"Arbeitsmarkt": value}
+                live_data.save(previous, self.path)
+                self.client.get.reset_mock()
+                self.collect()
+                self.client.get.assert_not_called()
+                saved = live_data.load(self.path)
+                self.assertEqual(saved["bls_provider_status"]["Arbeitsmarkt"]["proof"],
+                                 "BLS_PDF_ATTEMPT_STATE_INVALID")
+
+    def test_non_durable_offline_transport_does_not_write_operational_file(self):
+        # The ordinary test/default transport is still read-only. A final live
+        # cache save here would also be inside the explicit temporary path.
+        self.client.get.side_effect = lambda url, **kwargs: (
+            api_response("Arbeitsmarkt") if url == _api_url("Arbeitsmarkt") else pdf_response(403, url=url))
+        with self.assertRaises(KeyboardInterrupt):
+            self.collect(abort_after_reports=True, durable=False)
+        self.assertEqual(live_data.load(self.path), self.previous)
+        self.assertFalse(self.status_path.exists())
 
 
 if __name__ == "__main__":
