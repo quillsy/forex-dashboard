@@ -2259,14 +2259,15 @@ def get_statcan_cpi_data(*, propagate_transport=False):
                 res.raise_for_status()
             raise ValueError(f"StatCan HTTP Error {res.status_code}")
         
-        from official_macro import _statcan_response_json
+        from official_macro import _statcan_response_json, validate_statcan_cpi, STATCAN_BASE
         data = _statcan_response_json(res, requests)
-        if not data or data[0].get("status") != "SUCCESS":
-            raise ValueError(f"StatCan API status: {data[0].get('status') if data else 'Empty'}")
-            
-        vector_data = data[0].get("object", {}).get("vectorDataPoint", [])
-        if not vector_data:
-            raise ValueError("No vectorDataPoint found in StatCan response")
+        metadata = []
+        for method, body in (("getSeriesInfoFromVector", [{"vectorId": 41690973}]),
+                             ("getCubeMetadata", [{"productId": 18100004}])):
+            response = requests.post(STATCAN_BASE + method, json=body, timeout=15)
+            response.raise_for_status()
+            metadata.append(_statcan_response_json(response, requests))
+        vector_data = validate_statcan_cpi(metadata[0], data, metadata[1])
             
         records = []
         for dp in vector_data:
@@ -2285,7 +2286,9 @@ def get_statcan_cpi_data(*, propagate_transport=False):
                 "date": obs_dt,
                 "value": val,
                 "release_date": release_dt,
-                "is_pit_limited": False
+                "is_pit_limited": False,
+                "provider_status": dp["provider_status"],
+                "is_estimate": dp["is_estimate"]
             })
             
         if not records:
@@ -5567,6 +5570,17 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                             observations["Inflation"]["source_url"] = "https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data"
                         if curr == "CAD" and series_id == "v41690973":
                             observations["Inflation"]["source_url"] = "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810000401"
+                            prior_month = release_frame[release_frame["date"] == pd.Timestamp(observed) - pd.DateOffset(months=12)]
+                            comparison = prior_month.iloc[0] if not prior_month.empty else {}
+                            # pandas can represent an absent string flag as NaN;
+                            # its truthiness must not hide a comparison-month flag.
+                            flags = [flag if isinstance(flag, str) and flag in ("p", "r") else None
+                                     for flag in (release.get("provider_status"), comparison.get("provider_status"))]
+                            observations["Inflation"].update(
+                                provider_status=(flags[0] or
+                                                 (str(flags[1]) + " (Vergleichsmonat)" if flags[1] else None)),
+                                comparison_period_status=flags[1],
+                                is_estimate=any(flag == "p" for flag in flags))
                         if curr == "NZD":
                             for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
                                 if isinstance(release.get(field), str):

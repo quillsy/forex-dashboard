@@ -1,10 +1,215 @@
+import ast
+import copy
 import unittest
+from pathlib import Path
 import requests
 from datetime import datetime, timezone
 from unittest.mock import Mock
-from official_macro import EUROSTAT_SPECS, parse_eurostat_observation, fetch_eurostat_observation
+from official_macro import EUROSTAT_SPECS, STATCAN_BASE, STATCAN_CPI_COORD, parse_eurostat_observation, fetch_eurostat_observation, validate_statcan_cpi
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+
+
+class StatCanCpiContractTests(unittest.TestCase):
+    now = datetime(2026, 10, 2, 22, tzinfo=timezone.utc)
+
+    @staticmethod
+    def fixture():
+        identity = {'responseStatusCode': 0, 'productId': 18100004, 'vectorId': 41690973,
+                    'coordinate': STATCAN_CPI_COORD}
+        series = dict(identity, SeriesTitleEn='Canada;All-items', memberUomCode=17,
+                      frequencyCode=6, scalarFactorCode=0, decimals=1, terminated=0)
+        points = []
+        for serial in range(2025 * 12 + 7, 2026 * 12 + 8):
+            y, m = divmod(serial, 12); period = f'{y}-{m + 1:02d}-01'
+            points.append({'refPer': period, 'refPerRaw': period, 'refPer2': '', 'refPerRaw2': '',
+                           'value': 164.8 if len(points) == 0 else 169.8,
+                           'frequencyCode': 6, 'scalarFactorCode': 0, 'decimals': 1,
+                           'symbolCode': 0, 'statusCode': 0, 'securityLevelCode': 0,
+                           'releaseTime': '2026-09-14T08:30'})
+        data = dict(identity, vectorDataPoint=points)
+        cube = {'responseStatusCode': 0, 'productId': '18100004', 'frequencyCode': 6,
+                'archiveStatusCode': '2', 'cubeTitleEn': 'Consumer Price Index, monthly, not seasonally adjusted',
+                'cubeEndDate': '2026-08-01', 'releaseTime': '2026-09-14T08:30',
+                'dimension': [{'dimensionPositionId': 1, 'dimensionNameEn': 'Geography',
+                    'member': [{'memberId': 2, 'memberNameEn': 'Canada', 'terminated': 0}]},
+                    {'dimensionPositionId': 2, 'dimensionNameEn': 'Products and product groups',
+                    'member': [{'memberId': 2, 'memberNameEn': 'All-items', 'terminated': 0, 'memberUomCode': 17}]}]}
+        return [[{'status': 'SUCCESS', 'object': o}] for o in (series, data, cube)]
+
+    def test_exact_index_and_yoy_inputs_unchanged(self):
+        payloads = self.fixture(); original = copy.deepcopy(payloads)
+        points = validate_statcan_cpi(*payloads, now=self.now)
+        self.assertEqual(payloads, original)
+        self.assertEqual(len(points), 13)
+        self.assertAlmostEqual((points[-1]['value'] / points[0]['value'] - 1) * 100, 3.033980582524265)
+        self.assertIsNone(points[-1]['provider_status']); self.assertFalse(points[-1]['is_estimate'])
+
+    def test_series_identity_unit_scaling_frequency_and_termination(self):
+        for obj in (0, 1):
+            for key, value in [('vectorId', 62305752), ('productId', 36100104),
+                               ('coordinate', '1.1.1.30.0.0.0.0.0.0'), ('vectorId', '41690973')]:
+                ps = self.fixture(); ps[obj][0]['object'][key] = value
+                with self.subTest(obj=obj, key=key), self.assertRaises(ValueError):
+                    validate_statcan_cpi(*ps, now=self.now)
+        for key, value in [('SeriesTitleEn', 'Canada;Food'), ('memberUomCode', 239),
+                           ('frequencyCode', 9), ('scalarFactorCode', 6), ('decimals', 2), ('terminated', 1)]:
+            ps = self.fixture(); ps[0][0]['object'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_cube_definition_dimension_and_index_basis(self):
+        for key, value in [('productId', '14100287'), ('frequencyCode', 9), ('archiveStatusCode', '1'),
+                           ('cubeTitleEn', 'Consumer Price Index, seasonally adjusted')]:
+            ps = self.fixture(); ps[2][0]['object'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+        for position, key, value in [(0, 'memberNameEn', 'Ontario'), (1, 'memberUomCode', 239),
+                                     (1, 'terminated', 1), (1, 'memberId', True)]:
+            ps = self.fixture(); ps[2][0]['object']['dimension'][position]['member'][0][key] = value
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_response_failures_ambiguity_and_boolean_codes(self):
+        for pos in range(3):
+            for replacement in ([], [{'status': 'FAILURE'}], [None]):
+                ps = self.fixture(); ps[pos] = replacement
+                with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+            ps = self.fixture(); ps[pos].append(copy.deepcopy(ps[pos][0]))
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+            ps = self.fixture(); ps[pos][0]['object']['responseStatusCode'] = False
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_point_metadata_rejects_wrong_frequency_scaling_status_and_suppression(self):
+        for pos in (0, -1):
+            for key, value in [('frequencyCode', 9), ('scalarFactorCode', 6), ('decimals', 2),
+                               ('statusCode', 1), ('statusCode', 7), ('securityLevelCode', 1),
+                               ('symbolCode', 2), ('symbolCode', True), ('scalarFactorCode', False)]:
+                ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][pos][key] = value
+                with self.subTest(pos=pos, key=key), self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_preliminary_and_revision_flags_survive_for_both_comparison_months(self):
+        for pos in (0, -1):
+            for code, flag in ((1, 'p'), (3, 'r')):
+                ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][pos]['symbolCode'] = code
+                points = validate_statcan_cpi(*ps, now=self.now)
+                self.assertEqual(points[pos]['provider_status'], flag)
+                self.assertEqual(points[pos]['is_estimate'], code == 1)
+
+    def test_missing_month_duplicate_conflict_and_invalid_index(self):
+        for position in (0, 6, -1):
+            ps = self.fixture(); del ps[1][0]['object']['vectorDataPoint'][position]
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+        ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'].append(copy.deepcopy(ps[1][0]['object']['vectorDataPoint'][-1]))
+        with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+        for val in (None, True, 0, -1, float('nan'), float('inf'), '169.8'):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][-1]['value'] = val
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_period_reference_fields_and_future_measurement(self):
+        for key, val in [('refPer', '2026-08-31'), ('refPerRaw', '2026-07-01'),
+                         ('refPer2', '2026-08-01'), ('refPerRaw2', '2026-08-01')]:
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][-1][key] = val
+            with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+        ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][-1].update(refPer='2026-10-01', refPerRaw='2026-10-01')
+        with self.assertRaises(ValueError): validate_statcan_cpi(*ps, now=self.now)
+
+    def test_latest_cube_release_must_match_and_future_embargo_blocks(self):
+        for key, value in [('cubeEndDate', '2026-09-01'), ('releaseTime', '2026-09-15T08:30')]:
+            ps = self.fixture(); ps[2][0]['object'][key] = value
+            with self.assertRaisesRegex(ValueError, 'RELEASE_LAG'): validate_statcan_cpi(*ps, now=self.now)
+        ps = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'FUTURE_RELEASE'):
+            validate_statcan_cpi(*ps, now=datetime(2026, 9, 14, 12, 29, tzinfo=timezone.utc))
+        validate_statcan_cpi(*ps, now=datetime(2026, 9, 14, 12, 30, tzinfo=timezone.utc))
+
+    def loader(self, payloads):
+        import pandas as pd
+        import live_data
+        n = next(n for n in ast.parse(Path(__file__).with_name('app.py').read_text()).body
+                 if isinstance(n, ast.FunctionDef) and n.name == 'get_statcan_cpi_data')
+        n.decorator_list = []
+        client = Mock(); responses = []
+        for p in (payloads[1], payloads[0], payloads[2]):
+            r = Mock(status_code=200); r.json.return_value = p; responses.append(r)
+        client.post.side_effect = responses
+        ns = {'pd': pd, 'datetime': datetime, 'requests': client, 'live_data': live_data,
+              'check_demo_active': lambda: False}
+        exec(compile(ast.Module(body=[n], type_ignores=[]), '<cpi-loader>', 'exec'), ns)
+        return ns['get_statcan_cpi_data'], client
+
+    def test_loader_uses_exact_three_checks_and_rejects_wrong_series(self):
+        loader, client = self.loader(self.fixture()); frame, _, is_live = loader(propagate_transport=True)
+        self.assertTrue(is_live); self.assertEqual(len(frame), 13)
+        self.assertEqual(client.post.call_count, 3)
+        self.assertEqual([c.args[0] for c in client.post.call_args_list],
+                         [STATCAN_BASE + s for s in ('getDataFromVectorsAndLatestNPeriods', 'getSeriesInfoFromVector', 'getCubeMetadata')])
+        self.assertTrue(all(c.kwargs['timeout'] == 15 for c in client.post.call_args_list))
+        ps = self.fixture(); ps[1][0]['object']['vectorId'] = 62305752
+        loader, _ = self.loader(ps)
+        self.assertFalse(loader(propagate_transport=True)[-1])
+
+    def test_loader_retains_publication_and_symbol_annotations(self):
+        import pandas as pd
+        ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['symbolCode'] = 1
+        ps[1][0]['object']['vectorDataPoint'][-1]['symbolCode'] = 3
+        loader, _ = self.loader(ps); frame, _, is_live = loader()
+        self.assertTrue(is_live)
+        self.assertEqual(frame.iloc[0]['provider_status'], 'p'); self.assertTrue(frame.iloc[0]['is_estimate'])
+        self.assertEqual(frame.iloc[-1]['provider_status'], 'r')
+        self.assertEqual(frame.iloc[-1]['release_date'], pd.Timestamp('2026-09-14T12:30'))
+
+    def test_comparison_flags_reach_actual_cpi_writer_and_public_record(self):
+        import os
+        import pandas as pd
+        import live_data
+        from unittest.mock import patch
+        from test_core_regressions import load_core
+        checked = self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'get_cpi_yoy_details')
+        for position, symbol, expected in ((0, 1, 'p'), (-1, 1, 'p'), (0, 3, 'r'), (-1, 3, 'r')):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][position]['symbolCode'] = symbol
+            loader, _ = self.loader(ps); frame, _, _ = loader()
+            core = load_core()
+            exec(compile(ast.Module(body=[route], type_ignores=[]), '<actual-cpi-route>', 'exec'), core)
+            core.update(datetime=Clock, pd=pd, requests=requests, FRED_KEY='test-only',
+                        get_statcan_cpi_data=Mock(return_value=(frame, checked, True)),
+                        get_ons_cpi_data=Mock(), get_statsnz_cpi_data=Mock())
+            with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+                detail = core['compute_currency_details']('CAD', checked.date().isoformat(),
+                    include_context=False, factors_to_refresh=('Inflation',))
+            obs = detail['_observations']['Inflation']
+            self.assertAlmostEqual(obs['value'], 3.033980582524265)
+            self.assertIn(expected, obs['provider_status'])
+            self.assertEqual(obs['is_estimate'], symbol == 1)
+            if position == 0: self.assertEqual(obs['comparison_period_status'], expected)
+            record = live_data.build_record('Inflation', detail['Inflation'], obs,
+                                           detail['_freshness']['Inflation'], checked.isoformat())
+            self.assertEqual(record['validation'], 'VALID')
+            self.assertEqual(record['observation']['is_estimate'], symbol == 1)
+            self.assertEqual(record['observation']['provider_status'], obs['provider_status'])
+
+    def test_metadata_transport_failure_propagates_without_retry(self):
+        for failed_call in (1, 2):
+            loader, client = self.loader(self.fixture())
+            responses = list(client.post.side_effect)
+            responses[failed_call] = requests.exceptions.Timeout('test-only')
+            client.post.side_effect = responses
+            with self.assertRaises(requests.exceptions.Timeout): loader(propagate_transport=True)
+            self.assertEqual(client.post.call_count, failed_call + 1)
+
+    def test_invalid_or_ambiguous_toronto_wall_time_never_loses_a_row(self):
+        for wall_time in ('2026-03-08T02:30', '2025-11-02T01:30'):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['releaseTime'] = wall_time
+            with self.subTest(time=wall_time), self.assertRaisesRegex(ValueError, 'RELEASE_INVALID'):
+                validate_statcan_cpi(*ps, now=self.now)
+            loader, _ = self.loader(ps)
+            self.assertFalse(loader(propagate_transport=True)[-1])
+        for wall_time in ('2026-03-08T01:30', '2026-03-08T03:30', '2025-11-02T02:30'):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['releaseTime'] = wall_time
+            self.assertEqual(len(validate_statcan_cpi(*ps, now=self.now)), 13)
 
 
 def fixture(category):
