@@ -1091,8 +1091,191 @@ class BlsCollectorTests(unittest.TestCase):
         self.assertEqual(provider_rows[0]["Limit"], "25 Anfragen/Tag (BLS API v1 ohne Registrierung)")
         self.assertEqual(provider_rows[0]["Restkontingent"], "Unbekannt")
         captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
-        self.assertIn("1/2 lokal gespeicherte Faktorversuche", captions)
-        self.assertIn("Prozessabbruch", captions)
+        self.assertIn("abgeschlossene API-Versuche: 1 Faktor", captions)
+        self.assertIn("offene Reservierungen heute: Unbekannt", captions)
+        self.assertIn("GitHub-Prozessabbruch", captions)
+
+
+class OperatorRequestStateDisplayTests(unittest.TestCase):
+    AT = datetime(2026, 10, 2, 16, 48, tzinfo=timezone.utc)
+    DAILY_COLUMNS = {
+        "requests_observed_utc_day": "Heute lokal abgeschlossen (UTC)",
+        "requests_reserved_utc_day": "Heute lokal reserviert (UTC)",
+        "requests_uncertain_utc_day": "Heute unbestätigt (UTC)",
+    }
+
+    def dataset(self, **fields):
+        return {"model_version": live_data.MODEL, "completed_at": self.AT.isoformat(),
+                "currencies": {}, "bls_api_attempts": {}, "bls_api_reservations": {}, **fields}
+
+    def provider(self, **fields):
+        return {"status": "HTTP_403", "requests_this_run": 1,
+                "counted_day_utc": self.AT.date().isoformat(),
+                "requests_observed_utc_day": 1, "requests_reserved_utc_day": 1,
+                "requests_uncertain_utc_day": 0, "usage_complete": True,
+                "prior_usage_uncertain": False, **fields}
+
+    def render(self, provider=None, data=None, authorized=True):
+        st = MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "data_collection_status.json").write_text(json.dumps({
+                "providers": {"api.bls.gov": self.provider() if provider is None else provider}}))
+            with patch.object(live_data, "load", return_value=self.dataset() if data is None else data), \
+                 patch.object(live_data, "now_utc", return_value=self.AT), \
+                 patch.object(live_data, "selected_live_directory", return_value=folder):
+                live_data.render_status(st, authorized=authorized)
+        return st
+
+    def row(self, **fields):
+        return self.render(provider=self.provider(**fields)).dataframe.call_args_list[-1].args[0][0]
+
+    def captions(self, **kwargs):
+        return " ".join(str(call.args[0]) for call in self.render(**kwargs).caption.call_args_list)
+
+    def test_returned_http_error_is_local_completion_without_quota_confirmation(self):
+        st = self.render()
+        row = st.dataframe.call_args_list[-1].args[0][0]
+        self.assertEqual(row["Letzter Abrufstatus"], "HTTP_403")
+        self.assertEqual(row["Heute lokal abgeschlossen (UTC)"], 1)
+        self.assertEqual(row["Heute lokal reserviert (UTC)"], 1)
+        self.assertEqual(row["Heute unbestätigt (UTC)"], 0)
+        self.assertEqual(row["Lokale Zählervollständigkeit"], "Vollständig (lokal)")
+        self.assertEqual(row["Restkontingent"], "Unbekannt")
+        self.assertEqual(row["Rücksetzung"], "Unbekannt")
+        self.assertEqual(row["Limit"], "25 Anfragen/Tag (BLS API v1 ohne Registrierung)")
+        captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
+        self.assertIn("kumulativ", captions)
+        self.assertIn("gespeichertes Ende eines Abrufversuchs, auch bei Fehlern", captions)
+        self.assertIn("kein erfolgreicher Datenabruf und kein bestätigter Verbrauch beim Anbieter", captions)
+
+    def test_interrupted_reservation_remains_visible_and_incomplete(self):
+        row = self.row(requests_observed_utc_day=0, requests_reserved_utc_day=1,
+                       requests_uncertain_utc_day=1, usage_complete=False)
+        self.assertEqual(row["Heute lokal abgeschlossen (UTC)"], 0)
+        self.assertEqual(row["Heute lokal reserviert (UTC)"], 1)
+        self.assertEqual(row["Heute unbestätigt (UTC)"], 1)
+        self.assertEqual(row["Lokale Zählervollständigkeit"], "Unvollständig")
+        self.assertEqual(row["Restkontingent"], "Unbekannt")
+
+    def test_valid_current_zero_is_distinct_from_unknown(self):
+        row = self.row(requests_observed_utc_day=0, requests_reserved_utc_day=0)
+        for column in self.DAILY_COLUMNS.values():
+            self.assertEqual(row[column], 0)
+        self.assertEqual(row["Lokale Zählervollständigkeit"], "Vollständig (lokal)")
+
+    def test_missing_malformed_old_or_future_day_never_becomes_current_zero(self):
+        days = (None, "not-a-day", "2026-02-30",
+                (self.AT - timedelta(days=1)).date().isoformat(),
+                (self.AT + timedelta(days=1)).date().isoformat())
+        for day in days:
+            with self.subTest(day=day):
+                row = self.row(counted_day_utc=day, requests_observed_utc_day=0,
+                               requests_reserved_utc_day=0)
+                for column in self.DAILY_COLUMNS.values():
+                    self.assertEqual(row[column], "Unbekannt")
+                self.assertEqual(row["Lokale Zählervollständigkeit"], "Unbekannt")
+                self.assertEqual(row["Frühere Nutzung unbestätigt"], "Unbekannt")
+
+    def test_daily_counts_require_nonnegative_integers(self):
+        for field, column in self.DAILY_COLUMNS.items():
+            for value in (None, "0", 0.0, False, -1):
+                with self.subTest(field=field, value=value):
+                    row = self.row(**{field: value})
+                    self.assertEqual(row[column], "Unbekannt")
+                    self.assertEqual(row["Lokale Zählervollständigkeit"], "Unbekannt")
+
+    def test_legacy_missing_fields_and_nonboolean_flags_do_not_claim_complete(self):
+        legacy = self.provider()
+        for field in ("requests_reserved_utc_day", "requests_uncertain_utc_day", "usage_complete", "prior_usage_uncertain"):
+            legacy.pop(field)
+        row = self.render(provider=legacy).dataframe.call_args_list[-1].args[0][0]
+        self.assertEqual(row["Heute lokal abgeschlossen (UTC)"], 1)
+        self.assertEqual(row["Heute lokal reserviert (UTC)"], "Unbekannt")
+        self.assertEqual(row["Heute unbestätigt (UTC)"], "Unbekannt")
+        self.assertEqual(row["Lokale Zählervollständigkeit"], "Unbekannt")
+        for field in ("usage_complete", "prior_usage_uncertain"):
+            for value in (None, "true", 1):
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(self.row(**{field: value})["Lokale Zählervollständigkeit"], "Unbekannt")
+
+    def test_malformed_provider_entry_has_unknown_daily_counts(self):
+        for entry in ("INVALID", [], 1):
+            with self.subTest(entry=entry):
+                row = self.render(provider=entry).dataframe.call_args_list[-1].args[0][0]
+                for column in self.DAILY_COLUMNS.values():
+                    self.assertEqual(row[column], "Unbekannt")
+                self.assertEqual(row["Lokale Zählervollständigkeit"], "Unbekannt")
+
+    def test_explicit_complete_cannot_override_inconsistent_counters(self):
+        conflicts = ({"requests_observed_utc_day": 2, "requests_reserved_utc_day": 1},
+                     {"requests_observed_utc_day": 0, "requests_reserved_utc_day": 1, "requests_uncertain_utc_day": 2},
+                     {"requests_reserved_utc_day": 3},
+                     {"prior_usage_uncertain": True})
+        for fields in conflicts:
+            with self.subTest(fields=fields):
+                self.assertEqual(self.row(**fields)["Lokale Zählervollständigkeit"], "Unvollständig")
+
+    def test_prior_uncertain_usage_survives_current_known_zero(self):
+        row = self.row(requests_observed_utc_day=0, requests_reserved_utc_day=0,
+                       prior_usage_uncertain=True, usage_complete=False)
+        self.assertEqual(row["Heute unbestätigt (UTC)"], 0)
+        self.assertEqual(row["Frühere Nutzung unbestätigt"], "Ja")
+        self.assertEqual(row["Lokale Zählervollständigkeit"], "Unvollständig")
+
+    def test_bls_union_counts_same_factor_once_and_keeps_old_reservations_visible(self):
+        captions = self.captions(data=self.dataset(
+            bls_api_attempts={"Arbeitsmarkt": self.AT.isoformat()},
+            bls_api_reservations={"Arbeitsmarkt": self.AT.isoformat(),
+                                  "Inflation": (self.AT - timedelta(days=1)).isoformat()}))
+        self.assertIn("abgeschlossene API-Versuche: 1 Faktor", captions)
+        self.assertIn("offene Reservierungen heute: 1 Faktor", captions)
+        self.assertIn("Faktoren mit Versuch oder Reservierung: 1/2 Faktoren (jeder Faktor einmal)", captions)
+        self.assertIn("Ältere offene Reservierungen: 1 Faktor (Inflation)", captions)
+        self.assertIn("insgesamt höchstens zwei", captions)
+        self.assertIn("unabhängig vom Abschluss eines Collector-Laufs", captions)
+        self.assertIn("keine Übernahme nach einem GitHub-Prozessabbruch", captions)
+
+    def test_bls_invalid_and_future_marks_are_unknown_not_current_attempts(self):
+        captions = self.captions(data=self.dataset(
+            bls_api_attempts={"Arbeitsmarkt": self.AT.isoformat(), "Inflation": "INVALID"},
+            bls_api_reservations={"Inflation": (self.AT + timedelta(minutes=1)).isoformat()}))
+        self.assertIn("abgeschlossene API-Versuche: Unbekannt (1 Faktor bestätigt)", captions)
+        self.assertIn("offene Reservierungen heute: Unbekannt", captions)
+        self.assertIn("Faktoren mit Versuch oder Reservierung: Unbekannt (1/2 Faktoren bestätigt)", captions)
+        self.assertIn("Inflation (Versuch: ungültig)", captions)
+        self.assertIn("Inflation (Reservierung: zukünftig)", captions)
+        captions = self.captions(data=self.dataset(
+            bls_api_attempts={"Inflation": "0001-01-01T00:00:00+14:00"}))
+        self.assertIn("abgeschlossene API-Versuche: Unbekannt", captions)
+        self.assertIn("Inflation (Versuch: ungültig)", captions)
+
+    def test_bls_missing_or_malformed_fields_never_claim_known_zero(self):
+        for field in ("bls_api_attempts", "bls_api_reservations"):
+            for value in (None, "INVALID", []):
+                with self.subTest(field=field, value=value):
+                    captions = self.captions(data=self.dataset(**{field: value}))
+                    self.assertIn("Faktoren mit Versuch oder Reservierung: Unbekannt", captions)
+                    self.assertIn("Feld fehlt oder ist ungültig", captions)
+        captions = self.captions(data={"completed_at": self.AT.isoformat(), "currencies": {}})
+        self.assertIn("abgeschlossene API-Versuche: Unbekannt", captions)
+        self.assertIn("offene Reservierungen heute: Unbekannt", captions)
+
+    def test_bls_timestamp_uses_utc_day_and_preserves_known_empty_state(self):
+        local = self.AT.astimezone(timezone(timedelta(hours=12))).isoformat()
+        captions = self.captions(data=self.dataset(bls_api_attempts={"Inflation": local}))
+        self.assertIn("abgeschlossene API-Versuche: 1 Faktor", captions)
+        self.assertIn("offene Reservierungen heute: 0 Faktoren", captions)
+        self.assertIn("Faktoren mit Versuch oder Reservierung: 1/2 Faktoren", captions)
+        self.assertIn("Unklare Marken: Keine dokumentiert", captions)
+
+    def test_operator_request_details_remain_authorized_only(self):
+        st = self.render(authorized=False)
+        expanders = [call.args[0] for call in st.expander.call_args_list]
+        self.assertNotIn("Anbieter und Anfragebudget", expanders)
+        captions = " ".join(str(call.args[0]) for call in st.caption.call_args_list)
+        self.assertNotIn("Anbieter-Reservierungen", captions)
+        self.assertNotIn("GitHub-Prozessabbruch", captions)
 
 
 class DurableBlsCollectorTests(unittest.TestCase):

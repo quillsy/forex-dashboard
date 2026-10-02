@@ -1000,28 +1000,96 @@ def render_status(st, authorized=False):
                 status = json.loads((selected_live_directory() / "data_collection_status.json").read_text())
             except (OSError, ValueError):
                 status = {}
-            providers = status.get("providers", {})
-            st.dataframe([{"Anbieter": host, "Letzter Abrufstatus": item.get("status"),
-                           "Ergebnisse im letzten Lauf": json.dumps(item.get("outcomes_this_run", {}), sort_keys=True),
-                           "Letzter Versuch": item.get("last_attempt_at") or "Unbekannt",
-                           "Fehlerzeit im letzten Lauf": item.get("last_failure_at") or "Keiner dokumentiert",
-                           "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
-                           "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
-                           "Anfragen im letzten Lauf": item.get("requests_this_run"),
-                           "Heute gezählt (UTC)": item.get("requests_observed_utc_day"),
-                           "Restkontingent": "Unbekannt",
-                           "Limit": "25 Anfragen/Tag (BLS API v1 ohne Registrierung)" if host == "api.bls.gov" else "Unbekannt",
-                           "Rücksetzung": "Unbekannt",
-                           "Nachweis": "BLS API FAQ; Restbudget nicht bestätigt" if host == "api.bls.gov" else "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"}
-                          for host, item in providers.items()], hide_index=True, use_container_width=True)
-            api_attempts = data.get("bls_api_attempts", {})
-            api_attempts = api_attempts if isinstance(api_attempts, dict) else {}
-            counted = sum(timestamp(api_attempts.get(factor)) is not None and
-                          timestamp(api_attempts.get(factor)).date() == now.date()
-                          for factor in ("Arbeitsmarkt", "Inflation"))
-            st.caption(f"BLS API v1: {counted}/2 lokal gespeicherte Faktorversuche am heutigen UTC-Tag "
-                       "(höchstens einer je Faktor in abgeschlossenen Collector-Läufen). "
+            providers = status.get("providers", {}) if isinstance(status, dict) else {}
+            providers = providers if isinstance(providers, dict) else {}
+            today = now.date().isoformat()
+            provider_rows = []
+            for host, item in providers.items():
+                item = item if isinstance(item, dict) else {}
+                day = item.get("counted_day_utc")
+                valid_day = (isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)
+                             and timestamp(day + "T00:00:00+00:00") is not None)
+                same_day = bool(valid_day and day == today)
+                counts = {}
+                for field in ("requests_observed_utc_day", "requests_reserved_utc_day", "requests_uncertain_utc_day"):
+                    value = item.get(field)
+                    counts[field] = value if same_day and type(value) is int and value >= 0 else "Unbekannt"
+                observed, reserved, uncertain = counts.values()
+                known_counts = all(type(value) is int for value in counts.values())
+                prior_uncertain = item.get("prior_usage_uncertain")
+                if not same_day or not known_counts:
+                    completeness = "Unbekannt"
+                elif (reserved != observed + uncertain or uncertain > 0 or prior_uncertain is True
+                      or item.get("usage_complete") is False):
+                    completeness = "Unvollständig"
+                elif item.get("usage_complete") is True and prior_uncertain is False:
+                    completeness = "Vollständig (lokal)"
+                else:
+                    completeness = "Unbekannt"
+                provider_rows.append({"Anbieter": host, "Letzter Abrufstatus": item.get("status"),
+                                      "Ergebnisse im letzten Lauf": json.dumps(item.get("outcomes_this_run", {}), sort_keys=True),
+                                      "Letzter Versuch": item.get("last_attempt_at") or "Unbekannt",
+                                      "Fehlerzeit im letzten Lauf": item.get("last_failure_at") or "Keiner dokumentiert",
+                                      "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
+                                      "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
+                                      "Anfragen im letzten Lauf": item.get("requests_this_run"),
+                                      "Zählertag (UTC)": day if valid_day else "Unbekannt",
+                                      "Heute lokal abgeschlossen (UTC)": observed,
+                                      "Heute lokal reserviert (UTC)": reserved,
+                                      "Heute unbestätigt (UTC)": uncertain,
+                                      "Lokale Zählervollständigkeit": completeness,
+                                      "Frühere Nutzung unbestätigt": ("Ja" if prior_uncertain is True else "Nein"
+                                                                      if same_day and prior_uncertain is False else "Unbekannt"),
+                                      "Restkontingent": "Unbekannt",
+                                      "Limit": "25 Anfragen/Tag (BLS API v1 ohne Registrierung)" if host == "api.bls.gov" else "Unbekannt",
+                                      "Rücksetzung": "Unbekannt",
+                                      "Nachweis": "BLS API FAQ; Restbudget nicht bestätigt" if host == "api.bls.gov" else "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"})
+            st.dataframe(provider_rows, hide_index=True, use_container_width=True)
+            st.caption("Anbieter-Reservierungen sind kumulativ und enthalten abgeschlossene sowie unbestätigte Versuche; "
+                       "die drei Zähler werden nicht addiert. Lokal abgeschlossen bezeichnet ein gespeichertes Ende eines Abrufversuchs, "
+                       "auch bei Fehlern; kein erfolgreicher Datenabruf und kein bestätigter Verbrauch beim Anbieter. "
+                       "Ohne heutigen gültigen Zählertag bleiben aktuelle Tageszahlen unbekannt.")
+            api_states, marker_notes = {}, []
+            for kind, label in (("attempts", "Versuch"), ("reservations", "Reservierung")):
+                markers = data.get("bls_api_" + kind)
+                known = isinstance(markers, dict)
+                current, older, invalid = set(), set(), False
+                if not known:
+                    marker_notes.append(label + ": Feld fehlt oder ist ungültig")
+                for factor in ("Arbeitsmarkt", "Inflation"):
+                    if not known or factor not in markers:
+                        continue
+                    try:
+                        at = timestamp(markers[factor])
+                    except OverflowError:
+                        at = None
+                    if at is None or at > now:
+                        marker_notes.append(factor + " (" + label + ": " + ("ungültig" if at is None else "zukünftig") + ")")
+                        invalid = True
+                    else:
+                        (current if at.date() == now.date() else older).add(factor)
+                api_states[kind] = {"current": current, "older": older, "known": known and not invalid}
+
+            def factor_count(factors, known):
+                count = str(len(factors)) + (" Faktor" if len(factors) == 1 else " Faktoren")
+                return count if known else "Unbekannt" + (" (" + count + " bestätigt)" if factors else "")
+
+            attempts, reservations = api_states["attempts"], api_states["reservations"]
+            used_factors = attempts["current"] | reservations["current"]
+            known_union = attempts["known"] and reservations["known"]
+            daily_factors = (f"{len(used_factors)}/2 Faktoren" if known_union else "Unbekannt"
+                             + (f" ({len(used_factors)}/2 Faktoren bestätigt)" if used_factors else ""))
+            st.caption("BLS API v1 · heutiger UTC-Tag: abgeschlossene API-Versuche: "
+                       + factor_count(attempts["current"], attempts["known"])
+                       + "; offene Reservierungen heute: " + factor_count(reservations["current"], reservations["known"])
+                       + "; Faktoren mit Versuch oder Reservierung: " + daily_factors + " (jeder Faktor einmal). "
+                       + "Ältere offene Reservierungen: " + factor_count(reservations["older"], reservations["known"])
+                       + (" (" + ", ".join(sorted(reservations["older"])) + ")" if reservations["older"] else "") + ". "
+                       + "Unklare Marken: " + ("; ".join(marker_notes) if marker_notes else "Keine dokumentiert") + ". "
+                       "Höchstens ein API-Versuch je Faktor/UTC-Tag, insgesamt höchstens zwei. "
                        "Das offizielle Limit ohne Registrierung beträgt 25 Anfragen/Tag; das Restbudget ist unbekannt. "
-                       "Ein Prozessabbruch vor der Datensatzspeicherung kann lokale Versuche auslassen. "
+                       "Reservierungen werden vor dem Abruf und Versuche nach dessen Ende lokal gespeichert; "
+                       "sie sind unabhängig vom Abschluss eines Collector-Laufs. Die Angaben betreffen die ausgewählte lokale Speicherung; "
+                       "sie garantieren keine Übernahme nach einem GitHub-Prozessabbruch. "
                        "[BLS API FAQ](https://www.bls.gov/developers/api_FAQs.htm).")
             st.caption("Andere Anwendungen können denselben Schlüssel verwenden. Lokale Zähler sind daher kein Nachweis des gesamten Kontoverbrauchs.")
