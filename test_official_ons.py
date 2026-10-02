@@ -1,11 +1,113 @@
+import ast
+import copy
 import unittest
+from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import Mock, call
 
 import requests
-from official_ons import BASE, PN2_FALLBACK_URL, TITLE, parse_ons_gdp, fetch_ons_gdp
+from official_ons import BASE, PN2_FALLBACK_URL, TITLE, CPI_TITLE, parse_ons_gdp, fetch_ons_gdp, validate_ons_cpi
 
 NOW = datetime(2026, 9, 7, 15, tzinfo=timezone.utc)
+
+
+class ONSCpiContractTests(unittest.TestCase):
+    now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+
+    @staticmethod
+    def fixture(value='3.1'):
+        # Contract fields from the public D7G7/MM23 response; no account data.
+        return {'description': {'cdid': 'D7G7', 'datasetId': 'MM23', 'title': CPI_TITLE,
+                'unit': '%', 'keyNote': 'Change over 12 months  ',
+                'releaseDate': '2026-09-15T23:00:00.000Z', 'date': '2026 AUG', 'number': value},
+                'months': [{'date': '2026 AUG', 'label': '2026 AUG', 'year': '2026',
+                'month': 'August', 'sourceDataset': 'MM23', 'value': value,
+                'updateDate': '2026-09-15T23:00:00.000Z'}]}
+
+    def test_exact_annual_rate_and_zero_are_preserved(self):
+        for value in ('3.1', '0', '-0.5'):
+            payload = self.fixture(value)
+            self.assertIs(validate_ons_cpi(payload, now=self.now), payload['months'])
+
+    def test_missing_or_wrong_identity_and_measurement_rejected(self):
+        for key, value in [('cdid', 'D7BT'), ('datasetId', 'LMS'), ('title', 'CPI INDEX'),
+                           ('unit', 'Index'), ('keyNote', 'Change over 1 month')]:
+            payload = self.fixture(); payload['description'][key] = value
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                validate_ons_cpi(payload, now=self.now)
+        for payload in ([], {}, dict(self.fixture(), description=None)):
+            with self.assertRaises(ValueError): validate_ons_cpi(payload, now=self.now)
+
+    def test_wrong_row_source_or_period_metadata_rejected(self):
+        for key, value in [('sourceDataset', 'LMS'), ('date', '2026AUG'), ('label', '2026 JUL'),
+                           ('year', '2025'), ('month', 'July')]:
+            payload = self.fixture(); payload['months'][0][key] = value
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                validate_ons_cpi(payload, now=self.now)
+
+    def test_nonfinite_bool_invalid_and_impossible_values_rejected(self):
+        for value in ('NaN', 'Infinity', True, {}, 'invalid', '-100.1'):
+            payload = self.fixture(); payload['months'][0]['value'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_ons_cpi(payload, now=self.now)
+
+    def test_missing_values_and_conflicting_duplicates_rejected(self):
+        for rows in ([], None, [None], [dict(self.fixture()['months'][0], value='')]):
+            payload = self.fixture(); payload['months'] = rows
+            with self.assertRaises(ValueError): validate_ons_cpi(payload, now=self.now)
+        payload = self.fixture()
+        payload['months'].append(dict(payload['months'][0], value='3.2'))
+        with self.assertRaisesRegex(ValueError, 'CONFLICTING'):
+            validate_ons_cpi(payload, now=self.now)
+        payload['months'][1]['value'] = '3.1'
+        self.assertEqual(len(validate_ons_cpi(payload, now=self.now)), 2)
+
+    def test_summary_cannot_hide_a_missing_latest_observation(self):
+        for key, value in [('date', '2026 SEP'), ('number', '3.2'), ('number', 'NaN'), ('number', True)]:
+            payload = self.fixture(); payload['description'][key] = value
+            with self.subTest(field=key, value=value), self.assertRaisesRegex(ValueError, 'SUMMARY'):
+                validate_ons_cpi(payload, now=self.now)
+
+    def test_release_date_is_a_calendar_date_and_future_is_rejected(self):
+        payload = self.fixture()
+        validate_ons_cpi(payload, now=datetime(2026, 9, 16, 0, tzinfo=timezone.utc))
+        with self.assertRaisesRegex(ValueError, 'FUTURE_RELEASE'):
+            validate_ons_cpi(payload, now=datetime(2026, 9, 15, 12, tzinfo=timezone.utc))
+        for release in (None, 'invalid', '2026-09-16'):
+            payload['description']['releaseDate'] = release
+            with self.assertRaises(ValueError): validate_ons_cpi(payload, now=self.now)
+
+    def test_unfinished_month_cannot_be_qualified(self):
+        payload = self.fixture()
+        payload['months'][0].update(date='2026 SEP', label='2026 SEP', month='September')
+        payload['description']['date'] = '2026 SEP'
+        with self.assertRaisesRegex(ValueError, 'FUTURE_MONTH'):
+            validate_ons_cpi(payload, now=self.now)
+
+    def test_loader_rejects_bad_contract_and_preserves_existing_pit_dates(self):
+        import pandas as pd
+        import live_data
+        node = next(n for n in ast.parse(Path(__file__).with_name('app.py').read_text()).body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'get_ons_cpi_data')
+        node.decorator_list = []
+        response = Mock(status_code=200)
+        client = Mock()
+        client.get.return_value = response
+        ns = {'requests': client, 'pd': pd, 'datetime': datetime,
+              'live_data': live_data, 'check_demo_active': lambda: False}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<ons-loader>', 'exec'), ns)
+        payload = self.fixture(); response.json.return_value = payload
+        frame, _, is_live = ns['get_ons_cpi_data'](propagate_transport=True)
+        self.assertTrue(is_live); self.assertEqual(frame.iloc[0]['value'], 3.1)
+        self.assertEqual(frame.iloc[0]['release_date'], pd.Timestamp('2026-09-15T23:00:00'))
+        self.assertFalse(frame.iloc[0]['is_pit_limited'])
+        payload['months'][0]['updateDate'] = '2015-10-12T23:00:00.000Z'
+        frame, _, is_live = ns['get_ons_cpi_data']()
+        self.assertTrue(is_live); self.assertTrue(frame.iloc[0]['is_pit_limited'])
+        self.assertEqual(frame.iloc[0]['release_date'], pd.Timestamp('2026-09-25'))
+        bad = copy.deepcopy(payload); bad['description']['unit'] = 'INDEX'
+        response.json.return_value = bad
+        self.assertFalse(ns['get_ons_cpi_data'](propagate_transport=True)[-1])
 
 
 def fixture(dataset='PN2', value='1.2', release='2026-08-12T23:00:00.000Z'):

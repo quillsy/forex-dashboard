@@ -2176,9 +2176,8 @@ def get_ons_cpi_data(*, propagate_transport=False):
             raise ValueError(f"ONS HTTP Error {res.status_code}")
         
         data = res.json()
-        months = data.get("months", [])
-        if not months:
-            raise ValueError("No monthly observations found in ONS response")
+        from official_ons import validate_ons_cpi
+        months = validate_ons_cpi(data)
             
         records = []
         for m in months:
