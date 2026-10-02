@@ -20,4 +20,51 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Run offline regressions
-        run: python -m unittest -v test_core_regressions test_policy_regressions test_eodhd_regressions test_snapshot_regressions test_completed_live_batch test_ui_regressions test_free_sources test_official_macro test_official_bea test_official_nz_gdp test_official_japan_gdp test_official_yields test_source_contracts test_live_data test_official_bls test_official_inflation test_official_ons test_official_hicp test_official_quarterly_labour test_provider_retry test_live_labour_ui test_live_context_ui test_live_view_refresh test_collector_fallback test_collector_preflight test_bis_research test_research_collection test_research_panel test_ec_industry_research test_ec_industry_collection test_research_vintages test_niche_context
+        run: |
+          python -B - <<'PY'
+          from collections import Counter
+          from contextlib import ExitStack
+          import socket
+          import sys
+          import unittest
+          from unittest.mock import patch
+          import requests
+
+          modules = """
+          test_core_regressions test_policy_regressions test_eodhd_regressions
+          test_snapshot_regressions test_completed_live_batch test_ui_regressions
+          test_free_sources test_official_macro test_official_bea
+          test_official_nz_gdp test_official_japan_gdp test_official_yields
+          test_source_contracts test_live_data test_official_bls
+          test_official_inflation test_official_ons test_official_hicp
+          test_official_quarterly_labour test_provider_retry test_live_labour_ui
+          test_live_context_ui test_live_view_refresh test_collector_fallback
+          test_collector_preflight test_bis_research test_research_collection
+          test_research_panel test_ec_industry_research test_ec_industry_collection
+          test_research_vintages test_niche_context
+          """.split()
+          violations = Counter()
+
+          def forbidden(stage):
+              def fail(*args, **kwargs):
+                  violations[stage] += 1
+                  raise AssertionError('OFFLINE_NETWORK_ATTEMPT:' + stage)
+              return fail
+
+          # Guard imports and tests. Count attempts even if a test or source
+          # parser catches the exception; logs contain fixed stage names only.
+          with ExitStack() as guards:
+              for target, name, stage in (
+                  (requests.adapters.HTTPAdapter, 'send', 'HTTPAdapter.send'),
+                  (socket, 'create_connection', 'socket.create_connection'),
+                  (socket.socket, 'connect', 'socket.connect'),
+                  (socket.socket, 'connect_ex', 'socket.connect_ex'),
+                  (socket, 'getaddrinfo', 'socket.getaddrinfo'),
+              ):
+                  guards.enter_context(patch.object(target, name, new=forbidden(stage)))
+              suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print('OFFLINE_NETWORK_ATTEMPTS=', sum(violations.values()))
+          print('OFFLINE_NETWORK_STAGES=', dict(violations))
+          sys.exit(0 if result.wasSuccessful() and not violations else 1)
+          PY

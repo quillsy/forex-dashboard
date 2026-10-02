@@ -16,7 +16,9 @@ def _fallback_state(path, state):
     descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(state, handle)
+            json.dump(state, handle, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -24,32 +26,52 @@ def _fallback_state(path, state):
 
 
 def _seed_fallback_status(source, destination):
-    """Preserve instance counters and the longer of known provider cooldowns."""
+    """Preserve budgets; caller holds the destination's collector write lock."""
     import re
     import live_data
     def read(path):
         try:
             value = json.loads(path.read_text())
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {}
+        except (OSError, ValueError):
+            raise ValueError("INVALID_PROVIDER_STATUS") from None
+        if not isinstance(value, dict) or not isinstance(value.get("providers", {}), dict):
+            raise ValueError("INVALID_PROVIDER_STATUS")
+        return value
     local, remote = read(destination), read(source)
     providers = local.get("providers")
-    if not isinstance(providers, dict):
+    if providers is None:
         providers = {}
     incoming = remote.get("providers", {})
     for host, info in (incoming.items() if isinstance(incoming, dict) else []):
-        if not isinstance(info, dict) or not re.fullmatch(r"[a-z0-9.-]+", host):
+        if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9.-]+", host):
             continue
+        if not isinstance(info, dict):
+            raise ValueError("INVALID_PROVIDER_STATUS")
+        if info.get("retry_after_at") is not None and live_data.timestamp(info["retry_after_at"]) is None:
+            raise ValueError("INVALID_PROVIDER_STATUS")
         deadline = live_data.timestamp(info.get("retry_after_at"))
         old = providers.get(host, {})
         if not isinstance(old, dict):
-            old = {}
+            raise ValueError("INVALID_PROVIDER_STATUS")
+        if old.get("retry_after_at") is not None and live_data.timestamp(old["retry_after_at"]) is None:
+            raise ValueError("INVALID_PROVIDER_STATUS")
         previous = live_data.timestamp(old.get("retry_after_at"))
         if deadline and (previous is None or deadline > previous):
             providers[host] = dict(old, retry_after_at=deadline.isoformat())
     local["providers"] = providers
     _fallback_state(destination, local)
+
+
+def _seed_fallback_live(source, destination):
+    """Use one observation batch while retaining later local budget marks."""
+    import live_data
+    incoming = live_data._load_file(source)
+    if not incoming:
+        return
+    live_data.merge_bls_attempts(incoming, live_data.read_bls_attempts(destination))
+    live_data.save(incoming, destination)
 
 
 def maybe_start_live_fallback(keys):
@@ -77,6 +99,7 @@ def maybe_start_live_fallback(keys):
         return "unavailable"
     directory = live_data.runtime_directory()
     lock = None
+    seed_lock = None
     try:
         if directory.is_symlink():
             return "unavailable"
@@ -98,15 +121,25 @@ def maybe_start_live_fallback(keys):
         if attempted and (now - attempted).total_seconds() < 1800:
             lock.close()
             return state.get("state") if state.get("state") in ("failed", "timeout") else "cooldown"
+        # A manual/local collector also holds this lock, even if it was not
+        # launched by this UI instance. Its read/merge/save budget updates must
+        # never race a seed protected only by the separate launch lock.
+        seed_lock = (directory / ".data_collection.lock").open("a")
+        try:
+            fcntl.flock(seed_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            seed_lock.close()
+            lock.close()
+            return "running"
         state = {"attempted_at": now.isoformat(), "state": "running"}
         # Seed only admissible live/public cache files; never .env or secrets.
         source = live_data.selected_live_directory()
         if source.resolve() != directory.resolve():
-            for name in ("live_core_data.json", ".policy_rates_cache.json"):
-                candidate = source / name
-                if candidate.is_file():
-                    shutil.copy2(candidate, directory / name)
             _seed_fallback_status(source / "data_collection_status.json", directory / "data_collection_status.json")
+            _seed_fallback_live(source / "live_core_data.json", directory / "live_core_data.json")
+            candidate = source / ".policy_rates_cache.json"
+            if candidate.is_file():
+                shutil.copy2(candidate, directory / candidate.name)
         _fallback_state(state_path, state)
         # A minimal child environment also prevents unrelated inherited keys.
         environment = {name: os.environ[name] for name in
@@ -116,6 +149,10 @@ def maybe_start_live_fallback(keys):
                             if name in LIVE_FALLBACK_KEYS and isinstance(value, str) and value})
         environment.update(FX_COLLECTOR="1", FX_FALLBACK_MODE="1")
         command = [sys.executable, "-B", str(Path(__file__).resolve()), "--live-only"]
+        # The child takes this same lock in main(). The launch lock continues
+        # to cover the gap and the child's whole lifetime for UI page changes.
+        seed_lock.close()
+        seed_lock = None
 
         def worker():
             try:
@@ -137,6 +174,8 @@ def maybe_start_live_fallback(keys):
         threading.Thread(target=worker, name="fx-live-fallback", daemon=True).start()
         return "started"
     except (OSError, ValueError, RuntimeError):
+        if seed_lock is not None:
+            seed_lock.close()
         if lock is not None:
             lock.close()
         return "unavailable"
@@ -276,6 +315,7 @@ def collection_exit_code(overall, components, live_only):
 def main():
     import fcntl
     import live_data
+    from provider_transport import CollectorTransport, provider_day_counts
     os.environ["FX_COLLECTOR"] = "1"
     os.environ.pop("FX_READ_CORE_CACHE", None)
     live_only = "--live-only" in sys.argv
@@ -292,6 +332,9 @@ def main():
         update_daily_markers(timestamp, {}, live_only)
         try:
             app = import_collection_app()
+            if not isinstance(app.requests, CollectorTransport):
+                raise RuntimeError("DURABLE_COLLECTOR_TRANSPORT_REQUIRED")
+            app.requests.enable_durable_usage()
             components = {}
             components["policy_rates"] = _run_component(lambda: _policy_summary(app.refresh_all_verified_policy_rates(fred_key=app.FRED_KEY)))
             # EODHD's limited daily budget is handled by its persisted collector.
@@ -306,26 +349,38 @@ def main():
             error = None if overall == "SUCCESS" else "One or more collection components are incomplete; see components."
         except Exception as exception:
             overall, components, error = "FAILED", {}, type(exception).__name__
+        if ("app" in locals() and isinstance(app.requests, CollectorTransport)
+                and app.requests.persistence_failed):
+            # Do not replace an unreadable/failed operational ledger with the
+            # loader's defaults and thereby grant a fresh provider budget.
+            print("Data collection: FAILED (PROVIDER_ATTEMPT_PERSISTENCE_FAILED)")
+            return 1
+        # Request reservations/outcomes were already saved during I/O. Reload
+        # them instead of adding this run's counters a second time or replacing
+        # its confirmed cooldown with the status from before collection.
+        status = load_status()
         status.update({"last_run_timestamp": timestamp, "last_run_status": overall,
                        "last_run_error": error, "components": components})
         status["mode"] = "live" if live_only else "daily"
         # Preserve these across subsequent live-only runs. The attempt marker
         # prevents duplicate provider requests; completion remains distinct.
         update_daily_markers(timestamp, components, live_only)
-        if "app" in locals():
+        if "app" in locals() and isinstance(app.requests, CollectorTransport):
             old_providers = status.get("providers", {})
-            day = timestamp[:10]
-            for host, usage in app.requests.usage.items():
-                old = old_providers.get(host, {})
-                old_count = old.get("requests_observed_utc_day", 0) if old.get("counted_day_utc") == day else 0
-                usage["requests_observed_utc_day"] = int(old_count) + usage["requests_this_run"]
-                usage["counted_day_utc"] = day
+            old_providers = old_providers if isinstance(old_providers, dict) else {}
+            day = datetime.now(timezone.utc).date().isoformat()
             providers = {}
             for host, old in old_providers.items():
-                providers[host] = dict(old, requests_this_run=0, outcomes_this_run={}, last_failure_at=None, status="NOT_REQUESTED",
-                    requests_observed_utc_day=old.get("requests_observed_utc_day", 0) if old.get("counted_day_utc") == day else 0,
-                    counted_day_utc=day)
-            providers.update(app.requests.usage)
+                if not isinstance(old, dict):
+                    providers[host] = old
+                    continue
+                combined = dict(old, requests_this_run=0, outcomes_this_run={}, last_failure_at=None, status="NOT_REQUESTED")
+                combined.update(app.requests.usage.get(host, {}))
+                combined.update(provider_day_counts(combined, day))
+                providers[host] = combined
+            for host, usage in app.requests.usage.items():
+                if host not in providers:
+                    providers[host] = dict(usage, **provider_day_counts(usage, day))
             status["providers"] = providers
         counter = {"SUCCESS": "total_successful_runs", "PARTIAL": "total_partial_runs", "FAILED": "total_failed_runs"}[overall]
         status[counter] = status.get(counter, 0) + 1

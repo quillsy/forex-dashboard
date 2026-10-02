@@ -145,6 +145,53 @@ def save(data, path=PATH):
             os.unlink(temporary)
 
 
+BLS_ATTEMPT_FIELDS = tuple("bls_" + kind + "_" + state
+                           for kind in ("pdf", "api") for state in ("attempts", "reservations"))
+
+
+def read_bls_attempts(path):
+    """Operational budgets are independent of a cache's model/completion."""
+    try:
+        value = json.loads(Path(path).read_text())
+        if not isinstance(value, dict):
+            raise ValueError("INVALID_BLS_ATTEMPTS")
+        return {field: value[field] for field in BLS_ATTEMPT_FIELDS if field in value}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        # Corrupt state is not evidence of an unused budget.
+        return {field: "INVALID" for field in BLS_ATTEMPT_FIELDS}
+
+
+def merge_bls_attempts(data, *states):
+    """Merge only attempt budgets, never observations or their timestamps."""
+    for field in BLS_ATTEMPT_FIELDS:
+        merged = {}
+        for state in (data, *states):
+            incoming = state.get(field, {})
+            if not isinstance(incoming, dict):
+                incoming = dict.fromkeys(("Inflation", "Arbeitsmarkt"), "INVALID")
+            for factor in ("Inflation", "Arbeitsmarkt"):
+                if factor not in incoming:
+                    continue
+                candidate, previous = timestamp(incoming[factor]), timestamp(merged.get(factor))
+                if candidate is None or (factor in merged and previous is None):
+                    merged[factor] = "INVALID"
+                elif previous is None or candidate > previous:
+                    merged[factor] = candidate.isoformat()
+        data[field] = merged
+    return data
+
+
+def _bls_budget_marker(data, kind, factor, now):
+    candidates = [data["bls_" + kind + "_" + state][factor]
+                  for state in ("attempts", "reservations")
+                  if factor in data["bls_" + kind + "_" + state]]
+    parsed = [timestamp(value) for value in candidates]
+    invalid = any(value is None or value > now for value in parsed)
+    return (None if invalid else max(parsed, default=None)), invalid
+
+
 def eligible(record, now=None, factor=None, currency=None):
     now = now or now_utc()
     if not isinstance(record, dict):
@@ -468,15 +515,33 @@ def collect(app, path=PATH):
     checked_at = now_utc().isoformat()
     data = {"model_version": MODEL, "last_attempt_at": checked_at, "currencies": {}}
     metadata = {}
-    prior_pdf_attempts = previous.get("bls_pdf_attempts", {})
-    prior_pdf_attempts = prior_pdf_attempts if isinstance(prior_pdf_attempts, dict) else {}
-    data["bls_pdf_attempts"] = {factor: value for factor, value in prior_pdf_attempts.items()
-                                if factor in REPORTS and timestamp(value) is not None}
-    prior_api_attempts = previous.get("bls_api_attempts", {})
-    if not isinstance(prior_api_attempts, dict):
-        prior_api_attempts = {factor: "INVALID" for factor in REPORTS}
-    data["bls_api_attempts"] = {factor: value if timestamp(value) is not None else "INVALID"
-                                for factor, value in prior_api_attempts.items() if factor in REPORTS}
+    session = app.requests if isinstance(getattr(app, "requests", None), CollectorTransport) else http
+    durable = isinstance(session, CollectorTransport) and session.durable
+    operational = copy.deepcopy(previous)
+    operational.setdefault("model_version", MODEL)
+    merge_bls_attempts(operational, read_bls_attempts(path) if durable else {})
+    merge_bls_attempts(data, operational)
+
+    def record_bls_attempt(factor, kind, reserved, at):
+        nonlocal operational
+        staged = copy.deepcopy(operational)
+        reservation = staged["bls_" + kind + "_reservations"]
+        if reserved:
+            reservation[factor] = at.isoformat()
+        else:
+            staged["bls_" + kind + "_attempts"][factor] = at.isoformat()
+            if timestamp(reservation.get(factor)) == at:
+                reservation.pop(factor, None)
+        try:
+            # Keep the old completed batch and checked observations exactly as
+            # they are. A reservation is never a completed/verified dataset.
+            save(staged, path)
+        except (OSError, ValueError, TypeError):
+            raise http.RequestException("BLS_ATTEMPT_PERSISTENCE_FAILED") from None
+        operational = staged
+        for field in BLS_ATTEMPT_FIELDS:
+            data[field] = copy.deepcopy(staged[field])
+
     data["bls_provider_status"] = {}
     prior_release_states = previous.get("bls_release_states", {})
     prior_release_states = prior_release_states if isinstance(prior_release_states, dict) else {}
@@ -498,16 +563,17 @@ def collect(app, path=PATH):
              "next_due_at": prior.get("next_due_at"), "release_url": prior_obs.get("bls_release_url"),
              "proof_source": prior_obs.get("bls_proof_source")})
         diagnostic = {}
+        last_pdf, pdf_blocked = _bls_budget_marker(data, "pdf", factor, timestamp(checked_at))
+        last_api, api_blocked = _bls_budget_marker(data, "api", factor, timestamp(checked_at))
         try:
             state = fetch_release_state(
-                factor, session=app.requests if isinstance(getattr(app, "requests", None), CollectorTransport) else http,
+                factor, session=session,
                 now=timestamp(checked_at), previous_state=previous_state,
-                last_pdf_attempt=timestamp(prior_pdf_attempts.get(factor)),
-                last_api_attempt=timestamp(prior_api_attempts.get(factor)),
-                api_budget_blocked=(factor in prior_api_attempts and
-                                    (timestamp(prior_api_attempts[factor]) is None or
-                                     timestamp(prior_api_attempts[factor]) > timestamp(checked_at))),
-                diagnostics=diagnostic)
+                last_pdf_attempt=last_pdf, last_api_attempt=last_api,
+                pdf_budget_blocked=pdf_blocked, api_budget_blocked=api_blocked,
+                diagnostics=diagnostic,
+                attempt_recorder=(lambda kind, reserved, at: record_bls_attempt(factor, kind, reserved, at))
+                                 if durable else None)
             bls_states[factor] = {"state": state}
             data["bls_provider_status"][factor] = {
                 "dol": diagnostic.get("pdf_status", "NOT_REQUESTED"),
@@ -538,6 +604,7 @@ def collect(app, path=PATH):
                 "BLS_PDF_RELEASE_DATE_UNKNOWN": "Amtlicher BLS-Veröffentlichungstermin für die aktuelle Ausgabe unbekannt",
                 "BLS_PDF_RELEASE_NOT_CURRENT": "Aktuelle amtliche BLS-Ausgabe nicht bestätigt",
                 "BLS_PDF_RECHECK_COOLDOWN": "Nächste amtliche BLS-Ausgabe wird innerhalb einer Stunde erneut geprüft",
+                "BLS_PDF_ATTEMPT_STATE_INVALID": "BLS-PDF-Versuchsmarke ungültig",
                 "BLS_API_WAIT_24H": "BLS-API-Fallback erst 24 Stunden nach geplantem Termin zulässig",
                 "BLS_API_DAILY_LIMIT": "BLS-API-Tageslimit für diesen Faktor erreicht",
                 "BLS_API_ATTEMPT_STATE_INVALID": "BLS-API-Versuchszähler ungültig",
@@ -551,9 +618,9 @@ def collect(app, path=PATH):
                 "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"),
                 "proof": str(error) if isinstance(error, BlsInvalid) else "BLS_ERROR"}
         finally:
-            if diagnostic.get("pdf_attempted"):
+            if diagnostic.get("pdf_attempted") and not durable:
                 data["bls_pdf_attempts"][factor] = checked_at
-            if diagnostic.get("api_attempted"):
+            if diagnostic.get("api_attempted") and not durable:
                 data["bls_api_attempts"][factor] = checked_at
             if factor not in data["bls_release_states"] and verified_state:
                 data["bls_release_states"][factor] = verified_state
