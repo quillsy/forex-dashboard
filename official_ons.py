@@ -157,6 +157,79 @@ def fetch_ons_gdp(*, now=None, session=None):
 LABOUR_URL = "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data"
 MONTHS = {name: pos for pos, name in enumerate(('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'), 1)}
 
+CPI_TITLE = 'CPI ANNUAL RATE 00: ALL ITEMS 2015=100'
+
+
+def validate_ons_cpi(payload, *, now=None):
+    """Validate D7G7/MM23 annual headline CPI before the existing PIT loader.
+
+    The title names the index base, but D7G7 itself is a 12-month percentage
+    change. ONS releaseDate is a calendar date at London midnight, not proof
+    of the publication hour. Do not replace the loader's historical dates.
+    """
+    checked = _now(now)
+    if not isinstance(payload, dict):
+        raise ValueError('ONS_CPI_PAYLOAD_INVALID')
+    meta = payload.get('description')
+    expected = {'cdid': 'D7G7', 'datasetId': 'MM23', 'title': CPI_TITLE, 'unit': '%'}
+    if not isinstance(meta, dict) or any(meta.get(k) != v for k, v in expected.items()):
+        raise ValueError('ONS_CPI_SERIES_MISMATCH')
+    if str(meta.get('keyNote', '')).strip() != 'Change over 12 months':
+        raise ValueError('ONS_CPI_MEASUREMENT_MISMATCH')
+    try:
+        release = datetime.fromisoformat(str(meta.get('releaseDate')).replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError('ONS_CPI_RELEASE_DATE_INVALID') from None
+    if release.tzinfo is None:
+        raise ValueError('ONS_CPI_RELEASE_DATE_INVALID')
+    release_day = release.astimezone(ZoneInfo('Europe/London')).date()
+    if release_day > checked.astimezone(ZoneInfo('Europe/London')).date():
+        raise ValueError('ONS_FUTURE_RELEASE')
+    rows = payload.get('months')
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('ONS_MONTHS_MISSING')
+    values = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('sourceDataset') != 'MM23':
+            raise ValueError('ONS_ROW_DATASET_MISMATCH')
+        match = re.fullmatch(r'(\d{4}) ([A-Z]{3})', str(row.get('date', '')))
+        if not match or match[2] not in MONTHS:
+            raise ValueError('ONS_MONTH_INVALID')
+        year, month = int(match[1]), MONTHS[match[2]]
+        if (row.get('label') != row['date'] or row.get('year') != str(year)
+                or row.get('month') != calendar.month_name[month]):
+            raise ValueError('ONS_MONTH_CONFLICT')
+        period = datetime(year, month, 1).date()
+        period_end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+        if period_end > checked.date() or period_end > release_day:
+            raise ValueError('ONS_FUTURE_MONTH')
+        raw = row.get('value')
+        if raw in (None, ''):
+            continue
+        if isinstance(raw, bool):
+            raise ValueError('ONS_VALUE_INVALID')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError('ONS_VALUE_INVALID') from None
+        if not math.isfinite(value) or value < -100:
+            raise ValueError('ONS_VALUE_INVALID')
+        if row['date'] in values and values[row['date']][1] != value:
+            raise ValueError('ONS_CONFLICTING_PERIOD')
+        values[row['date']] = (period, value)
+    if not values:
+        raise ValueError('ONS_CPI_VALUES_MISSING')
+    latest = max(values, key=lambda key: values[key][0])
+    summary = meta.get('number')
+    try:
+        summary_value = float(summary)
+    except (TypeError, ValueError):
+        raise ValueError('ONS_CPI_SUMMARY_MISMATCH') from None
+    if (isinstance(summary, bool) or meta.get('date') != latest
+            or not math.isfinite(summary_value) or summary_value != values[latest][1]):
+        raise ValueError('ONS_CPI_SUMMARY_MISMATCH')
+    return rows
+
 
 def parse_ons_labour(payload, *, now=None):
     """MGSX rolling three-month unemployment, labelled by actual period ends."""
