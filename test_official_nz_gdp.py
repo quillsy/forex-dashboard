@@ -100,7 +100,7 @@ class ProposalTests(unittest.TestCase):
             live_data.render_status(st)
         rows=[x for call in st.dataframe.call_args_list for x in call.args[0] if isinstance(x,dict)]
         target=next(x for x in rows if x.get('Währung')=='NZD' and x.get('Faktor')=='GDP')
-        self.assertIn('Neuseeland',target['Nächste Fälligkeit'])
-        self.assertIn('unbekannt',target['Nächste Fälligkeit'])
+        self.assertIn('Neuseeland',target['Nächster Quellentermin'])
+        self.assertIn('unbekannt',target['Nächster Quellentermin'])
 
 if __name__=='__main__': unittest.main()

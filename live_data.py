@@ -766,6 +766,25 @@ def collect(app, path=PATH):
     return {"status": data["status"], "eligible_factors": sum(counts), "total_factors": 40}
 
 
+def _freshness_check_label(record, observation, now):
+    """Display the earliest existing freshness boundary, without qualifying data."""
+    checked = timestamp(record.get("checked_at"))
+    expires = timestamp(record.get("expires_at"))
+    due = timestamp(record.get("next_due_at"))
+    if (checked is None or checked > now or expires is None
+            or (record.get("next_due_at") is not None and due is None)):
+        return "Nicht bestätigt"
+    deadlines = [(expires, "Altersgrenze; neuerer Wert erforderlich")]
+    if due is not None:
+        deadlines.append((due, "Quellenfrist"))
+    if due is None or observation.get("needs_hourly_check") is True:
+        deadlines.append((checked + timedelta(hours=1), "stündliche Prüfung"))
+    deadline = min(at for at, _ in deadlines)
+    reasons = " / ".join(reason for at, reason in deadlines if at == deadline)
+    prefix = "Fällig seit " if now >= deadline else "Ab "
+    return prefix + deadline.isoformat() + " (" + reasons + ")"
+
+
 def render_status(st, authorized=False):
     data = load()
     checked = timestamp(data.get("completed_at"))
@@ -799,6 +818,13 @@ def render_status(st, authorized=False):
                            and observation.get("bls_release_url") else None)
             bls_api_first = (observation.get("bls_first_observed_at")
                              if observation.get("bls_proof_source") == "BLS_API_V1" else None)
+            next_source_date = record.get("next_due_at") if timestamp(record.get("next_due_at")) else "Unbekannt"
+            day_start_labels = {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan",
+                                "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)",
+                                "date_only_start_of_EU_day": "Luxemburg"}
+            if next_source_date != "Unbekannt" and observation.get("next_due_precision") in day_start_labels:
+                next_source_date += (" (vorsorglich ab Tagesbeginn " + day_start_labels[observation["next_due_precision"]]
+                                     + "; Veröffentlichungsuhrzeit unbekannt)")
             rows.append({"Währung": currency, "Faktor": factor,
                          "Status": "Verfügbar" if valid else "Gesperrt", "Grund": reason,
                          "Aktualität": current_freshness(record, now, factor) if valid else "UNAVAILABLE",
@@ -817,7 +843,8 @@ def render_status(st, authorized=False):
                                            if bls_embargo else record.get("published_at")
                                            or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt")),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
-                         "Nächste Fälligkeit": ((record.get("next_due_at") or "") + " (vorsorglich ab Tagesbeginn " + {"date_only_start_of_NZ_day": "Neuseeland", "date_only_start_of_JP_day": "Japan", "date_only_start_of_AU_day": "Australien", "date_only_start_of_CA_Eastern_day": "Kanada (Eastern Time)", "date_only_start_of_EU_day": "Luxemburg"}[observation["next_due_precision"]] + "; Veröffentlichungsuhrzeit unbekannt)") if observation.get("next_due_precision") in ("date_only_start_of_NZ_day", "date_only_start_of_JP_day", "date_only_start_of_AU_day", "date_only_start_of_CA_Eastern_day", "date_only_start_of_EU_day") else record.get("next_due_at") or "Stündliche Prüfung; Kalender unbekannt"})
+                         "Nächster Quellentermin": next_source_date,
+                         "Aktualitätsprüfung fällig": _freshness_check_label(record, observation, now)})
     available = sum(row["Status"] == "Verfügbar" for row in rows)
     retained = sum(row["Status"] == "Verfügbar" and row["Letzter Abruf"] == "Fehlgeschlagen; letzter geprüfter Wert" for row in rows)
     st.caption(f"Aktuell zulässig: {available}/40 CORE-Faktoren · davon {retained} nach fehlgeschlagenem Abruf aus dem geprüften Zwischenspeicher · {40 - available} gesperrt.")
@@ -855,6 +882,8 @@ def render_status(st, authorized=False):
     st.dataframe(overview, hide_index=True, use_container_width=True)
     st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
+        st.caption("Quellentermine können neue Veröffentlichungen oder bereits angekündigte wirksame Änderungen betreffen. "
+                   "Die Aktualitätsprüfung kann früher fällig sein.")
         st.dataframe(rows, hide_index=True, use_container_width=True)
         st.caption("This service uses API functions from e-Stat, however its contents are not guaranteed by government. "
                    "[e-Stat credit](https://www.e-stat.go.jp/api/en/api-info/credit/)")
