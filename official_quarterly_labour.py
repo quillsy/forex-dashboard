@@ -283,6 +283,7 @@ def fetch_quarterly_labour(currency, *, now=None, session=None):
 
 
 JP_LABOUR_FILE = 'https://www.e-stat.go.jp/en/stat-search/file-download?fileKind=0&statInfId=000031831358'
+JP_LABOUR_METADATA = 'https://www.e-stat.go.jp/en/stat-search/files?stat_infid=000031831358'
 JP_LABOUR_RESULTS = 'https://www.stat.go.jp/english/data/roudou/result.html'
 JP_LABOUR_CALENDAR = 'https://www.stat.go.jp/english/data/roudou/1543.html'
 JP_LABOUR_RIGHTS = 'https://www.stat.go.jp/english/info/riyou.html'
@@ -290,6 +291,70 @@ JP_LABOUR_RIGHTS = 'https://www.stat.go.jp/english/info/riyou.html'
 
 def _jp_space(value):
     return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def parse_japan_labour_metadata(metadata_html, calendar_html, *, now=None):
+    """Bind the release to the existing e-Stat file, then check its calendar.
+
+    The overview no longer states its monthly period or publication date.
+    e-Stat's date and time has no verified timezone here: retain only its date,
+    never promote the displayed clock to an observed publication timestamp.
+    """
+    from bs4 import BeautifulSoup
+    from urllib.parse import parse_qsl, urljoin, urlsplit
+    page = BeautifulSoup(metadata_html, 'html.parser')
+    headings = [x for x in page.select('th.stat-resource_item')
+                if _jp_space(x.get_text(' ', strip=True)) == 'Statistics code']
+    if len(headings) != 1 or headings[0].find_parent('table') is None:
+        raise ValueError('JP_LABOUR_METADATA_AMBIGUOUS')
+    fields = {}
+    for tr in headings[0].find_parent('table').find_all('tr'):
+        cells = tr.find_all(['td', 'th'], recursive=False)
+        if len(cells) < 2 or 'stat-resource_item' not in cells[0].get('class', []):
+            continue
+        key = _jp_space(cells[0].get_text(' ', strip=True))
+        if key in fields:
+            raise ValueError('JP_LABOUR_METADATA_AMBIGUOUS')
+        fields[key] = _jp_space(cells[1].get_text(' ', strip=True))
+    expected = {
+        'Statistics name': 'Labour Force Survey',
+        'Statistics code': '00200531',
+        'Dataset category0': 'Labour force survey (Public documents, Historical data)',
+        'Dataset category1': 'Historical data',
+        'Dataset category2': 'Basic tabulation',
+        'Table number': '1-a-1',
+        'Table category1': '[Monthly figures - Results of whole Japan] Seasonally adjusted series and Original series',
+        'Statistical table name': 'Major items (Labour force, Employed person, Employee, Unemployed person, Not in labour force, Unemployment rate)',
+        'Publisher': 'Ministry of Internal Affairs and Communications',
+        'Tabulation area': 'Nationwide',
+    }
+    if any(fields.get(key) != value for key, value in expected.items()):
+        raise ValueError('JP_LABOUR_METADATA_IDENTITY_INVALID')
+    downloads = page.select('a.stat-download_icon_top[href]')
+    if len(downloads) != 1:
+        raise ValueError('JP_LABOUR_METADATA_DOWNLOAD_AMBIGUOUS')
+    link = urlsplit(urljoin(JP_LABOUR_METADATA, downloads[0]['href']))
+    approved = urlsplit(JP_LABOUR_FILE)
+    if ((link.scheme, link.netloc, link.path) != (approved.scheme, approved.netloc, approved.path)
+            or link.fragment or sorted(parse_qsl(link.query, keep_blank_values=True))
+            != sorted(parse_qsl(approved.query))):
+        raise ValueError('JP_LABOUR_METADATA_DOWNLOAD_MISMATCH')
+    match = re.fullmatch(r'(\d{4}) ([A-Za-z]{3})\.', fields.get('Survey date', ''))
+    months = {name[:3]: number for name, number in MONTHS.items()}
+    if not match or match[2] not in months:
+        raise ValueError('JP_LABOUR_METADATA_PERIOD_INVALID')
+    year, month = int(match[1]), months[match[2]]
+    try:
+        released = datetime.strptime(fields.get('Published date and time', ''), '%Y-%m-%d %H:%M').date()
+        end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+    except ValueError as exc:
+        raise ValueError('JP_LABOUR_METADATA_PUBLICATION_INVALID') from exc
+    if released <= end:
+        raise ValueError('JP_LABOUR_METADATA_PUBLICATION_INVALID')
+    result = _japan_labour_calendar(f'{year:04d}-{month:02d}', released, calendar_html, now=now)
+    result['publication_basis'] = ('Amtliche e-Stat-Metadaten derselben Datei; Referenzmonat und '
+                                   'Veröffentlichungsdatum mit unabhängigem amtlichem Kalender abgeglichen')
+    return result
 
 
 def parse_japan_labour_release(results_html, calendar_html, *, now=None):
@@ -300,7 +365,6 @@ def parse_japan_labour_release(results_html, calendar_html, *, now=None):
     """
     from bs4 import BeautifulSoup
     checked = _now(now)
-    local_day = checked.astimezone(ZoneInfo('Asia/Tokyo')).date()
     releases = []
     for tr in BeautifulSoup(results_html, 'html.parser').find_all('tr'):
         cells = [_jp_space(x.get_text(' ', strip=True)) for x in tr.find_all(['td', 'th'], recursive=False)]
@@ -317,6 +381,14 @@ def parse_japan_labour_release(results_html, calendar_html, *, now=None):
     if len(releases) != 1:
         raise ValueError('JP_LABOUR_RELEASE_IDENTITY_INVALID')
     period, released = releases[0]
+    return _japan_labour_calendar(period, released, calendar_html, now=checked)
+
+
+def _japan_labour_calendar(period, released, calendar_html, *, now=None):
+    """Both release formats must agree with the independent official calendar."""
+    from bs4 import BeautifulSoup
+    checked = _now(now)
+    local_day = checked.astimezone(ZoneInfo('Asia/Tokyo')).date()
     if released > local_day:
         raise ValueError('JP_LABOUR_FUTURE_RELEASE')
     schedule = {}
@@ -428,18 +500,19 @@ def parse_japan_labour(content, release, *, now=None):
             'source_url': JP_LABOUR_FILE, 'series_id': 'Historical1-a-1:unemployment_rate:BothSexes:SA:M',
             'checked_at': checked.isoformat(), 'published_at': None,
             'release_date_known': release['release_date_known'], 'next_due_at': release['next_due_at'],
-            'next_due_precision': 'date_only_start_of_JP_day', 'reuse_terms': JP_LABOUR_RIGHTS}
+            'next_due_precision': 'date_only_start_of_JP_day', 'reuse_terms': JP_LABOUR_RIGHTS,
+            'publication_basis': release.get('publication_basis')}
 
 
 def fetch_japan_labour(*, now=None, session=None):
     checked = _now(now)
     transport = session or requests
     pages = []
-    for url in (JP_LABOUR_RESULTS, JP_LABOUR_CALENDAR):
+    for url in (JP_LABOUR_METADATA, JP_LABOUR_CALENDAR):
         response = transport.get(url, timeout=20)
         response.raise_for_status()
         pages.append(response.text)
-    release = parse_japan_labour_release(*pages, now=checked)
+    release = parse_japan_labour_metadata(*pages, now=checked)
     response = transport.get(JP_LABOUR_FILE, timeout=20)
     response.raise_for_status()
     return parse_japan_labour(response.content, release, now=checked)
