@@ -410,6 +410,100 @@ def _statcan_object(payload):
     return item
 
 
+STATCAN_CPI_COORD = '2.2.0.0.0.0.0.0.0.0'
+STATCAN_CPI_TITLE = 'Canada;All-items'
+
+
+def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None):
+    """Validate the original monthly NSA CPI index before the existing YoY path.
+
+    WDS code meanings: https://www.statcan.gc.ca/en/developers/wds/user-guide
+    Preserve p/r symbols. Non-normal, suppressed or unknown status codes do
+    not qualify. releaseTime is the current publication/revision, not a PIT
+    vintage guarantee. No scaling or annual-rate transformation is added.
+    """
+    from zoneinfo import ZoneInfo
+    checked = _utc_now(now)
+    series, data, cube = map(_statcan_object, (series_payload, data_payload, cube_payload))
+    for item in (series, data):
+        expected = {'productId': 18100004, 'vectorId': 41690973, 'coordinate': STATCAN_CPI_COORD}
+        if any(type(item.get(k)) is not type(v) or item[k] != v for k, v in expected.items()):
+            raise ValueError('STATCAN_CPI_SERIES_MISMATCH')
+    expected = {'SeriesTitleEn': STATCAN_CPI_TITLE, 'memberUomCode': 17,
+                'frequencyCode': 6, 'scalarFactorCode': 0, 'decimals': 1, 'terminated': 0}
+    if any(type(series.get(k)) is not type(v) or series[k] != v for k, v in expected.items()):
+        raise ValueError('STATCAN_CPI_METADATA_MISMATCH')
+    if (cube.get('productId') != '18100004' or type(cube.get('frequencyCode')) is not int
+            or cube['frequencyCode'] != 6 or cube.get('archiveStatusCode') != '2'
+            or cube.get('cubeTitleEn') != 'Consumer Price Index, monthly, not seasonally adjusted'):
+        raise ValueError('STATCAN_CPI_CUBE_MISMATCH')
+    dimensions = cube.get('dimension')
+    if not isinstance(dimensions, list) or len(dimensions) != 2:
+        raise ValueError('STATCAN_CPI_DIMENSIONS_INVALID')
+    for pos, title, label in ((1, 'Geography', 'Canada'), (2, 'Products and product groups', 'All-items')):
+        dims = [d for d in dimensions if isinstance(d, dict) and type(d.get('dimensionPositionId')) is int
+                and d['dimensionPositionId'] == pos]
+        if len(dims) != 1 or dims[0].get('dimensionNameEn') != title:
+            raise ValueError('STATCAN_CPI_DIMENSIONS_INVALID')
+        members = dims[0].get('member')
+        if not isinstance(members, list):
+            raise ValueError('STATCAN_CPI_MEMBER_INVALID')
+        selected = [m for m in members if isinstance(m, dict) and type(m.get('memberId')) is int and m['memberId'] == 2]
+        if (len(selected) != 1 or selected[0].get('memberNameEn') != label
+                or type(selected[0].get('terminated')) is not int or selected[0]['terminated'] != 0
+                or (pos == 2 and (type(selected[0].get('memberUomCode')) is not int
+                                  or selected[0]['memberUomCode'] != 17))):
+            raise ValueError('STATCAN_CPI_MEMBER_INVALID')
+
+    def publication(raw):
+        if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
+            raise ValueError('STATCAN_CPI_RELEASE_INVALID')
+        published = datetime.strptime(raw, '%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        if published > checked:
+            raise ValueError('STATCAN_CPI_FUTURE_RELEASE')
+        return published
+
+    cube_release = publication(cube.get('releaseTime'))
+    points = data.get('vectorDataPoint')
+    if not isinstance(points, list) or not points:
+        raise ValueError('STATCAN_CPI_VALUES_MISSING')
+    validated, seen = [], {}
+    for point in points:
+        if not isinstance(point, dict):
+            raise ValueError('STATCAN_CPI_POINT_INVALID')
+        period = point.get('refPer')
+        if not isinstance(period, str) or not re.fullmatch(r'\d{4}-(?:0[1-9]|1[0-2])-01', period):
+            raise ValueError('STATCAN_CPI_PERIOD_INVALID')
+        year, month = int(period[:4]), int(period[5:7])
+        end = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+        if (period in seen or end > checked.date() or point.get('refPerRaw') != period
+                or point.get('refPer2') != '' or point.get('refPerRaw2') != ''):
+            raise ValueError('STATCAN_CPI_PERIOD_CONFLICT')
+        expected = {'frequencyCode': 6, 'scalarFactorCode': 0, 'decimals': 1,
+                    'statusCode': 0, 'securityLevelCode': 0}
+        if any(type(point.get(k)) is not type(v) or point[k] != v for k, v in expected.items()):
+            raise ValueError('STATCAN_CPI_POINT_METADATA_INVALID')
+        symbol = point.get('symbolCode')
+        if type(symbol) is not int or symbol not in (0, 1, 3):
+            raise ValueError('STATCAN_CPI_SYMBOL_INVALID')
+        value = point.get('value')
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError('STATCAN_CPI_INDEX_INVALID')
+        released = publication(point.get('releaseTime'))
+        if released.date() < end or released > cube_release:
+            raise ValueError('STATCAN_CPI_RELEASE_CONFLICT')
+        seen[period] = released
+        validated.append(dict(point, provider_status={0: None, 1: 'p', 3: 'r'}[symbol], is_estimate=symbol == 1))
+    latest = max(seen)
+    if latest != cube.get('cubeEndDate') or seen[latest] != cube_release:
+        raise ValueError('STATCAN_CPI_VECTOR_RELEASE_LAG')
+    latest_serial = int(latest[:4]) * 12 + int(latest[5:7]) - 1
+    serials = {int(p[:4]) * 12 + int(p[5:7]) - 1 for p in seen}
+    if not all(s in serials for s in range(latest_serial - 12, latest_serial + 1)):
+        raise ValueError('STATCAN_CPI_COMPARISON_MONTH_MISSING')
+    return validated
+
+
 def parse_statcan_labour(series_payload, data_payload, cube_payload, *, now=None):
     """Exact national SA unemployment vector, cross-checked against latest cube.
 
