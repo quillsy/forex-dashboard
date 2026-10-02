@@ -7522,12 +7522,32 @@ def update_open_outcomes():
 
 
 def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, details, model_weights, today_str):
+    details = details or {}
+    live_mode = use_live_core_cache(today_str)
+    if live_mode:
+        if details.get('_live_checked') is not True:
+            raise ValueError('CURRENCY_REQUIRES_COMPLETED_LIVE_BATCH')
+        dataset = live_data.load()
+        checked_now = live_data.now_utc()
+        details = live_data.details(curr, now=checked_now, data=dataset)
+        if details.get('_live_checked') is not True:
+            raise ValueError('CURRENCY_REQUIRES_COMPLETED_LIVE_BATCH')
     signals = load_live_signals()
     snap_id = f"CURR_{curr}_{today_str}_{CURRENT_MODEL_VERSION}"
     if snap_id in signals:
         return False
-    details = details or {}
     model_weights = _live_snapshot_weights()
+    if live_mode:
+        # Scores and raw observations must describe this one batch at this time.
+        active = {factor: (details[factor], model_weights[factor] / 100.0)
+                  for factor in CORE_FACTOR_WEIGHTS if details.get(factor) is not None}
+        total_weight = sum(weight for _, weight in active.values())
+        diagnostic = sum(value * weight for value, weight in active.values()) / total_weight if total_weight > 0 else None
+        details['_diagnostic_partial_score'] = diagnostic
+        core_score = diagnostic if total_weight >= .5 else None
+        total_score, corr_score, regime = core_score, None, 'Context nicht geprüft'
+        details['_trend_score'] = details['_surprise_score'] = None
+        observations = {factor: live_core_observation_for_display(details, factor) for factor in CORE_FACTOR_WEIGHTS}
     
     eff_weights = {}
     if details and "_completeness" in details:
@@ -7536,52 +7556,65 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         if tot_w > 0:
             eff_weights = {k: round(model_weights.get(k, 0.0) / tot_w * 100.0, 1) for k in active_factors}
             
-    cpi_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_str)
-    inf_data = get_inflation_expectations_data(curr, today_str)
-    c_trend = inf_data.get("cpi_trend")
-    c_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
-
-    # Dynamic CPI release date, dataset, metric calculation, and PIT status resolution
-    cpi_dataset_val = series_id
-    cpi_release_date_val = obs_date
-    if curr == "JPY":
-        res_j = get_estat_cpi_data()
-        stats_id_used = "0004052037"
-        if res_j is not None and res_j[0] is not None and not res_j[0].empty:
-            stats_id_used = res_j[0].iloc[-1].get("stats_id", "0004052037")
-            rel_dt = res_j[0].iloc[-1].get("release_date")
-            if rel_dt is not None:
-                cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
-        cpi_dataset_val = stats_id_used
-    elif curr == "NZD":
-        cpi_dataset_val = "CS_ECONOMY / CAT_PRICE_INDEXES"
-        res_n = get_statsnz_cpi_data()
-        if res_n is not None and res_n[0] is not None and not res_n[0].empty:
-            rel_dt = res_n[0].iloc[-1].get("release_date")
-            if rel_dt is not None:
-                cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
-    elif curr == "CAD":
-        cpi_dataset_val = "v41690973"
-    elif curr == "AUD":
-        cpi_dataset_val = "3.10001.10.50.M"
-    elif curr == "GBP":
-        cpi_dataset_val = "D7G7"
-    elif curr == "USD":
-        cpi_dataset_val = "CPIAUCNS"
-        
-    if curr == "USD":
-        cpi_method_val = "DIRECT_FRED_PC1"
-    elif curr in ["GBP", "AUD", "JPY", "NZD"]:
-        cpi_method_val = "DIRECT_OFFICIAL"
+    if live_mode:
+        cpi = observations['Inflation']
+        cpi_val, obs_date = cpi.get('value'), cpi.get('date')
+        metric_type = 'HICP_YOY' if curr in ('EUR', 'CHF') else 'CPI_YOY'
+        source, series_id = cpi.get('source', 'UNAVAILABLE'), cpi.get('series_id')
+        freshness = details.get('_freshness', {}).get('Inflation', 'UNAVAILABLE')
+        cpi_dataset_val = series_id
+        inflation_record = dataset.get('currencies', {}).get(curr, {}).get('Inflation', {})
+        published = live_data.timestamp(inflation_record.get('published_at')) if isinstance(inflation_record, dict) else None
+        cpi_release_date_val = cpi.get('release_date_known') or (published.date().isoformat() if published else None)
+        cpi_method_val = cpi.get('transformation')
+        c_trend, c_trend_str, cpi_pit_status_val = None, 'N/A', 'PIT_LIMITED'
     else:
-        cpi_method_val = "DERIVED_FROM_INDEX"
-        
-    cpi_pit_status_val = "PIT_STRICT" if "PIT_STRICT" in str(freshness) else "PIT_LIMITED"
+        cpi_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_str)
+        inf_data = get_inflation_expectations_data(curr, today_str)
+        c_trend = inf_data.get("cpi_trend")
+        c_trend_str = "↑ RISING" if (c_trend is not None and c_trend > 0.05) else "↓ FALLING" if (c_trend is not None and c_trend < -0.05) else "→ STABLE" if c_trend is not None else "N/A"
+
+        # Dynamic CPI release date, dataset, metric calculation, and PIT status resolution
+        cpi_dataset_val = series_id
+        cpi_release_date_val = obs_date
+        if curr == "JPY":
+            res_j = get_estat_cpi_data()
+            stats_id_used = "0004052037"
+            if res_j is not None and res_j[0] is not None and not res_j[0].empty:
+                stats_id_used = res_j[0].iloc[-1].get("stats_id", "0004052037")
+                rel_dt = res_j[0].iloc[-1].get("release_date")
+                if rel_dt is not None:
+                    cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
+            cpi_dataset_val = stats_id_used
+        elif curr == "NZD":
+            cpi_dataset_val = "CS_ECONOMY / CAT_PRICE_INDEXES"
+            res_n = get_statsnz_cpi_data()
+            if res_n is not None and res_n[0] is not None and not res_n[0].empty:
+                rel_dt = res_n[0].iloc[-1].get("release_date")
+                if rel_dt is not None:
+                    cpi_release_date_val = pd.to_datetime(rel_dt).strftime("%Y-%m-%d")
+        elif curr == "CAD":
+            cpi_dataset_val = "v41690973"
+        elif curr == "AUD":
+            cpi_dataset_val = "3.10001.10.50.M"
+        elif curr == "GBP":
+            cpi_dataset_val = "D7G7"
+        elif curr == "USD":
+            cpi_dataset_val = "CPIAUCNS"
+
+        if curr == "USD":
+            cpi_method_val = "DIRECT_FRED_PC1"
+        elif curr in ["GBP", "AUD", "JPY", "NZD"]:
+            cpi_method_val = "DIRECT_OFFICIAL"
+        else:
+            cpi_method_val = "DERIVED_FROM_INDEX"
+
+        cpi_pit_status_val = "PIT_STRICT" if "PIT_STRICT" in str(freshness) else "PIT_LIMITED"
 
     # Get raw values for saving
-    pol_meta = get_verified_policy_rate(curr)
+    pol_meta = {} if live_mode else get_verified_policy_rate(curr)
     raw_values = {
-        "policy_rate": pol_meta.get("rate"),
+        "policy_rate": observations['Geldpolitik'].get('policy_rate') if live_mode else pol_meta.get("rate"),
         "policy_rate_previous": pol_meta.get("previous_rate"),
         "policy_rate_instrument": pol_meta.get("instrument"),
         "policy_rate_effective_date": pol_meta.get("rate_effective_date"),
@@ -7590,12 +7623,12 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "policy_rate_primary_source": pol_meta.get("primary_source"),
         "policy_rate_secondary_source": pol_meta.get("secondary_source"),
         "policy_rate_verification_status": pol_meta.get("verification_status", pol_meta.get("status")),
-        "policy_rate_verification_evidence": pol_meta.get("verification_evidence", []),
-        "yield_2y": float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None,
-        "yield_5y": float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None,
+        "policy_rate_verification_evidence": None if live_mode else pol_meta.get("verification_evidence", []),
+        "yield_2y": observations['Geldpolitik'].get('yield_2y') if live_mode else (float(get_genuine_2y_yield_historical(curr, today_str)[0]) if get_genuine_2y_yield_historical(curr, today_str)[0] is not None else None),
+        "yield_5y": None if live_mode else (float(get_genuine_5y_yield_historical(curr, today_str)[0]) if get_genuine_5y_yield_historical(curr, today_str)[0] is not None else None),
         "cpi_yoy": cpi_val,
-        "unrate": get_unemployment_value(curr, today_str),
-        "gdp_yoy": get_gdp_yoy_value(curr, today_str),
+        "unrate": observations['Arbeitsmarkt'].get('value') if live_mode else get_unemployment_value(curr, today_str),
+        "gdp_yoy": observations['GDP'].get('value') if live_mode else get_gdp_yoy_value(curr, today_str),
         
         # CPI Snapshot metadata
         "cpi_value": cpi_val,
@@ -7603,10 +7636,10 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "cpi_source": source,
         "cpi_dataset": cpi_dataset_val,
         "cpi_series": series_id,
-        "cpi_geography": "00000" if curr == "JPY" else "National" if curr in ["NZD", "AUD", "CAD", "GBP"] else curr,
+        "cpi_geography": cpi.get('geography') if live_mode else ("00000" if curr == "JPY" else "National" if curr in ["NZD", "AUD", "CAD", "GBP"] else curr),
         "cpi_observation_date": obs_date,
         "cpi_release_date": cpi_release_date_val,
-        "cpi_frequency": "quarterly" if curr == "NZD" else "monthly",
+        "cpi_frequency": cpi.get('frequency') if live_mode else ("quarterly" if curr == "NZD" else "monthly"),
         "cpi_freshness": freshness,
         "cpi_change_pp": c_trend,
         "cpi_trend": c_trend_str,
@@ -7650,6 +7683,10 @@ def save_currency_snapshot(curr, total_score, core_score, corr_score, regime, de
         "cpi_change_pp": c_trend,
         "cpi_trend": c_trend_str
     }
+    if live_mode:
+        snapshot['collector_completed_at'] = dataset.get('completed_at')
+        snapshot['eligibility_checked_at'] = checked_now.isoformat()
+        snapshot['observations'] = observations
     signals[snap_id] = snapshot
     save_live_signals(signals)
     return True

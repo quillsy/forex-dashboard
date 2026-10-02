@@ -275,6 +275,8 @@ def details(currency, now=None, data=None):
         record = records.get(factor, {})
         record = record if isinstance(record, dict) else {}
         valid, reason = eligible(record, now, factor=factor, currency=currency)
+        if not result['_live_checked'] and valid:
+            valid, reason = False, 'Kein abgeschlossener Live-Datensatz'
         result[factor] = number(record.get("score")) if valid else None
         result["_freshness"][factor] = current_freshness(record, now, factor) if valid else "UNAVAILABLE"
         result["_observations"][factor] = copy.deepcopy(record.get("observation", {}))

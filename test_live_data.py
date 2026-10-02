@@ -450,7 +450,7 @@ class LiveDataTests(unittest.TestCase):
 
     def test_40_factor_gate_uses_values_not_reported_coverage(self):
         records={factor:live.build_record(factor,20,{'value':1.8,'policy_rate':3.6,'yield_2y':3.6,'date':'2026-09-04'},'FRESH',NOW.isoformat()) for factor in live.FACTORS}
-        data={'currencies':{'EUR':records}}
+        data={'completed_at':NOW.isoformat(),'currencies':{'EUR':records}}
         self.assertEqual(live.details('EUR',NOW,data)['_completeness'],100)
         records['PMI']['validation']='UNVERIFIED'
         self.assertEqual(live.details('EUR',NOW,data)['_completeness'],80)
@@ -556,11 +556,17 @@ class LiveDataTests(unittest.TestCase):
 
     def test_no_completed_live_run_hides_individually_valid_observations(self):
         record=live.build_record('Inflation',20,{'value':0.9,'date':'2026-08-31'},'FRESH',NOW.isoformat())
-        for completed_at in (None,(NOW+timedelta(minutes=1)).isoformat()):
+        for completed_at in (None,'invalid',(NOW+timedelta(minutes=1)).isoformat()):
             with self.subTest(completed_at=completed_at):
                 data={'completed_at':completed_at,'currencies':{'CHF':{'Inflation':record}}}
                 self.assertTrue(live.eligible(record,NOW,factor='Inflation',currency='CHF')[0])
-                self.assertFalse(live.details('CHF',NOW,data)['_live_checked'])
+                details=live.details('CHF',NOW,data)
+                self.assertFalse(details['_live_checked'])
+                self.assertIsNone(details['Inflation'])
+                self.assertEqual(details['_completeness'],0)
+                self.assertEqual(details['_freshness']['Inflation'],'UNAVAILABLE')
+                self.assertEqual(details['_blocking_reasons']['Inflation'],'Kein abgeschlossener Live-Datensatz')
+                self.assertEqual(details['_observations']['Inflation']['value'],0.9)
                 st=MagicMock()
                 with patch.object(live,'load',return_value=data),patch.object(live,'now_utc',return_value=NOW):
                     live.render_status(st)
