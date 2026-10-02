@@ -167,7 +167,7 @@ def eligible(record, now=None, factor=None, currency=None):
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
     if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt"):
-        from official_bls import PINNED_DUES, _api_url, _pdf_url, _raw_decimal, _successor, BlsInvalid
+        from official_bls import PINNED_DUES, _api_url, _bls_pdf_url, _pdf_url, _raw_decimal, _successor, BlsInvalid
         series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
         published = timestamp(record.get("published_at"))
         embargo = timestamp(observation.get("bls_embargo_ends_at")) if observation.get("bls_embargo_ends_at") else published
@@ -197,7 +197,17 @@ def eligible(record, now=None, factor=None, currency=None):
                     or proof_url != _api_url(factor) or not matched
                     or observation.get("source") != ("FRED" if factor == "Arbeitsmarkt" else "FRED / BLS")):
                 return False, "BLS-API-Beleg oder Rohwertvergleich ungültig"
-        elif embargo != published or proof_url != _pdf_url(factor, embargo):
+        elif observation.get("bls_proof_source") == "BLS_PDF":
+            period = observation["bls_release_period"]
+            planned = timestamp(PINNED_DUES[factor].get(period))
+            next_due = timestamp(PINNED_DUES[factor].get(_successor(period)))
+            if (factor != "Arbeitsmarkt" or proof_url != _bls_pdf_url(factor)
+                    or planned is None or next_due is None or embargo != planned
+                    or published != embargo or timestamp(record.get("next_due_at")) != next_due
+                    or observation.get("source") != "FRED"):
+                return False, "Amtlicher BLS-PDF-Beleg oder Veröffentlichungstermin ungültig"
+        elif (observation.get("bls_proof_source") not in (None, "DOL_PDF")
+              or embargo != published or proof_url != _pdf_url(factor, embargo)):
             return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
     from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
@@ -296,7 +306,8 @@ def public_observation(observation):
             if isinstance(value, str) and (re.fullmatch(
                     r"https://www\.dol\.gov/newsroom/economicdata/(?:empsit|cpi)_\d{8}\.pdf", value)
                     or value in ("https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000",
-                                 "https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0")):
+                                 "https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0",
+                                 "https://www.bls.gov/news.release/pdf/empsit.pdf")):
                 result[key] = value
             continue
         if key == "publication_basis" and isinstance(value, str) and re.fullmatch(
@@ -484,7 +495,8 @@ def collect(app, path=PATH):
             if prior.get("validation") == "VALID" else None)
         previous_state = (verified_state if verified_state else
             {"period": confirmed_period, "embargo_ends_at": prior_obs.get("bls_embargo_ends_at") or prior.get("published_at"),
-             "next_due_at": prior.get("next_due_at"), "release_url": prior_obs.get("bls_release_url")})
+             "next_due_at": prior.get("next_due_at"), "release_url": prior_obs.get("bls_release_url"),
+             "proof_source": prior_obs.get("bls_proof_source")})
         diagnostic = {}
         try:
             state = fetch_release_state(
@@ -499,6 +511,7 @@ def collect(app, path=PATH):
             bls_states[factor] = {"state": state}
             data["bls_provider_status"][factor] = {
                 "dol": diagnostic.get("pdf_status", "NOT_REQUESTED"),
+                "bls_pdf": diagnostic.get("bls_pdf_status", "NOT_REQUESTED"),
                 "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"),
                 "proof": state.get("proof_source", "DOL_PDF")}
             if state.get("proof_source") != "BLS_API_V1":
@@ -518,6 +531,7 @@ def collect(app, path=PATH):
             }
             data["bls_provider_status"][factor] = {
                 "dol": diagnostic.get("pdf_status", "TRANSPORT_ERROR"),
+                "bls_pdf": diagnostic.get("bls_pdf_status", "NOT_REQUESTED"),
                 "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"), "proof": "UNVERIFIED"}
         except (BlsInvalid, ValueError, TypeError, KeyError) as error:
             reason = {
@@ -533,6 +547,7 @@ def collect(app, path=PATH):
             bls_states[factor] = {"validation": "UNVERIFIED", "reason": reason}
             data["bls_provider_status"][factor] = {
                 "dol": diagnostic.get("pdf_status", "NOT_REQUESTED"),
+                "bls_pdf": diagnostic.get("bls_pdf_status", "NOT_REQUESTED"),
                 "api_v1": diagnostic.get("api_status", "NOT_REQUESTED"),
                 "proof": str(error) if isinstance(error, BlsInvalid) else "BLS_ERROR"}
         finally:
@@ -654,8 +669,10 @@ def collect(app, path=PATH):
                         observation.update(bls_release_period=state["period"],
                                            bls_release_url=state.get("release_url"),
                                            bls_embargo_ends_at=state["embargo_ends_at"],
+                                           bls_proof_source=state.get("proof_source", "DOL_PDF"),
                                            published_at=state["embargo_ends_at"],
                                            next_due_at=state["next_due_at"],
+                                           provider_status="Amtlicher BLS-PDF-Veröffentlichungsbeleg" if state.get("proof_source") == "BLS_PDF" else "Amtlicher DOL-PDF-Veröffentlichungsbeleg",
                                            publication_basis="Amtliche DOL/BLS-Mitteilung: Berichtsmonat, Embargo-Ende als früheste Freigabe und geplanter Folgetermin; tatsächliche Verfügbarkeit erst bei Prüfung bestätigt")
                     if now_utc() >= timestamp(state["next_due_at"]):
                         validation, reason = "UNVERIFIED", "Neue BLS-Veröffentlichung fällig; Folgeperiode nicht bestätigt"
@@ -810,6 +827,12 @@ def render_status(st, authorized=False):
                    "Kalendertermin und erster API-Abruf belegen keine genaue Veröffentlichungszeit. "
                    "BLS.gov cannot vouch for the data or analyses derived from these data after the data have been retrieved from BLS.gov. "
                    "[BLS API Terms of Service, geprüft am 27.09.2026](https://www.bls.gov/developers/termsOfService.htm).")
+    if any(row.get("observation", {}).get("bls_proof_source") == "BLS_PDF"
+           for row in data.get("currencies", {}).get("USD", {}).values() if isinstance(row, dict)):
+        st.caption("BLS-PDF: Veröffentlichungsbeleg der U.S. Bureau of Labor Statistics; "
+                   "der CORE-Wert stammt weiterhin aus der angegebenen FRED-Reihe. "
+                   "Embargo-Ende und tatsächlicher Abruf bleiben getrennt. "
+                   "[BLS Copyright Information, geprüft am 02.10.2026](https://www.bls.gov/opub/copyright-information.htm).")
     if retained:
         st.warning("Einzelne Quellen konnten zuletzt nicht bestätigt werden. Ihre gespeicherten Werte bleiben nur innerhalb der bestehenden Freigabefrist nutzbar; Details stehen in der Quellentabelle.")
     st.markdown("**Verfügbare Fundamentaldaten je Währung**")

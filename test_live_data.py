@@ -13,6 +13,71 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_bls_original_labour_pdf_requires_its_exact_release_contract(self):
+        from official_bls import _bls_pdf_url
+
+        checked = datetime(2026, 10, 2, 14, tzinfo=timezone.utc)
+        row = live.build_record('Arbeitsmarkt', 20, {
+            'value': 4.2, 'date': '2026-09-01', 'reference_period': '2026-09',
+            'source': 'FRED', 'series_id': 'UNRATE', 'frequency': 'monthly',
+            'bls_release_period': '2026-09', 'bls_proof_source': 'BLS_PDF',
+            'bls_release_url': _bls_pdf_url('Arbeitsmarkt'),
+            'bls_embargo_ends_at': '2026-10-02T12:30:00+00:00',
+            'published_at': '2026-10-02T12:30:00+00:00',
+            'next_due_at': '2026-11-06T13:30:00+00:00',
+        }, 'FRESH', checked.isoformat())
+        self.assertTrue(live.eligible(row, checked, factor='Arbeitsmarkt', currency='USD')[0])
+        self.assertEqual(row['observation']['bls_release_url'], _bls_pdf_url('Arbeitsmarkt'))
+        for changed in (
+                {'bls_release_url': _bls_pdf_url('Arbeitsmarkt') + '?key=private'},
+                {'bls_release_url': 'https://www.bls.gov/news.release/pdf/cpi.pdf'},
+                {'bls_proof_source': 'UNKNOWN'},
+                {'bls_release_period': '2026-08'},
+                {'series_id': 'LNS14000000'},
+                {'source': 'Unverified provider'}):
+            with self.subTest(changed=changed):
+                invalid = copy.deepcopy(row)
+                invalid['observation'].update(changed)
+                self.assertFalse(live.eligible(invalid, checked, factor='Arbeitsmarkt', currency='USD')[0])
+        for field, value in (('published_at', '2026-10-02T12:31:00+00:00'),
+                             ('next_due_at', '2026-12-06T13:30:00+00:00')):
+            invalid = copy.deepcopy(row)
+            invalid[field] = value
+            self.assertFalse(live.eligible(invalid, checked, factor='Arbeitsmarkt', currency='USD')[0])
+        due = datetime(2026, 11, 6, 13, 30, tzinfo=timezone.utc)
+        self.assertFalse(live.eligible(row, due, factor='Arbeitsmarkt', currency='USD')[0])
+
+    def test_public_bls_pdf_link_allows_only_verified_endpoint_without_credentials(self):
+        url = 'https://www.bls.gov/news.release/pdf/empsit.pdf'
+        self.assertEqual(live.public_observation({'bls_release_url': url})['bls_release_url'], url)
+        for bad in (url + '?token=private', url + '#private', url.replace('https:', 'http:'),
+                    url.replace('www.bls.gov', 'user:private@www.bls.gov'),
+                    'https://www.bls.gov/news.release/pdf/cpi.pdf'):
+            with self.subTest(url=bad):
+                self.assertNotIn('bls_release_url', live.public_observation({'bls_release_url': bad}))
+
+    def test_collector_preserves_bls_pdf_proof_through_publication_and_read_gate(self):
+        from test_official_bls import BlsCollectorTests, states
+        from official_bls import _bls_pdf_url
+
+        checked = datetime(2026, 10, 2, 14, tzinfo=timezone.utc)
+        state = {'period': '2026-09', 'embargo_ends_at': '2026-10-02T12:30:00+00:00',
+                 'next_due_at': '2026-11-06T13:30:00+00:00', 'proof_source': 'BLS_PDF',
+                 'release_url': _bls_pdf_url('Arbeitsmarkt')}
+        fixture = BlsCollectorTests()
+        rows = fixture.run_collector({**states(), 'Arbeitsmarkt': state}, {
+            'Arbeitsmarkt': {'value': 4.2, 'date': '2026-09-01', 'series_id': 'UNRATE', 'source': 'FRED'},
+        }, at=checked)
+        row = rows['Arbeitsmarkt']
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['bls_proof_source'], 'BLS_PDF')
+        self.assertEqual(row['observation']['bls_release_url'], _bls_pdf_url('Arbeitsmarkt'))
+        self.assertIn('BLS-PDF', row['observation']['provider_status'])
+        self.assertTrue(live.eligible(row, checked, factor='Arbeitsmarkt', currency='USD')[0])
+        self.assertEqual(fixture.last_dataset['bls_provider_status']['Arbeitsmarkt']['proof'], 'BLS_PDF')
+        self.assertIn('bls_pdf', fixture.last_dataset['bls_provider_status']['Arbeitsmarkt'])
+        self.assertNotIn('Arbeitsmarkt', fixture.last_dataset['bls_api_attempts'])
+
     def test_gbp_q2_gdp_revision_read_time_gate_survives_restart_and_outage(self):
         due = datetime(2026, 9, 30, 6, tzinfo=timezone.utc)
         before = due - timedelta(seconds=1)
