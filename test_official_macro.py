@@ -200,6 +200,17 @@ class StatCanCpiContractTests(unittest.TestCase):
             with self.assertRaises(requests.exceptions.Timeout): loader(propagate_transport=True)
             self.assertEqual(client.post.call_count, failed_call + 1)
 
+    def test_invalid_or_ambiguous_toronto_wall_time_never_loses_a_row(self):
+        for wall_time in ('2026-03-08T02:30', '2025-11-02T01:30'):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['releaseTime'] = wall_time
+            with self.subTest(time=wall_time), self.assertRaisesRegex(ValueError, 'RELEASE_INVALID'):
+                validate_statcan_cpi(*ps, now=self.now)
+            loader, _ = self.loader(ps)
+            self.assertFalse(loader(propagate_transport=True)[-1])
+        for wall_time in ('2026-03-08T01:30', '2026-03-08T03:30', '2025-11-02T02:30'):
+            ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['releaseTime'] = wall_time
+            self.assertEqual(len(validate_statcan_cpi(*ps, now=self.now)), 13)
+
 
 def fixture(category):
     spec = EUROSTAT_SPECS[category]

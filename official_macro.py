@@ -458,7 +458,18 @@ def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None
     def publication(raw):
         if not isinstance(raw, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', raw):
             raise ValueError('STATCAN_CPI_RELEASE_INVALID')
-        published = datetime.strptime(raw, '%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('America/Toronto')).astimezone(timezone.utc)
+        local = datetime.strptime(raw, '%Y-%m-%dT%H:%M')
+        zone = ZoneInfo('America/Toronto')
+        # Attaching ZoneInfo alone accepts missing/repeated DST wall times.
+        # Require one unambiguous UTC instant, just like the existing loader.
+        instants = set()
+        for fold in (0, 1):
+            candidate = local.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+            if candidate.astimezone(zone).replace(tzinfo=None) == local:
+                instants.add(candidate)
+        if len(instants) != 1:
+            raise ValueError('STATCAN_CPI_RELEASE_INVALID')
+        published = next(iter(instants))
         if published > checked:
             raise ValueError('STATCAN_CPI_FUTURE_RELEASE')
         return published
