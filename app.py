@@ -2280,7 +2280,8 @@ def get_statcan_cpi_data(*, propagate_transport=False, latest_periods=300):
             response = requests.post(STATCAN_BASE + method, json=body, timeout=15)
             response.raise_for_status()
             metadata.append(_statcan_response_json(response, requests))
-        vector_data = validate_statcan_cpi(metadata[0], data, metadata[1])
+        vector_data = validate_statcan_cpi(metadata[0], data, metadata[1],
+                                           require_current=(latest_periods == 13))
             
         records = []
         for dp in vector_data:

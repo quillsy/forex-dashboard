@@ -512,13 +512,15 @@ def statcan_cpi_next_due(period):
     return _statcan_publication_time(day + 'T08:30') if day is not None else None
 
 
-def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None):
+def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None, require_current=True):
     """Validate the original monthly NSA CPI index before the existing YoY path.
 
     WDS code meanings: https://www.statcan.gc.ca/en/developers/wds/user-guide
     Preserve p/r symbols. Non-normal, suppressed or unknown status codes do
     not qualify. releaseTime is the current publication/revision, not a PIT
     vintage guarantee. No scaling or annual-rate transformation is added.
+    Historical 300-month loaders disable only the additional current-release
+    deadline; all series, period, status and publication checks remain intact.
     """
     checked = _utc_now(now)
     series, data, cube = map(_statcan_object, (series_payload, data_payload, cube_payload))
@@ -600,7 +602,7 @@ def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None
     if not all(s in serials for s in range(latest_serial - 12, latest_serial + 1)):
         raise ValueError('STATCAN_CPI_COMPARISON_MONTH_MISSING')
     next_due = statcan_cpi_next_due(latest[:7])
-    if next_due is not None and checked >= next_due:
+    if require_current and next_due is not None and checked >= next_due:
         raise ValueError('STATCAN_CPI_RELEASE_OVERDUE')
     for point in validated:
         due = statcan_cpi_next_due(point['refPer'][:7])
