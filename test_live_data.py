@@ -2162,3 +2162,54 @@ class PolicyDeadlineCollectorTests(unittest.TestCase):
                 row = self.collect_policy()
                 self.assertEqual(row['validation'], 'UNVERIFIED')
                 self.assertFalse(live.eligible(row, self.now, factor='Geldpolitik', currency='EUR')[0])
+
+
+class PolicyProofAgeCollectorTests(unittest.TestCase):
+    collect_policy = PolicyDeadlineCollectorTests.collect_policy
+
+    def setUp(self):
+        PolicyDeadlineCollectorTests.setUp(self)
+        self.now = datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)
+        self.verified = self.now - timedelta(minutes=50)
+        self.policy['verified_at'] = self.verified.isoformat()
+        for proof in self.policy['verification_evidence']:
+            proof['retrieved_at'] = self.verified.isoformat()
+
+    def test_old_proof_caps_actual_collector_record_at_sixty_minutes(self):
+        record = self.collect_policy()
+        due = self.verified + timedelta(hours=1)
+        self.assertEqual(record['validation'], 'VALID')
+        self.assertEqual(record['next_due_at'], due.isoformat())
+        self.assertEqual(record['observation']['policy_verified_at'], self.verified.isoformat())
+        self.assertEqual(record['score'], 20)
+        self.assertEqual(record['observation']['yield_2y'], 2.0)
+        self.assertTrue(record['observation']['needs_hourly_check'])
+        for minutes, expected in [(59, True), (60, False), (61, False)]:
+            self.assertEqual(live.eligible(record, self.verified + timedelta(minutes=minutes), 'Geldpolitik', 'EUR')[0], expected)
+        self.now += timedelta(minutes=5)
+        refreshed = self.collect_policy()
+        self.assertEqual(refreshed['next_due_at'], due.isoformat())
+        self.assertNotEqual(refreshed['checked_at'], record['checked_at'])
+        self.assertEqual(refreshed['expires_at'], record['expires_at'])
+
+    def test_earlier_deadlines_still_win(self):
+        earlier = self.now + timedelta(minutes=2)
+        record = self.collect_policy(earlier.isoformat())
+        self.assertEqual(record['next_due_at'], earlier.isoformat())
+        self.policy['verification_evidence'][1]['valid_until'] = earlier.isoformat()
+        self.assertEqual(self.collect_policy()['next_due_at'], earlier.isoformat())
+
+    def test_missing_bad_future_policy_time_fails_closed(self):
+        for value in (None, 'bad', (self.now + timedelta(seconds=1)).isoformat()):
+            self.policy['verified_at'] = value
+            record = self.collect_policy()
+            self.assertEqual(record['validation'], 'UNVERIFIED')
+            self.assertFalse(live.eligible(record, self.now, 'Geldpolitik', 'EUR')[0])
+
+    def test_outage_hold_does_not_extend_policy_deadline(self):
+        record = self.collect_policy()
+        held = live.build_record('Geldpolitik', None, {}, 'UNAVAILABLE',
+            (self.now + timedelta(minutes=5)).isoformat(), previous=record, validation='SOURCE_UNAVAILABLE')
+        self.assertEqual(held['next_due_at'], record['next_due_at'])
+        self.assertEqual(held['checked_at'], record['checked_at'])
+        self.assertFalse(live.eligible(held, self.verified + timedelta(hours=1), 'Geldpolitik', 'EUR')[0])
