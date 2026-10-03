@@ -1580,6 +1580,136 @@ class AbsCpiUnitCollectorIntegrationTests(unittest.TestCase):
         self.assertFalse(live.eligible(row, now, factor='Inflation', currency='AUD')[0])
 
 
+class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
+    """Synthetic API fixtures through real parsers, app and persisted gate."""
+    def collect_case(self, case='valid', now=None):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        from test_official_inflation import estat, japan_release, japan_calendar
+        now = now or datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        routes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name in {'get_current_official_cpi', 'get_cpi_yoy_details'}]
+        for route in routes: route.decorator_list = []
+        exec(compile(ast.Module(body=routes, type_ignores=[]), '<japan-cpi-routes>', 'exec'), core)
+        payload = estat()
+        data = payload['GET_STATS_DATA']['STATISTICAL_DATA']
+        if case == 'duplicate':
+            data['DATA_INF']['VALUE'].append(copy.deepcopy(data['DATA_INF']['VALUE'][0]))
+        if case == 'missing':
+            data['DATA_INF']['VALUE'][0]['$'] = '***'
+        if case == 'lag':
+            data['DATA_INF']['VALUE'][0]['@time'] = '2026000606'
+            data['CLASS_INF']['CLASS_OBJ'][-1]['CLASS']['@code'] = '2026000606'
+        if case == 'zero': data['DATA_INF']['VALUE'][0]['$'] = '0.0'
+        if case == 'negative': data['DATA_INF']['VALUE'][0]['$'] = '-0.4'
+        api = Mock(); api.json.return_value = payload
+        release = Mock(); release.text = japan_release()
+        if case == 'conflict': release.text = japan_release(value='9.9')
+        if case == 'future': release.text = japan_release(date='2026年9月18日')
+        if case == 'zero': release.text = japan_release(value='0.0', direction='横ばい')
+        if case == 'negative': release.text = japan_release(value='0.4', direction='下落')
+        calendar = Mock(); calendar.text = japan_calendar(future=case != 'unknown_next')
+        if case == 'bad_calendar': calendar.text = '<html>changed</html>'
+        responses = [api, release, calendar]
+        phase = {'api_timeout': 0, 'release_timeout': 1, 'calendar_timeout': 2,
+                 'release_forbidden': 1}.get(case)
+        if phase is not None:
+            if case == 'release_forbidden':
+                response = requests.Response(); response.status_code = 403
+                error = requests.HTTPError('must-not-export-private-body', response=response)
+            else: error = requests.Timeout('must-not-export-private-body')
+            responses[phase].raise_for_status.side_effect = error
+        transport = Mock(exceptions=requests.exceptions)
+        transport.get.side_effect = responses
+        core.update(datetime=Clock, requests=transport, ESTAT_APP_ID='fixture-only')
+        app = SimpleNamespace(FRED_KEY=None, requests=transport,
+                              compute_currency_details=core['compute_currency_details'])
+        previous = live.build_record('Inflation', -10.0, {
+            'value': 1.8, 'date': '2026-07-01', 'reference_period': '2026-07',
+            'source': 'Statistics Japan e-Stat', 'series_id': '0004052037',
+            'frequency': 'monthly', 'unit': 'annual percent change',
+            'seasonal_adjustment': 'NSA', 'needs_hourly_check': True,
+        }, 'FRESH', (now - timedelta(minutes=30)).isoformat())
+        self.assertTrue(live.eligible(previous, now, factor='Inflation', currency='JPY')[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'JPY': {'Inflation': previous}}}, path)
+            with patch('official_inflation.datetime', Clock), \
+                 patch.object(live, 'now_utc', return_value=now), \
+                 patch.object(live, 'CURRENCIES', ('JPY',)), \
+                 patch.object(live, 'FACTORS', {'Inflation': live.FACTORS['Inflation']}):
+                live.collect(app, path)
+                batch = live.load(path)
+        self.assertTrue(batch['completed_at'])
+        expected_calls = 1 if case in ('duplicate', 'missing', 'api_timeout') else 2 if case in ('future', 'release_timeout', 'release_forbidden') else 3
+        self.assertEqual(transport.get.call_count, expected_calls)
+        self.assertEqual(transport.get.call_args_list[0].kwargs['params']['statsDataId'], '0004052037')
+        return previous, batch['currencies']['JPY']['Inflation'], now
+
+    def test_verified_national_rate_reuses_one_api_check_and_has_date_only_deadline(self):
+        _, row, now = self.collect_case()
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertAlmostEqual(row['score'], -5.0)
+        self.assertEqual(row['observation']['value'], 1.9)
+        self.assertEqual(row['observation']['release_date_known'], '2026-08-21')
+        self.assertIsNone(row['published_at'])
+        self.assertEqual(row['next_due_at'], '2026-09-17T15:00:00+00:00')
+        self.assertEqual(row['observation']['next_due_precision'], 'date_only_start_of_JP_day')
+        self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 15, tzinfo=timezone.utc),
+                                       factor='Inflation', currency='JPY')[0])
+
+    def test_invalid_or_conflicting_source_revokes_prior_valid_score(self):
+        for case in ('duplicate', 'missing', 'lag', 'conflict', 'future', 'bad_calendar', 'release_forbidden'):
+            with self.subTest(case=case):
+                _, row, now = self.collect_case(case)
+                self.assertEqual(row['validation'], 'UNVERIFIED')
+                self.assertIsNone(row['score'])
+                self.assertNotIn('last_error', row)
+                self.assertFalse(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+                self.assertNotIn('must-not-export-private-body', str(row))
+
+    def test_due_new_release_revokes_prior_score(self):
+        _, row, now = self.collect_case(now=datetime(2026, 9, 18, 0, tzinfo=timezone.utc))
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertFalse(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+
+    def test_temporary_outages_keep_original_hourly_window_without_refreshing(self):
+        for case in ('api_timeout', 'release_timeout', 'calendar_timeout'):
+            with self.subTest(case=case):
+                previous, row, now = self.collect_case(case)
+                for field in ('score', 'observation', 'checked_at', 'expires_at', 'next_due_at'):
+                    self.assertEqual(row[field], previous[field])
+                self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+                self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+                self.assertFalse(live.eligible(row, now + timedelta(minutes=30),
+                                               factor='Inflation', currency='JPY')[0])
+
+    def test_unknown_future_calendar_requires_hourly_check(self):
+        _, row, now = self.collect_case('unknown_next')
+        self.assertTrue(row['observation']['needs_hourly_check'])
+        self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+        self.assertFalse(live.eligible(row, now + timedelta(hours=1),
+                                       factor='Inflation', currency='JPY')[0])
+
+    def test_zero_and_negative_headline_rates_are_real_observations(self):
+        for case, value in (('zero', 0.0), ('negative', -0.4)):
+            with self.subTest(case=case):
+                _, row, now = self.collect_case(case)
+                self.assertEqual(row['observation']['value'], value)
+                self.assertEqual(row['validation'], 'VALID')
+                self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+
+
 class SwissHicpCollectorIntegrationTests(unittest.TestCase):
     """Real CHF inflation route and record persistence, with isolated adapters."""
     def setUp(self):

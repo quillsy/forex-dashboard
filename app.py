@@ -4561,6 +4561,14 @@ def get_current_official_cpi(curr):
                         "_validation": "SOURCE_UNAVAILABLE" if outage else "UNVERIFIED",
                         "_reason": "ABS-CPI-Quelle vorübergehend nicht erreichbar" if outage
                                    else "ABS-CPI-Daten oder amtlicher Veröffentlichungsstand nicht bestätigt"}
+            if curr == "JPY" and result is None:
+                outage = diagnostics.get("code") in (
+                    "HTTP_ERROR", "ESTAT_RELEASE_UNAVAILABLE", "ESTAT_CALENDAR_UNAVAILABLE")
+                return {"value": None, "date": None, "source": "Statistics Japan e-Stat",
+                        "series_id": "0004052037",
+                        "_validation": "SOURCE_UNAVAILABLE" if outage else "UNVERIFIED",
+                        "_reason": "Japan-CPI-Quelle vorübergehend nicht erreichbar" if outage
+                                   else "Nationale Japan-CPI-Daten oder Veröffentlichungsstand nicht bestätigt"}
             return result
     except requests.exceptions.JSONDecodeError:
         validation = "UNVERIFIED"
@@ -5568,11 +5576,11 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
 
     if 'Inflation' in requested_factors:
         try:
-            aud_official = (get_current_official_cpi(curr) if curr == "AUD" and
+            current_official = (get_current_official_cpi(curr) if curr in ("AUD", "JPY") and
                             pd.Timestamp(dt_str).date() == datetime.now().date() else None)
             cpi, observed, metric_type, source, series_id, status = (
-                get_cpi_yoy_details(curr, dt_str, official_observation=aud_official)
-                if aud_official is not None else get_cpi_yoy_details(curr, dt_str))
+                get_cpi_yoy_details(curr, dt_str, official_observation=current_official)
+                if current_official is not None else get_cpi_yoy_details(curr, dt_str))
             cpi = finite_number(cpi)
             freshness["Inflation"] = status
             observations["Inflation"] = {"value": cpi, "date": observed, "source": source, "series_id": series_id}
@@ -5588,7 +5596,7 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     period = pd.Timestamp(observed)
                     observations["Inflation"]["reference_period"] = f"{period.year}-Q{(period.month - 1) // 3 + 1}" if curr == "NZD" else period.strftime("%Y-%m")
             if curr in ("EUR", "CHF", "JPY", "AUD") and pd.Timestamp(dt_str).date() == datetime.now().date():
-                official = aud_official if curr == "AUD" else get_current_official_cpi(curr)
+                official = current_official if curr in ("AUD", "JPY") else get_current_official_cpi(curr)
                 if official:
                     observations["Inflation"].update(official)
             if curr in ("NZD", "GBP", "CAD") and observed is not None:
