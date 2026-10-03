@@ -798,7 +798,7 @@ def refresh_all_verified_policy_rates(fred_key=None):
         return cache
 
 
-# ----------------- Obsidian Dark Theme CSS -----------------
+# ----------------- Dashboard card styling -----------------
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;700&display=swap');
@@ -808,21 +808,14 @@ st.markdown("""
         font-family: 'Inter', sans-serif !important;
     }
     
-    .stApp {
-        background-color: #070708 !important;
-        color: #b2b2be !important;
-    }
-    
+    /* Native surfaces and text follow the selected Streamlit theme. */
     h1, h2, h3, h4, h5, h6 {
         font-family: 'Inter', sans-serif !important;
-        color: #f0f0f5 !important;
         font-weight: 600 !important;
     }
-    
-    /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background-color: #0c0c0e !important;
-        border-right: 1px solid #1f2026 !important;
+    /* Source periods and status captions need full theme-text contrast. */
+    [data-testid="stCaptionContainer"] {
+        opacity: 1;
     }
     
     /* Card design */
@@ -6292,7 +6285,8 @@ def render_bias_box(signal_val, base_curr, quote_curr, base_total_score, quote_t
 
     html_content = f"""
     <div style="
-        background-color: {bg_color};
+        background-color: #0c0c0e;
+        background-image: linear-gradient({bg_color}, {bg_color});
         border: 1px solid {border_color};
         border-radius: 6px;
         padding: 20px 24px;

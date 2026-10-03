@@ -3,8 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Streamlit logs and configs
-.streamlit/
+# Publish only the non-secret theme configuration.
+.streamlit/*
+!.streamlit/config.toml
 *.log
 streamlit.log
 
