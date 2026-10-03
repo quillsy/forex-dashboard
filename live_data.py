@@ -943,7 +943,9 @@ def render_status(st, authorized=False):
     if not completed:
         st.error("Noch kein geprüfter Live-Datensatz vorhanden. Paar-Signale sind gesperrt.")
     elif now - checked >= timedelta(hours=1):
-        st.warning("Der letzte abgeschlossene Abruf liegt über eine Stunde zurück. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
+        age_minutes = int((now - checked).total_seconds() // 60)
+        st.warning("Letzter abgeschlossener Datenabruf: " + checked.strftime("%d.%m.%Y %H:%M UTC")
+                   + f" · Alter: {age_minutes} Minuten. Die Aktualität wird je Faktor geprüft; abgelaufene Freigaben sind gesperrt.")
     else:
         st.info("Zentraler Datenabruf: " + checked.strftime("%d.%m.%Y %H:%M UTC") + " · Ziel: neue Veröffentlichungen binnen einer Stunde berücksichtigen.")
     weights = "/".join(str(weight) for weight in FACTORS.values())
