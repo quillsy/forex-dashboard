@@ -241,6 +241,59 @@ class StatCanCpiContractTests(unittest.TestCase):
             self.assertEqual(record['observation']['is_estimate'], symbol == 1)
             self.assertEqual(record['observation']['provider_status'], obs['provider_status'])
 
+    def test_calendar_gate_only_applies_to_current_window(self):
+        import os
+        import pandas as pd
+        from unittest.mock import patch
+        from test_core_regressions import load_core
+        due = datetime(2026, 10, 19, 12, 30, tzinfo=timezone.utc)
+        before = datetime(2026, 10, 19, 12, 29, tzinfo=timezone.utc)
+        after = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+        for clock in (before, due, after):
+            with patch('official_macro._utc_now', return_value=clock):
+                loader, _ = self.loader(self.fixture())
+                full, _, valid = loader()
+                self.assertTrue(valid)
+                loader, _ = self.loader(self.fixture())
+                short, _, valid = loader(latest_periods=13)
+                self.assertEqual(valid, clock < due)
+                if clock < due:
+                    pd.testing.assert_frame_equal(full, short)
+                else:
+                    self.assertIsNone(short)
+                invalid = self.fixture()
+                invalid[0][0]['object']['memberUomCode'] = 239
+                loader, _ = self.loader(invalid)
+                self.assertFalse(loader()[-1])
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return after.astimezone(tz) if tz else after.replace(tzinfo=None)
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'get_cpi_yoy_details')
+        ps = self.fixture()
+        ps[1][0]['object']['vectorDataPoint'][0]['symbolCode'] = 1
+        ps[1][0]['object']['vectorDataPoint'][-1]['symbolCode'] = 3
+        core = load_core()
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<actual-cpi-route>', 'exec'), core)
+        def fresh_loader(**kwargs):
+            loader, _ = self.loader(ps)
+            return loader(**kwargs)
+        core.update(datetime=Clock, pd=pd, requests=requests, FRED_KEY='test-only',
+                    get_statcan_cpi_data=fresh_loader, get_ons_cpi_data=Mock(),
+                    get_statsnz_cpi_data=Mock())
+        with patch('official_macro._utc_now', return_value=after), patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+            historical = core['compute_currency_details']('CAD', '2026-09-16',
+                include_context=False, factors_to_refresh=('Inflation',))
+            current = core['compute_currency_details']('CAD', '2026-10-20',
+                include_context=False, factors_to_refresh=('Inflation',))
+        self.assertAlmostEqual(historical['Inflation'], 51.69902912621325)
+        obs = historical['_observations']['Inflation']
+        self.assertEqual(obs['provider_status'], 'r')
+        self.assertEqual(obs['comparison_period_status'], 'p')
+        self.assertIs(obs['is_estimate'], True)
+        self.assertIsNone(current['Inflation'])
+
     def test_metadata_transport_failure_propagates_without_retry(self):
         for failed_call in (1, 2):
             loader, client = self.loader(self.fixture())
