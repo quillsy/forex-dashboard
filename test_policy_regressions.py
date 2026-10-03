@@ -22,7 +22,7 @@ def load_policy():
     tree = ast.parse(Path(__file__).with_name('app.py').read_text())
     names = {'operator_is_authorized', 'find_current_rate_episode_start', 'fetch_official_policy_rate_live', 'policy_rate_is_usable',
              'load_policy_rates_cache', 'save_policy_rates_cache', 'get_verified_policy_rate',
-             'get_all_verified_policy_rates', 'refresh_all_verified_policy_rates'}
+             'get_all_verified_policy_rates', 'refresh_all_verified_policy_rates', 'get_country_rate'}
     constants = {'POLICY_RATE_DEFINITIONS', 'POLICY_VERIFICATION_MAX_AGE_DAYS', 'POLICY_OFFICIAL_HOSTS', 'POLICY_RATES_CACHE_FILE'}
     nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and (n.name.startswith('_policy_') or n.name in names))
              or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets))]
@@ -60,6 +60,47 @@ class PolicyRegressions(unittest.TestCase):
         self.p['save_policy_rates_cache']({'USD':obj} if obj else {})
         self.p['fetch_official_policy_rate_live'] = lambda *args: result or {'evidence': [], 'error': 'Timeout'}
         return self.p['refresh_all_verified_policy_rates']()['USD']
+
+    def test_live_display_deadlines_preserve_raw_provenance_and_history(self):
+        for seconds, due in ((3599, False), (3600, True), (3601, True)):
+            obj = self.valid(); obj['verified_at'] = (NOW-timedelta(seconds=seconds)).isoformat()
+            original = deepcopy(obj)
+            display = self.p['_policy_live_display'](obj)
+            self.assertEqual(obj, original)
+            self.assertEqual(display['last_verified_rate'], 3.5)
+            self.assertEqual(display['verification_evidence'], original['verification_evidence'])
+            self.assertEqual(display['rate'], None if due else 3.5)
+            if due: self.assertEqual(display['verification_status'], '🔴 LIVE CHECK DUE')
+        self.p['get_verified_policy_rate'] = lambda currency: obj
+        self.assertEqual(self.p['get_country_rate']('USA', None)[0], 3.5)
+        self.assertIsNone(self.p['get_country_rate']('USA', None, live_display=True)[0])
+
+    def test_live_display_preserves_authorized_manual_override(self):
+        self.p['operator_is_authorized'] = lambda: True
+        self.p['st'].session_state['emergency_manual_rates_override'] = True
+        obj = {'rate': 1.0, 'previous_rate': 0.75, 'verification_status': '🔴 MANUAL OVERRIDE'}
+        self.assertEqual(self.p['_policy_live_display'](obj), obj)
+        self.p['get_verified_policy_rate'] = lambda currency: obj
+        self.assertEqual(self.p['get_country_rate']('USA', None, live_display=True)[:2], (1.0, 25))
+
+    def test_live_display_early_deadline_failure_conflict_and_bad_times(self):
+        obj = self.valid(); obj['verified_at'] = (NOW-timedelta(minutes=10)).isoformat()
+        obj['verification_status'] = '🟡 LAST VERIFIED'
+        obj['verification_evidence'][0]['valid_until'] = NOW.isoformat()
+        self.assertEqual(self.p['_policy_live_display'](obj)['verification_status'], '🔴 LIVE CHECK DUE')
+        obj['verification_status'] = '🔴 UNVERIFIED CHANGE'
+        self.assertEqual(self.p['_policy_live_display'](obj)['verification_status'], '🔴 UNVERIFIED CHANGE')
+        for field in ('verified_at', 'retrieved_at'):
+            for value in ('bad', None, 'NaT', (NOW+timedelta(seconds=1)).isoformat()):
+                bad = self.valid(); bad['verified_at'] = NOW.isoformat()
+                target = bad if field == 'verified_at' else bad['verification_evidence'][0]
+                target[field] = value
+                display = self.p['_policy_live_display'](bad)
+                self.assertIsNone(display['rate'])
+                self.assertNotIn('🟢', display['verification_status'])
+        bad = self.valid(); bad['verified_at'] = NOW.isoformat()
+        bad['verification_evidence'].pop()
+        self.assertIsNone(self.p['_policy_live_display'](bad)['rate'])
 
     def test_cache_miss_and_legacy_defaults_never_verify_or_write(self):
         for currency in self.p['POLICY_RATE_DEFINITIONS']:
