@@ -179,8 +179,10 @@ class LiveDataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'live.json'
             with patch.object(live, 'CURRENCIES', ('CAD',)), patch.object(live, 'now_utc', return_value=NOW):
-                live.collect(app, path)
-                cad = live.load(path)['currencies']['CAD']['Geldpolitik']
+                summary = live.collect(app, path)
+                saved = live.load(path)
+                self.assertEqual(summary['completed_at'], saved['completed_at'])
+                cad = saved['currencies']['CAD']['Geldpolitik']
         requested = app.compute_currency_details.call_args.kwargs['factors_to_refresh']
         self.assertNotIn('Geldpolitik', requested)
         self.assertIsNone(cad['score'])
@@ -786,7 +788,7 @@ class LiveDataTests(unittest.TestCase):
                      'currencies': {'EUR': {'GDP': self.record()}}}
             newer = {'model_version': live.MODEL, 'completed_at': NOW.isoformat(), 'currencies': {}}
             live.save(older, base / live.PATH); live.save(newer, runtime / live.PATH)
-            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch('shared_snapshot.bundled_snapshot_directory', return_value=base), patch('shared_snapshot.current_shared_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
                 self.assertEqual(live.selected_live_directory(), runtime)
                 self.assertEqual(live.load(), newer)
                 self.assertEqual(live.load(base / live.PATH), older)
@@ -803,7 +805,7 @@ class LiveDataTests(unittest.TestCase):
             candidates = [None, [], {}, {'model_version': live.MODEL, 'completed_at': 'bad'},
                           dict(good, completed_at=(NOW + timedelta(seconds=1)).isoformat()),
                           dict(good, model_version='CORE_OTHER')]
-            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+            with patch.object(live.Path, 'cwd', return_value=base), patch.object(live, 'runtime_directory', return_value=runtime), patch('shared_snapshot.bundled_snapshot_directory', return_value=base), patch('shared_snapshot.current_shared_directory', return_value=runtime), patch.object(live, 'now_utc', return_value=NOW), patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
                 for bad in candidates:
                     import json
                     (runtime / live.PATH).write_text(json.dumps(bad))

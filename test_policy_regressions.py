@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import live_data
@@ -36,6 +36,9 @@ def load_policy():
 
 class PolicyRegressions(unittest.TestCase):
     def setUp(self):
+        collecting = patch.dict(os.environ, {'FX_COLLECTOR': '1'})
+        collecting.start()
+        self.addCleanup(collecting.stop)
         self.p = load_policy()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

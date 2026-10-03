@@ -41,6 +41,20 @@ st.set_page_config(
 # ----------------- AUTOMATED VERIFIED G8 POLICY RATE ENGINE -----------------
 import json
 
+# UI instances copy one public collector batch; they never launch a provider
+# collector. Pin before defining the policy path so every view uses that batch.
+def prepare_live_snapshot():
+    if os.environ.get("FX_COLLECTOR") == "1" or getattr(st, "_mock_mode", False):
+        return {"outcome": "DISABLED"}
+    from shared_snapshot import refresh_shared_snapshot
+    live_data.clear_render_directory()
+    result = refresh_shared_snapshot()
+    live_data.pin_render_directory()
+    return result
+
+
+LIVE_SNAPSHOT_REFRESH = prepare_live_snapshot()
+
 POLICY_RATES_CACHE_FILE = str(live_data.selected_live_directory() / ".policy_rates_cache.json")
 
 def find_current_rate_episode_start(observations, current_rate, default_effective_date=None):
@@ -683,6 +697,8 @@ def load_policy_rates_cache():
 
 
 def save_policy_rates_cache(cache_dict):
+    if os.environ.get("FX_COLLECTOR") != "1":
+        raise RuntimeError("POLICY_CACHE_COLLECTOR_ONLY")
     import tempfile
     directory = os.path.dirname(os.path.abspath(POLICY_RATES_CACHE_FILE))
     temporary = None
@@ -743,6 +759,8 @@ def get_all_verified_policy_rates():
 
 def refresh_all_verified_policy_rates(fred_key=None):
     """Only two agreeing, dated official proofs may activate a candidate rate."""
+    if os.environ.get("FX_COLLECTOR") != "1":
+        return get_all_verified_policy_rates()
     import fcntl
     lock_path = POLICY_RATES_CACHE_FILE + ".lock"
     with open(lock_path, "a", encoding="utf-8") as lock:
@@ -6527,17 +6545,9 @@ if not getattr(st, "_mock_mode", False):
             })
         st.dataframe(pd.DataFrame(table_rows), hide_index=True)
 
-        if st.button("🔄 Offizielle Leitzinsen aktualisieren", disabled=not operator_is_authorized()) and operator_is_authorized():
-            with st.spinner("Prüfe offizielle Notenbank-Quellen..."):
-                checked_rates = refresh_all_verified_policy_rates(FRED_KEY)
-            st.session_state["policy_refresh_summary"] = sum("🟢" in value.get("verification_status", "") for value in checked_rates.values())
+        if st.button("🔄 Gemeinsamen Datensatz neu anzeigen"):
             st.rerun()
-        if "policy_refresh_summary" in st.session_state:
-            count = st.session_state["policy_refresh_summary"]
-            if count == 8:
-                st.success("8 von 8 Leitzinsen mit offiziellen Quellen bestätigt.")
-            else:
-                st.warning(f"{count} von 8 Leitzinsen bestätigt. Bitte die Quellenstatus in der Tabelle beachten.")
+        st.caption("Offizielle Leitzinsen werden ausschließlich vom zentralen Collector geprüft. Die gemeinsame Ablage wird höchstens alle fünf Minuten abgerufen.")
 
         with st.expander("🚨 Advanced / Emergency Manual Override", expanded=False):
             st.caption("Standard: AUS. Bei Aktivierung überschreiben manuelle Werte die offiziellen Daten. Dies wird in den Snapshots dokumentiert.")
@@ -6655,14 +6665,11 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- 5. HEADER SECTION -----------------
     st.title("FX Fundamental Dashboard")
     if not check_demo_active():
-        from run_data_collection import maybe_start_live_fallback, LIVE_FALLBACK_KEYS
-        fallback_status = maybe_start_live_fallback({key: load_api_key(key) for key in LIVE_FALLBACK_KEYS})
-        if fallback_status in ("started", "running"):
-            st.info("Der zentrale Ausfallersatz prüft die Live-Daten. Gültige Werte bleiben sichtbar; die Ansicht aktualisiert sich automatisch.")
-        elif fallback_status == "cooldown":
-            st.caption("Ausfallersatz: nächster Versuch frühestens 30 Minuten nach dem letzten Start. Datenfreigaben werden nicht verlängert.")
-        elif fallback_status in ("failed", "timeout"):
-            st.warning("Der Ausfallersatz konnte den Lauf nicht abschließen. Nächster Versuch nach 30 Minuten; die Anfragenzählung kann unvollständig sein. Nicht bestätigte Daten bleiben gesperrt.")
+        sync_status = LIVE_SNAPSHOT_REFRESH.get("outcome")
+        if sync_status == "UPDATED":
+            st.caption("Gemeinsamer Collector-Datensatz übernommen. Abruf- und Prüfzeiten der Quellen bleiben unverändert.")
+        elif sync_status in ("RATE_LIMITED", "UNAVAILABLE", "INVALID_STATE"):
+            st.warning("Der gemeinsame Collector-Datensatz konnte nicht aktualisiert werden. Vorhandene Werte behalten ihre bisherigen Prüfzeiten und Sperrfristen; die App startet keinen eigenen Anbieterabruf.")
     # A full rerun rechecks every badge/table against the current clock and cache.
     # The timestamp belongs to this render, so the initial fragment call cannot
     # create a rerun loop. No provider requests are made by the timer itself.
