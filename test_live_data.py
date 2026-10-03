@@ -1604,6 +1604,11 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
             data['DATA_INF']['VALUE'].append(copy.deepcopy(data['DATA_INF']['VALUE'][0]))
         if case == 'missing':
             data['DATA_INF']['VALUE'][0]['$'] = '***'
+        if case == 'unpublished_placeholder':
+            data['CLASS_INF']['CLASS_OBJ'][-1]['CLASS'] = [
+                {'@code': '2026000707'}, {'@code': '2026000808'}]
+            data['DATA_INF']['VALUE'].append({**data['DATA_INF']['VALUE'][0],
+                                             '@time': '2026000808', '$': '***'})
         if case == 'lag':
             data['DATA_INF']['VALUE'][0]['@time'] = '2026000606'
             data['CLASS_INF']['CLASS_OBJ'][-1]['CLASS']['@code'] = '2026000606'
@@ -1699,6 +1704,15 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
         self.assertTrue(row['observation']['needs_hourly_check'])
         self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
         self.assertFalse(live.eligible(row, now + timedelta(hours=1),
+                                       factor='Inflation', currency='JPY')[0])
+
+    def test_unpublished_api_placeholder_keeps_only_confirmed_national_period(self):
+        _, row, now = self.collect_case('unpublished_placeholder')
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['reference_period'], '2026-07')
+        self.assertEqual(row['observation']['value'], 1.9)
+        self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 15, tzinfo=timezone.utc),
                                        factor='Inflation', currency='JPY')[0])
 
     def test_zero_and_negative_headline_rates_are_real_observations(self):
