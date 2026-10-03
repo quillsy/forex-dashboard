@@ -146,6 +146,21 @@ class StatCanCpiContractTests(unittest.TestCase):
         loader, _ = self.loader(ps)
         self.assertFalse(loader(propagate_transport=True)[-1])
 
+    def test_live_window_argument_is_bounded_before_io(self):
+        for invalid in (True, False, None, 13.0, '13', 12, 25, 301):
+            loader, client = self.loader(self.fixture())
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'WINDOW_INVALID'):
+                loader(latest_periods=invalid)
+            client.post.assert_not_called()
+        for window in (13, 300):
+            loader, client = self.loader(self.fixture())
+            self.assertTrue(loader(latest_periods=window)[-1])
+            self.assertEqual(client.post.call_args_list[0].kwargs['json'],
+                             [{'vectorId': 41690973, 'latestN': window}])
+        ps = self.fixture(); del ps[1][0]['object']['vectorDataPoint'][0]
+        loader, _ = self.loader(ps)
+        self.assertFalse(loader(latest_periods=13)[-1])
+
     def test_loader_retains_publication_and_symbol_annotations(self):
         import pandas as pd
         ps = self.fixture(); ps[1][0]['object']['vectorDataPoint'][0]['symbolCode'] = 1
@@ -180,8 +195,43 @@ class StatCanCpiContractTests(unittest.TestCase):
             with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
                 detail = core['compute_currency_details']('CAD', checked.date().isoformat(),
                     include_context=False, factors_to_refresh=('Inflation',))
+            calls = core['get_statcan_cpi_data'].call_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([c.kwargs for c in calls],
+                             [{'propagate_transport': True, 'latest_periods': 13}] * 2)
+            # Synthetic older levels: current YoY and both status flags must remain identical.
+            full_payload = copy.deepcopy(ps)
+            points = full_payload[1][0]['object']['vectorDataPoint']
+            older = []
+            start = 2025 * 12 + 7
+            for serial in range(start - 287, start):
+                year, month = divmod(serial, 12)
+                point = copy.deepcopy(points[0])
+                point.update(refPer=f'{year}-{month + 1:02d}-01',
+                             refPerRaw=f'{year}-{month + 1:02d}-01')
+                older.append(point)
+            full_payload[1][0]['object']['vectorDataPoint'] = older + points
+            full_loader, _ = self.loader(full_payload)
+            full, _, full_live = full_loader(latest_periods=300)
+            self.assertTrue(full_live)
+            self.assertEqual(len(full), 300)
+            core['get_statcan_cpi_data'].return_value = (full, checked, True)
+            with patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+                core['use_live_core_cache'] = lambda *args: False
+                full_detail = core['compute_currency_details']('CAD', checked.date().isoformat(),
+                    include_context=False, factors_to_refresh=('Inflation',))
+            self.assertEqual(full_detail, detail)
+            self.assertEqual(core['get_statcan_cpi_data'].call_args.kwargs,
+                             {'propagate_transport': False, 'latest_periods': 300})
+            with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+                core['get_cpi_yoy_details']('CAD', '2026-10-01')
+            self.assertEqual(core['get_statcan_cpi_data'].call_args.kwargs,
+                             {'propagate_transport': False, 'latest_periods': 300})
             obs = detail['_observations']['Inflation']
             self.assertAlmostEqual(obs['value'], 3.033980582524265)
+            self.assertEqual(obs['next_due_at'], '2026-10-19T12:30:00+00:00')
+            self.assertEqual(obs['next_due_precision'], 'timestamp')
+            self.assertIs(obs['needs_hourly_check'], True)
             self.assertIn(expected, obs['provider_status'])
             self.assertEqual(obs['is_estimate'], symbol == 1)
             if position == 0: self.assertEqual(obs['comparison_period_status'], expected)

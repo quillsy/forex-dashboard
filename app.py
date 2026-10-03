@@ -2255,16 +2255,18 @@ def get_ons_cpi_data(*, propagate_transport=False):
         return None, datetime.now(), False
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_statcan_cpi_data(*, propagate_transport=False):
+def get_statcan_cpi_data(*, propagate_transport=False, latest_periods=300):
     """
     Fetches CPI index levels (series v41690973) from Statistics Canada WDS API.
     Returns: (df, last_update_time, is_live)
              df has columns: 'date' (pd.Timestamp), 'value' (float),
              'release_date' (pd.Timestamp) and 'is_pit_limited' (bool)
     """
+    if type(latest_periods) is not int or latest_periods not in (13, 300):
+        raise ValueError("STATCAN_CPI_WINDOW_INVALID")
     try:
         url = "https://www150.statcan.gc.ca/t1/wds/rest/getDataFromVectorsAndLatestNPeriods"
-        res = requests.post(url, json=[{"vectorId": 41690973, "latestN": 300}], timeout=15)
+        res = requests.post(url, json=[{"vectorId": 41690973, "latestN": latest_periods}], timeout=15)
         if res.status_code != 200:
             if res.status_code >= 400:
                 res.raise_for_status()
@@ -2299,7 +2301,10 @@ def get_statcan_cpi_data(*, propagate_transport=False):
                 "release_date": release_dt,
                 "is_pit_limited": False,
                 "provider_status": dp["provider_status"],
-                "is_estimate": dp["is_estimate"]
+                "is_estimate": dp["is_estimate"],
+                "next_due_at": dp.get("next_due_at"),
+                "next_due_precision": dp.get("next_due_precision"),
+                "needs_hourly_check": dp.get("needs_hourly_check")
             })
             
         if not records:
@@ -4688,7 +4693,8 @@ def get_cpi_yoy_details(curr: str, target_date=None, official_observation=None):
             series_id = "v41690973"
             
             try:
-                res_statcan = get_statcan_cpi_data(propagate_transport=collector_current)
+                res_statcan = get_statcan_cpi_data(propagate_transport=collector_current,
+                                                    latest_periods=13 if collector_current else 300)
             except requests.exceptions.RequestException as error:
                 status = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNAVAILABLE"
                 return None, None, metric_type, source, series_id, status
@@ -5612,8 +5618,12 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                     observations["Inflation"].update(official)
             if curr in ("NZD", "GBP", "CAD") and observed is not None:
                 loader = {"NZD": get_statsnz_cpi_data, "GBP": get_ons_cpi_data, "CAD": get_statcan_cpi_data}[curr]
-                release_frame, _, _ = loader(propagate_transport=(os.environ.get("FX_COLLECTOR") == "1" and
-                                                              pd.Timestamp(dt_str).date() == datetime.now().date()))
+                collector_current = (os.environ.get("FX_COLLECTOR") == "1" and
+                                     pd.Timestamp(dt_str).date() == datetime.now().date())
+                loader_options = {"propagate_transport": collector_current}
+                if curr == "CAD":
+                    loader_options["latest_periods"] = 13 if collector_current else 300
+                release_frame, _, _ = loader(**loader_options)
                 if release_frame is not None:
                     matching = release_frame[release_frame["date"] == pd.Timestamp(observed)]
                     if not matching.empty:
@@ -5633,10 +5643,12 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                                                  (str(flags[1]) + " (Vergleichsmonat)" if flags[1] else None)),
                                 comparison_period_status=flags[1],
                                 is_estimate=any(flag == "p" for flag in flags))
-                        if curr == "NZD":
+                        if curr in ("NZD", "CAD"):
                             for field in ("next_due_at", "next_due_precision", "source_url", "source_title"):
                                 if isinstance(release.get(field), str):
                                     observations["Inflation"][field] = release[field]
+                            if curr == "CAD" and isinstance(release.get("needs_hourly_check"), (bool, np.bool_)) and bool(release["needs_hourly_check"]):
+                                observations["Inflation"]["needs_hourly_check"] = True
                         if curr == "GBP":
                             # ONS updateDate is a series-maintenance timestamp, not
                             # proof of the bulletin's actual release time.

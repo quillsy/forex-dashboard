@@ -488,6 +488,30 @@ STATCAN_CPI_COORD = '2.2.0.0.0.0.0.0.0.0'
 STATCAN_CPI_TITLE = 'Canada;All-items'
 
 
+def statcan_cpi_next_due(period):
+    """Additional release deadline, never a replacement for hourly checking.
+
+    Official 2026-2027 major economic release calendar, checked 2026-10-03:
+    https://www150.statcan.gc.ca/n1/release-diffusion/2026-eng.pdf
+    The Daily publishes at 08:30 Eastern (America/Toronto):
+    https://www150.statcan.gc.ca/n1/dai-quo/cal2-eng.htm
+    Keys identify the latest observation; dates release the following month.
+    Dates can change. Unknown calendar periods retain the hourly requirement.
+    """
+    release_days = {
+        '2025-11': '2026-01-19', '2025-12': '2026-02-17',
+        '2026-01': '2026-03-16', '2026-02': '2026-04-20',
+        '2026-03': '2026-05-19', '2026-04': '2026-06-22',
+        '2026-05': '2026-07-20', '2026-06': '2026-08-17',
+        '2026-07': '2026-09-14', '2026-08': '2026-10-19',
+        '2026-09': '2026-11-16', '2026-10': '2026-12-14',
+        '2026-11': '2027-01-18', '2026-12': '2027-02-16',
+        '2027-01': '2027-03-15',
+    }
+    day = release_days.get(period)
+    return _statcan_publication_time(day + 'T08:30') if day is not None else None
+
+
 def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None):
     """Validate the original monthly NSA CPI index before the existing YoY path.
 
@@ -575,6 +599,14 @@ def validate_statcan_cpi(series_payload, data_payload, cube_payload, *, now=None
     serials = {int(p[:4]) * 12 + int(p[5:7]) - 1 for p in seen}
     if not all(s in serials for s in range(latest_serial - 12, latest_serial + 1)):
         raise ValueError('STATCAN_CPI_COMPARISON_MONTH_MISSING')
+    next_due = statcan_cpi_next_due(latest[:7])
+    if next_due is not None and checked >= next_due:
+        raise ValueError('STATCAN_CPI_RELEASE_OVERDUE')
+    for point in validated:
+        due = statcan_cpi_next_due(point['refPer'][:7])
+        point.update(next_due_at=due.isoformat() if due is not None else None,
+                     next_due_precision='timestamp' if due is not None else None,
+                     needs_hourly_check=True)
     return validated
 
 
