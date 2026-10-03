@@ -771,11 +771,23 @@ def refresh_all_verified_policy_rates(fred_key=None):
             old = dict(existing) if isinstance(existing, dict) else _policy_empty(currency)
             if not _policy_proofs_valid(old, check_age=False):
                 old = _policy_empty(currency)
-            now = _policy_now().isoformat()
-            # Repeat UI/collector runs within one hour reuse actual verified evidence.
+            checked = _policy_now()
+            now = checked.isoformat()
+            # Refresh before the next collector interval reaches the CORE proof deadline.
             try:
-                recent = (_policy_now() - pd.to_datetime(old.get("verified_at"), utc=True)).total_seconds() < 3600
-            except (TypeError, ValueError):
+                verified = pd.Timestamp(old.get("verified_at"))
+                recent = (not pd.isna(verified) and verified.tzinfo is not None and
+                          0 <= (checked - verified).total_seconds() < 1800)
+                for proof in old.get("verification_evidence", []):
+                    retrieved = pd.Timestamp(proof.get("retrieved_at"))
+                    if pd.isna(retrieved) or retrieved.tzinfo is None or retrieved > checked:
+                        recent = False
+                    if "valid_until" in proof:
+                        deadline = pd.Timestamp(proof["valid_until"])
+                        if (pd.isna(deadline) or deadline.tzinfo is None or
+                                deadline <= checked + timedelta(minutes=30)):
+                            recent = False
+            except (TypeError, ValueError, OverflowError):
                 recent = False
             if recent and policy_rate_is_usable(old):
                 continue

@@ -111,6 +111,59 @@ class PolicyRegressions(unittest.TestCase):
         self.assertEqual(result['verification_evidence'],old['verification_evidence'])
         self.assertEqual(result['verification_status'],'🟡 LAST VERIFIED')
 
+    def test_proactive_refresh_boundaries_and_proof_deadlines(self):
+        self.p['POLICY_RATE_DEFINITIONS'] = {'USD': self.p['POLICY_RATE_DEFINITIONS']['USD']}
+        for age, deadline, expected in ((1799, None, False), (1800, None, True),
+                                       (60, 1801, False), (60, 1800, True), (60, 300, True)):
+            with self.subTest(age=age, deadline=deadline):
+                old = self.valid()
+                old['verified_at'] = (NOW - timedelta(seconds=age)).isoformat()
+                if deadline is not None:
+                    old['verification_evidence'][1]['valid_until'] = (NOW + timedelta(seconds=deadline)).isoformat()
+                self.p['save_policy_rates_cache']({'USD': old})
+                fetch = Mock(return_value={'evidence': [], 'error': 'Timeout'})
+                self.p['fetch_official_policy_rate_live'] = fetch
+                result = self.p['refresh_all_verified_policy_rates']()['USD']
+                self.assertEqual(fetch.call_count, int(expected))
+                self.assertEqual(result['verified_at'], old['verified_at'])
+                self.assertEqual(result['verification_evidence'], old['verification_evidence'])
+
+    def test_malformed_or_future_proof_times_never_skip_refresh(self):
+        self.p['POLICY_RATE_DEFINITIONS'] = {'USD': self.p['POLICY_RATE_DEFINITIONS']['USD']}
+        for field in ('verified_at', 'retrieved_at', 'valid_until'):
+            values = ('invalid', 'NaT', None, '2026-09-06T12:00:00')
+            if field != 'valid_until':
+                values += ((NOW + timedelta(seconds=1)).isoformat(),)
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    old = self.valid(); old['verified_at'] = NOW.isoformat()
+                    target = old if field == 'verified_at' else old['verification_evidence'][0]
+                    target[field] = value
+                    self.p['save_policy_rates_cache']({'USD': old})
+                    fetch = Mock(return_value={'evidence': [], 'error': 'Timeout'})
+                    self.p['fetch_official_policy_rate_live'] = fetch
+                    self.p['refresh_all_verified_policy_rates']()
+                    fetch.assert_called_once()
+
+    def test_proactive_success_requires_new_proofs_and_noncollector_does_no_io(self):
+        self.p['POLICY_RATE_DEFINITIONS'] = {'USD': self.p['POLICY_RATE_DEFINITIONS']['USD']}
+        old = self.valid(); old['verified_at'] = (NOW - timedelta(minutes=30)).isoformat()
+        for proof in old['verification_evidence']:
+            proof['retrieved_at'] = old['verified_at']
+        new = self.valid()['verification_evidence']
+        self.p['save_policy_rates_cache']({'USD': old})
+        fetch = Mock(return_value={'evidence': new})
+        self.p['fetch_official_policy_rate_live'] = fetch
+        with patch.dict(os.environ, {'FX_COLLECTOR': '0'}):
+            self.p['refresh_all_verified_policy_rates']()
+        fetch.assert_not_called()
+        result = self.p['refresh_all_verified_policy_rates']()['USD']
+        fetch.assert_called_once()
+        self.assertEqual(result['verified_at'], NOW.isoformat())
+        self.assertEqual(result['verification_evidence'], new)
+        self.assertEqual(result['rate'], old['rate'])
+        self.assertEqual(result['verification_status'], '🟢 VERIFIED_UNCHANGED')
+
     def test_one_source_change_and_conflicting_sources_block_activation(self):
         old=self.valid(); changed=self.valid(rate=3.75)['verification_evidence']
         for proofs in ([changed[0]], [changed[0],old['verification_evidence'][1]]):
