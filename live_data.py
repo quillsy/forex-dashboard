@@ -24,7 +24,7 @@ STATCAN_PRODUCTS = {
     "GDP": ("Gross domestic product, expenditure-based, Canada, quarterly", "3610010401"),
 }
 OBS_FIELDS = {"value", "policy_rate", "yield_2y", "date", "source", "series_id", "frequency",
-              "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at",
+              "unit", "seasonal_adjustment", "reference_period", "published_at", "checked_at", "policy_verified_at",
               "next_due_at", "freshness", "m_last", "s_last", "m_ref", "s_ref", "m_src", "s_src"}
 OBS_FIELDS.update({"comparison_period_status", "provider_status", "release_date_known", "reference_start", "reference_end", "period_label", "is_estimate", "source_url", "next_due_precision", "needs_hourly_check", "transformation", "publication_basis", "geography", "release_stage", "license", "redistribution_status", "source_title", "bls_release_period", "bls_release_url", "bls_embargo_ends_at", "bls_proof_source", "bls_first_observed_at", "bls_api_raw_value", "bls_fred_raw_value"})
 
@@ -152,8 +152,55 @@ def pin_render_directory():
 def load(path=PATH):
     path = Path(path)
     if path == PATH and os.environ.get("FX_COLLECTOR") != "1":
-        path = selected_live_directory() / PATH
+        directory = selected_live_directory()
+        return _bound_policy_deadlines(_load_file(directory / PATH), directory)
     return _load_file(path)
+
+
+def _bound_policy_deadlines(data, directory):
+    """Read-time cap also protects batches written before the collector fix.
+
+    These are view metadata from the same pinned policy proofs. No file, source
+    timestamp, score or expiry is refreshed by loading a dataset.
+    """
+    try:
+        policies = json.loads((Path(directory) / ".policy_rates_cache.json").read_text())
+    except (OSError, ValueError):
+        policies = {}
+    currencies = data.get("currencies", {})
+    for currency, records in (currencies.items() if isinstance(currencies, dict) else []):
+        if not isinstance(records, dict):
+            continue
+        record = records.get("Geldpolitik", {})
+        if not isinstance(record, dict) or record.get("validation") != "VALID":
+            continue
+        policy = policies.get(currency, {}) if isinstance(policies, dict) else {}
+        policy = policy if isinstance(policy, dict) else {}
+        verified = timestamp(policy.get("verification_timestamp") or policy.get("verified_at")
+                             or policy.get("last_verified_at"))
+        completed = timestamp(data.get("completed_at"))
+        observation = record.get("observation", {})
+        if not isinstance(observation, dict):
+            record.update(validation="UNVERIFIED", reason="Leitzins-Aktualitätsbeleg fehlt oder ist widersprüchlich")
+            continue
+        proofs = policy.get("verification_evidence", [])
+        limits = [timestamp(value) for value in
+                  (record.get("next_due_at"), observation.get("next_due_at")) if value is not None]
+        if isinstance(proofs, list):
+            limits.extend(timestamp(p["valid_until"]) for p in proofs
+                          if isinstance(p, dict) and "valid_until" in p)
+        else:
+            limits.append(None)
+        if (verified is None or completed is None or verified > completed
+                or any(d is None for d in limits)
+                or number(policy.get("rate")) is None
+                or number(policy.get("rate")) != number(observation.get("policy_rate"))):
+            record.update(validation="UNVERIFIED", reason="Leitzins-Aktualitätsbeleg fehlt oder ist widersprüchlich")
+            continue
+        deadline = min(limits + [verified + timedelta(hours=1)]).isoformat()
+        record["next_due_at"] = deadline
+        observation.update(next_due_at=deadline, policy_verified_at=verified.isoformat(), needs_hourly_check=True)
+    return data
 
 
 def save(data, path=PATH):
@@ -813,28 +860,33 @@ def collect(app, path=PATH):
                             and number(observation.get("yield_2y")) is not None
                             and number(old_obs["yield_2y"]) != number(observation["yield_2y"])):
                         validation, reason = "UNVERIFIED", "Amtliche Treasury-Ausgaben widersprechen sich für denselben Tag"
-                # Policy verification must also have succeeded during this run.
+                # The cached policy proof keeps its own clock; a yield refresh cannot extend it.
                 policy = app.get_verified_policy_rate(currency)
                 proofs = policy.get("verification_evidence", [])
                 deadlines = [timestamp(p.get("valid_until")) for p in proofs
                              if isinstance(p, dict) and "valid_until" in p] if isinstance(proofs, list) else []
-                if deadlines:
-                    if any(d is None for d in deadlines):
-                        validation, reason = "UNVERIFIED", "Ungültige Leitzins-Ablaufgrenze"
-                    else:
-                        existing_due = timestamp(observation.get("next_due_at"))
-                        deadline = min(deadlines + ([existing_due] if existing_due else []))
-                        observation["next_due_at"] = deadline.isoformat()
-                        # The yield still needs its regular hourly verification.
-                        observation["needs_hourly_check"] = True
+                existing_due = timestamp(observation.get("next_due_at"))
+                if observation.get("next_due_at") is not None and existing_due is None:
+                    validation, reason = "UNVERIFIED", "Ungültige Leitzins-Ablaufgrenze"
+                if any(d is None for d in deadlines):
+                    validation, reason = "UNVERIFIED", "Ungültige Leitzins-Ablaufgrenze"
                 if not app.policy_rate_is_usable(policy):
                     validation, reason = "UNVERIFIED", "Leitzins-Belege ungültig oder angekündigter Zinswechsel fällig"
                 verified = policy.get("verification_timestamp") or policy.get("verified_at")
                 if verified is None:
                     verified = policy.get("last_verified_at")
                 verified_at = timestamp(verified)
-                if verified_at is None or now_utc() - verified_at >= timedelta(hours=1):
+                policy_now = now_utc()
+                if verified_at is None or verified_at > policy_now or policy_now - verified_at >= timedelta(hours=1):
                     validation, reason = "UNVERIFIED", "Aktuelle Leitzinsprüfung fehlt"
+                else:
+                    observation["policy_verified_at"] = verified_at.isoformat()
+                    limits = [verified_at + timedelta(hours=1)]
+                    limits.extend(d for d in deadlines if d is not None)
+                    if existing_due is not None:
+                        limits.append(existing_due)
+                    observation["next_due_at"] = min(limits).isoformat()
+                    observation["needs_hourly_check"] = True
                 if currency == "NZD" and os.environ.get("FX_RBNZ_AUTOMATION_APPROVED") != "1":
                     validation, reason = "UNVERIFIED", "RBNZ: Freigabe für automatisierten Zugriff fehlt; 2J-Rendite ebenfalls ungeprüft"
                 elif validation == "VALID" and number(observation.get("yield_2y")) is None:
@@ -936,6 +988,7 @@ def render_status(st, authorized=False):
                                            if bls_embargo else record.get("published_at")
                                            or (str(observation["release_date_known"]) + " (Uhrzeit unbekannt)" if observation.get("release_date_known") else "Unbekannt")),
                          "Erfolgreich geprüft": record.get("checked_at") or "Nicht bestätigt",
+                         "Leitzins erfolgreich geprüft": observation.get("policy_verified_at") if factor == "Geldpolitik" else None,
                          "Nächster Quellentermin": next_source_date,
                          "Aktualitätsprüfung fällig": _freshness_check_label(record, observation, now)})
     available = sum(row["Status"] == "Verfügbar" for row in rows)

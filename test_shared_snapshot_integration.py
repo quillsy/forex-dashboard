@@ -83,6 +83,46 @@ class SnapshotIntegrationTests(unittest.TestCase):
                 self.assertEqual(ns['prepare_live_snapshot'](), {'outcome': 'DISABLED'})
                 refresh.assert_not_called(); pin.assert_not_called()
 
+    def test_pinned_legacy_batch_obeys_real_policy_clock_without_file_changes(self):
+        from test_shared_snapshot import fixture, NOW as CHECKED
+        docs = fixture(CHECKED)
+        verified = CHECKED - timedelta(minutes=50)
+        observation = {'policy_rate': 2.0, 'yield_2y': 2.2, 'date': CHECKED.date().isoformat(),
+                       'source': 'Official test fixture', 'frequency': 'daily', 'unit': 'percent per annum'}
+        row = live_data.build_record('Geldpolitik', 20, observation, 'FRESH', CHECKED.isoformat())
+        docs['live_core_data.json']['currencies']['EUR']['Geldpolitik'] = row
+        docs['live_core_data.json'].update(status='PARTIAL', eligible_factors=1)
+        docs['.policy_rates_cache.json']['EUR'].update(rate=2.0, verified_at=verified.isoformat(), verification_status='🟢 VERIFIED')
+        status = docs['data_collection_status.json']
+        status['last_run_status'] = 'PARTIAL'
+        status['components']['live_core'].update(status='PARTIAL', eligible_factors=1)
+        status['components']['policy_rates'].update(status='PARTIAL')
+        status['components']['policy_rates']['currencies']['EUR'] = '🟢 VERIFIED'
+        with tempfile.TemporaryDirectory() as tmp:
+            base, runtime = Path(tmp) / 'base', Path(tmp) / 'runtime'
+            base.mkdir()
+            for name, data in docs.items():
+                (base / name).write_text(json.dumps(data))
+            originals = {name: (base / name).read_bytes() for name in docs}
+            with patch.dict(os.environ, {'FX_COLLECTOR': '0'}), \
+                 patch.object(live_data.Path, 'cwd', return_value=base), \
+                 patch.object(live_data, 'runtime_directory', return_value=runtime), \
+                 patch.object(live_data, 'now_utc', return_value=CHECKED):
+                live_data.pin_render_directory()
+                loaded = live_data.load()
+                record = loaded['currencies']['EUR']['Geldpolitik']
+                self.assertEqual(record['checked_at'], CHECKED.isoformat())
+                self.assertEqual(record['observation']['policy_verified_at'], verified.isoformat())
+                self.assertEqual(record['next_due_at'], (verified + timedelta(hours=1)).isoformat())
+                for minutes, expected in ((59, True), (60, False), (61, False)):
+                    self.assertEqual(live_data.eligible(record, verified + timedelta(minutes=minutes), 'Geldpolitik', 'EUR')[0], expected)
+                for field in ('score', 'checked_at', 'expires_at'):
+                    self.assertEqual(record[field], row[field])
+                # Explicit paths/collector inputs retain the original stored metadata.
+                self.assertEqual(live_data.load(base / live_data.PATH), docs['live_core_data.json'])
+            for name in docs:
+                self.assertEqual((base / name).read_bytes(), originals[name])
+
     def test_ui_policy_refresh_and_direct_save_cannot_mutate_a_shared_generation(self):
         tree = ast.parse(Path(__file__).with_name('app.py').read_text())
         functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
