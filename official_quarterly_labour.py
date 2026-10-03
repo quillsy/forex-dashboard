@@ -287,6 +287,14 @@ JP_LABOUR_METADATA = 'https://www.e-stat.go.jp/en/stat-search/files?stat_infid=0
 JP_LABOUR_RESULTS = 'https://www.stat.go.jp/english/data/roudou/result.html'
 JP_LABOUR_CALENDAR = 'https://www.stat.go.jp/english/data/roudou/1543.html'
 JP_LABOUR_RIGHTS = 'https://www.stat.go.jp/english/info/riyou.html'
+# Exact normalized headers of the existing 1-a-1 workbook, verified 2026-10-03.
+# The title and SA label are repeated above both groups of observation columns.
+JP_LABOUR_TITLE = ('Historical data 1 a-1 Major items (Labour force, Employed person, '
+                   'Employee, Unemployed person, Not in labour force, Unemployment rate) '
+                   '- Whole Japan, Monthly Data')
+JP_LABOUR_SA_LABEL = '季節調整値 Seasonally adjusted series'
+JP_LABOUR_NOTE_TEXTS = frozenset(('「※注_Notes」シートを参照',
+                                'Please refer to "※注_Notes" the sheet.'))
 
 
 def _jp_space(value):
@@ -415,6 +423,9 @@ def _japan_labour_calendar(period, released, calendar_html, *, now=None):
         schedule[key] = due
     if schedule.get(period) != released:
         raise ValueError('JP_LABOUR_RELEASE_CALENDAR_CONFLICT')
+    ordered_dates = [schedule[p] for p in sorted(schedule)]
+    if any(later < earlier for earlier, later in zip(ordered_dates, ordered_dates[1:])):
+        raise ValueError('JP_LABOUR_CALENDAR_CONFLICT')
     newer = [(p, d) for p, d in schedule.items() if p > period]
     if not newer:
         raise ValueError('JP_LABOUR_NEXT_RELEASE_UNKNOWN')
@@ -424,7 +435,7 @@ def _japan_labour_calendar(period, released, calendar_html, *, now=None):
     expected_y, expected_m0 = divmod(serial, 12)
     if next_period != f'{expected_y:04d}-{expected_m0 + 1:02d}':
         raise ValueError('JP_LABOUR_CALENDAR_GAP')
-    if next_day <= local_day:
+    if any(day <= local_day for _, day in newer):
         raise ValueError('JP_LABOUR_NEW_RELEASE_DUE')
     return {'reference_period': period, 'release_date_known': released.isoformat(),
             'next_due_at': datetime.combine(next_day, datetime.min.time(), ZoneInfo('Asia/Tokyo')).astimezone(timezone.utc).isoformat()}
@@ -443,9 +454,8 @@ def parse_japan_labour(content, release, *, now=None):
         workbook.close()
     if len(rows) < 11 or len(rows[6]) != 22:
         raise ValueError('JP_LABOUR_SCHEMA_INVALID')
-    if ('Historical data 1 a-1' not in _jp_space(rows[1][4]) or
-            'Whole Japan, Monthly Data' not in _jp_space(rows[1][4]) or
-            'Seasonally adjusted series' not in _jp_space(rows[4][4]) or
+    if (any(_jp_space(rows[1][column]) != JP_LABOUR_TITLE for column in (4, 13)) or
+            any(_jp_space(rows[4][column]) != JP_LABOUR_SA_LABEL for column in (4, 13)) or
             _jp_space(rows[6][19]) != 'Unemployment rate (percent)' or
             _jp_space(rows[8][19]) != 'Both sexes'):
         raise ValueError('JP_LABOUR_SERIES_IDENTITY_INVALID')
@@ -454,7 +464,18 @@ def parse_japan_labour(content, release, *, now=None):
     for row in rows[10:]:
         month_match = re.fullmatch(r'(\d{1,2})月', _jp_space(row[1]))
         if not month_match:
-            continue
+            def empty(cell):
+                return cell is None or (isinstance(cell, str) and not cell.strip())
+            if all(empty(cell) for cell in row):
+                continue
+            # The two original trailing Notes rows contain only identical
+            # E/N references; A/B and every observation column are empty.
+            # A malformed rate is still data, not permission to skip a row.
+            note = _jp_space(row[4])
+            if (note in JP_LABOUR_NOTE_TEXTS and _jp_space(row[13]) == note and
+                    all(empty(cell) for column, cell in enumerate(row) if column not in (4, 13))):
+                continue
+            raise ValueError('JP_LABOUR_UNRECOGNIZED_DATA_PERIOD')
         month = int(month_match[1])
         if not 1 <= month <= 12:
             raise ValueError('JP_LABOUR_MONTH_INVALID')

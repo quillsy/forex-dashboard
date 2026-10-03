@@ -31,7 +31,7 @@ def japan_calendar(future=True):
 def japan_client(payload=None):
     client = Mock()
     api = Mock(); api.json.return_value = estat() if payload is None else payload
-    release = Mock(); release.text = japan_release()
+    release = Mock(); release.text = japan_release(); release.content = release.text.encode('utf-8')
     calendar = Mock(); calendar.text = japan_calendar()
     client.get.side_effect = [api, release, calendar]
     return client
@@ -64,6 +64,22 @@ def abs_client(page):
 
 
 class OfficialInflationTests(unittest.TestCase):
+    def test_national_html_bytes_honor_declared_charset_instead_of_http_default(self):
+        for declared, codec in (("Shift_JIS", "shift_jis"), ("UTF-8", "utf-8")):
+            with self.subTest(charset=declared):
+                response = requests.Response(); response.status_code = 200
+                response.encoding = "ISO-8859-1"
+                response._content = (f'<meta charset="{declared}">' + japan_release()).encode(codec)
+                with self.assertRaisesRegex(ValueError, "ESTAT_RELEASE_INVALID"):
+                    parse_japan_cpi_release(response.text, NOW)
+                client = japan_client(); responses = list(client.get.side_effect)
+                responses[1] = response; client.get.side_effect = responses
+                row = fetch_official_cpi("JPY", client=client, estat_key="fixture-only", now=NOW)
+                self.assertEqual(row["value"], 1.9)
+                self.assertEqual(row["reference_period"], "2026-07")
+                self.assertNotIn("_validation", row)
+                self.assertEqual(client.get.call_count, 3)
+
     def test_abs_official_release_deadline_and_current_api_period(self):
         calendar = parse_abs_release_index(abs_release_index())
         self.assertEqual(calendar, {"latest_period": "2026-07", "next_due_at": "2026-09-30T01:30:00+00:00"})
@@ -201,6 +217,7 @@ class OfficialInflationTests(unittest.TestCase):
         self.assertEqual(diagnostic["code"], "ESTAT_DUE_UNCONFIRMED")
         client = japan_client(payload); responses = list(client.get.side_effect)
         responses[1].text = japan_release(month=8, date="2026年9月18日")
+        responses[1].content = responses[1].text.encode('utf-8')
         client.get.side_effect = responses
         row = fetch_official_cpi("JPY", client=client, estat_key="fixture-only", now="2026-09-20T00:00:00+00:00", diagnostics=diagnostic)
         self.assertEqual(row["_validation"], "UNVERIFIED")
@@ -348,7 +365,7 @@ class OfficialInflationTests(unittest.TestCase):
     def test_transport_injection_and_no_legacy_fallback(self):
         client = Mock(); client.get.return_value.json.return_value = estat()
         api = client.get.return_value
-        release = Mock(); release.text = japan_release()
+        release = Mock(); release.text = japan_release(); release.content = release.text.encode('utf-8')
         calendar = Mock(); calendar.text = japan_calendar()
         client.get.side_effect = lambda url, **kwargs: release if url.endswith("index-z.html") else calendar if url.endswith("1582.html") else api
         result = fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)
@@ -371,7 +388,7 @@ class OfficialInflationTests(unittest.TestCase):
     def test_safe_diagnostics_success_api_rejection_and_schema(self):
         client = Mock(); client.get.return_value.json.return_value = estat()
         api = client.get.return_value
-        release = Mock(); release.text = japan_release()
+        release = Mock(); release.text = japan_release(); release.content = release.text.encode('utf-8')
         calendar = Mock(); calendar.text = japan_calendar()
         client.get.side_effect = lambda url, **kwargs: release if url.endswith("index-z.html") else calendar if url.endswith("1582.html") else api
         diagnostics = {"old_field": "old"}
@@ -405,7 +422,7 @@ class OfficialInflationTests(unittest.TestCase):
     def test_estat_request_selects_completed_months_instead_of_first_page(self):
         client = Mock(); client.get.return_value.json.return_value = estat()
         api = client.get.return_value
-        release = Mock(); release.text = japan_release()
+        release = Mock(); release.text = japan_release(); release.content = release.text.encode('utf-8')
         calendar = Mock(); calendar.text = japan_calendar()
         client.get.side_effect = lambda url, **kwargs: release if url.endswith("index-z.html") else calendar if url.endswith("1582.html") else api
         fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)

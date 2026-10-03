@@ -1620,6 +1620,7 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
         if case == 'future': release.text = japan_release(date='2026年9月18日')
         if case == 'zero': release.text = japan_release(value='0.0', direction='横ばい')
         if case == 'negative': release.text = japan_release(value='0.4', direction='下落')
+        release.content = release.text.encode('utf-8')
         calendar = Mock(); calendar.text = japan_calendar(future=case != 'unknown_next')
         if case == 'bad_calendar': calendar.text = '<html>changed</html>'
         responses = [api, release, calendar]
@@ -1722,6 +1723,105 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
                 self.assertEqual(row['observation']['value'], value)
                 self.assertEqual(row['validation'], 'VALID')
                 self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
+
+
+class JapanLabourContractCollectorIntegrationTests(unittest.TestCase):
+    """Real workbook/metadata parsers and persisted gate, synthetic adapters."""
+    def collect_case(self, case='valid'):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        from test_official_quarterly_labour import JapanLabourTests
+        fixture = JapanLabourTests()
+        now = fixture.CURRENT_NOW
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        def mutate(sheet):
+            sheet.cell(18, 20, 2.5)
+            if case == 'sa_conflict': sheet.cell(5, 5).value = 'Not Seasonally adjusted series: Original series'
+            if case == 'second_header': sheet.cell(5, 14).value = 'Original series'
+            if case == 'wrong_table': sheet.cell(2, 5).value = sheet.cell(2, 5).value.replace('1 a-1 ', '1 a-10 ')
+            if case in ('unknown_duplicate', 'unknown_future', 'malformed_numeric'):
+                sheet.cell(24, 1, 2027 if case == 'unknown_future' else 2026)
+                sheet.cell(24, 2, '1月*' if case == 'unknown_future' else '8月*')
+                sheet.cell(24, 20, '9.9*' if case == 'malformed_numeric' else 9.9)
+        metadata = Mock(); metadata.text = fixture.metadata()
+        calendar = Mock(); calendar.text = fixture.current_calendar()
+        if case == 'calendar_conflict':
+            calendar.text = calendar.text.replace('October 30</td>', 'November 5</td>').replace('December 1</td>', 'November 1</td>')
+        workbook = Mock(); workbook.content = fixture.book(mutate)
+        responses = [metadata, calendar, workbook]
+        phase = {'metadata_timeout': 0, 'calendar_timeout': 1, 'workbook_timeout': 2,
+                 'workbook_forbidden': 2}.get(case)
+        if phase is not None:
+            if case == 'workbook_forbidden':
+                response = requests.Response(); response.status_code = 403
+                error = requests.HTTPError('private-response', response=response)
+            else: error = requests.Timeout('private-response')
+            responses[phase].raise_for_status.side_effect = error
+        transport = Mock(exceptions=requests.exceptions); transport.get.side_effect = responses
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == 'get_macro_observation_details')
+        route.decorator_list = []
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<jpy-labour-route>', 'exec'), core)
+        core.update(datetime=Clock, requests=transport)
+        app = SimpleNamespace(FRED_KEY=None, requests=transport,
+                              compute_currency_details=core['compute_currency_details'])
+        previous = live.build_record('Arbeitsmarkt', 80.0, {
+            'value': 2.6, 'date': '2026-08-31', 'reference_period': '2026-08',
+            'source': 'Statistics Bureau of Japan', 'series_id': 'official-direct',
+            'frequency': 'monthly', 'seasonal_adjustment': 'SA',
+            'needs_hourly_check': True,
+        }, 'FRESH', (now - timedelta(minutes=30)).isoformat())
+        self.assertTrue(live.eligible(previous, now, factor='Arbeitsmarkt', currency='JPY')[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {'JPY': {'Arbeitsmarkt': previous}}}, path)
+            with patch('official_quarterly_labour.datetime', Clock), \
+                 patch.object(live, 'now_utc', return_value=now), \
+                 patch.object(live, 'CURRENCIES', ('JPY',)), \
+                 patch.object(live, 'FACTORS', {'Arbeitsmarkt': live.FACTORS['Arbeitsmarkt']}):
+                live.collect(app, path)
+                batch = live.load(path)
+        self.assertTrue(batch['completed_at'])
+        self.assertEqual(transport.get.call_count, 1 if case == 'metadata_timeout' else 2 if case in ('calendar_timeout', 'calendar_conflict') else 3)
+        return previous, batch['currencies']['JPY']['Arbeitsmarkt'], now
+
+    def test_valid_national_workbook_remains_eligible_with_same_score_definition(self):
+        _, row, now = self.collect_case()
+        self.assertEqual(row['validation'], 'VALID')
+        self.assertEqual(row['observation']['value'], 2.5)
+        self.assertAlmostEqual(row['score'], (5.0 - 2.5) / 3.0 * 100.0)
+        self.assertEqual(row['observation']['seasonal_adjustment'], 'SA')
+        self.assertEqual(row['next_due_at'], '2026-10-29T15:00:00+00:00')
+        self.assertTrue(live.eligible(row, now, factor='Arbeitsmarkt', currency='JPY')[0])
+
+    def test_contract_errors_revoke_the_previous_eligible_record(self):
+        for case in ('sa_conflict', 'second_header', 'wrong_table', 'unknown_duplicate',
+                     'unknown_future', 'malformed_numeric', 'calendar_conflict', 'workbook_forbidden'):
+            with self.subTest(case=case):
+                _, row, now = self.collect_case(case)
+                self.assertEqual(row['validation'], 'UNVERIFIED')
+                self.assertIsNone(row['score'])
+                self.assertNotIn('last_error', row)
+                self.assertFalse(live.eligible(row, now, factor='Arbeitsmarkt', currency='JPY')[0])
+                self.assertNotIn('private-response', str(row))
+
+    def test_temporary_failures_preserve_only_original_freshness_window(self):
+        for case in ('metadata_timeout', 'calendar_timeout', 'workbook_timeout'):
+            with self.subTest(case=case):
+                previous, row, now = self.collect_case(case)
+                for field in ('score', 'observation', 'checked_at', 'expires_at', 'next_due_at'):
+                    self.assertEqual(row[field], previous[field])
+                self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+                self.assertTrue(live.eligible(row, now, factor='Arbeitsmarkt', currency='JPY')[0])
+                self.assertFalse(live.eligible(row, now + timedelta(minutes=30),
+                                               factor='Arbeitsmarkt', currency='JPY')[0])
 
 
 class SwissHicpCollectorIntegrationTests(unittest.TestCase):

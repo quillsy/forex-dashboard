@@ -3,6 +3,7 @@ import csv
 import html
 import io
 import json
+import math
 import unittest
 from datetime import datetime, timezone
 
@@ -188,8 +189,12 @@ class JapanLabourTests(unittest.TestCase):
     def book(self, mutate=None):
         from openpyxl import Workbook
         w = Workbook(); s = w.active; s.title = '季節調整値'
-        s.cell(2, 5, 'Historical data 1 a-1 Major items - Whole Japan, Monthly Data')
-        s.cell(5, 5, 'Seasonally adjusted series')
+        title = ('Historical data 1 a-1 Major items (Labour force, Employed person, '
+                 'Employee, Unemployed person, Not in labour force, Unemployment rate) '
+                 '- Whole Japan, Monthly Data')
+        for column in (5, 14):
+            s.cell(2, column, title)
+            s.cell(5, column, '季節調整値 Seasonally adjusted series')
         s.cell(7, 20, 'Unemployment rate  (percent)'); s.cell(7, 22, '')
         s.cell(9, 20, 'Both sexes')
         for month in range(1, 13):
@@ -363,6 +368,93 @@ class JapanLabourTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'IDENTITY_INVALID'):
             fetch_japan_labour(now=self.CURRENT_NOW, session=session)
         self.assertEqual(len(session.calls), 2)
+
+    def test_workbook_title_and_sa_identity_are_exact_at_both_header_locations(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        def valid(s): s.cell(18, 20, 2.5)
+        for column in (5, 14):
+            for kind in ('table', 'frequency', 'nsa_title', 'sa'):
+                def corrupt(s, column=column, kind=kind):
+                    valid(s)
+                    if kind == 'sa':
+                        s.cell(5, column, 'Not Seasonally adjusted series: Original series')
+                    else:
+                        title = s.cell(2, column).value
+                        title = (title.replace('1 a-1', '1 a-10') if kind == 'table' else
+                                 title.replace('Monthly Data', 'Quarterly Data') if kind == 'frequency' else
+                                 title + ' - Original series only')
+                        s.cell(2, column, title)
+                with self.subTest(column=column, kind=kind), self.assertRaisesRegex(ValueError, 'SERIES_IDENTITY_INVALID'):
+                    parse_japan_labour(self.book(corrupt), release, now=self.CURRENT_NOW)
+        def whitespace(s):
+            valid(s)
+            for column in (5, 14):
+                s.cell(2, column, '\n  ' + s.cell(2, column).value.replace(' ', '  ') + '\n')
+                s.cell(5, column, '季節調整値 \n Seasonally adjusted series')
+        self.assertEqual(parse_japan_labour(self.book(whitespace), release, now=self.CURRENT_NOW)['value'], 2.5)
+
+    def test_unrecognized_data_period_never_hides_duplicate_or_future_rows(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        for year, label in ((2026, '8月*'), (2027, '1月*'), (2026, 'August'), (2026, '')):
+            for column in (5, 14, 20, 21, 22):
+                for value in (9.9, '9.9', '9.9*', '9,9', '***', float('nan'), 0.0, True, False):
+                    # XLSX cannot retain a NaN numeric cell; use string NaN
+                    # to verify a non-finite observation is not skipped.
+                    stored = 'NaN' if isinstance(value, float) and math.isnan(value) else value
+                    def corrupt(s, year=year, label=label, column=column, stored=stored):
+                        s.cell(18, 20, 2.5); s.cell(23, 1, year)
+                        s.cell(23, 2, label); s.cell(23, column, stored)
+                    with self.subTest(year=year, label=label, column=column, value=stored), self.assertRaisesRegex(ValueError, 'UNRECOGNIZED_DATA_PERIOD'):
+                        parse_japan_labour(self.book(corrupt), release, now=self.CURRENT_NOW)
+
+    def test_original_note_rows_and_blank_future_months_are_preserved(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        def notes(s):
+            s.cell(18, 20, 2.5)
+            for column in (5, 14):
+                s.cell(23, column, '「※注_Notes」シートを参照')
+                s.cell(24, column, 'Please refer to "※注_Notes" the sheet. ')
+        observation = parse_japan_labour(self.book(notes), release, now=self.CURRENT_NOW)
+        self.assertEqual((observation['value'], observation['reference_period']), (2.5, '2026-08'))
+        self.assertIsNone(observation['published_at'])
+
+    def test_only_exact_original_note_row_structure_is_ignored(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        for column, value in ((1, 2026), (2, '8月*'), (20, '***'), (20, False),
+                              (5, 'Unknown note'), (14, 'Contradictory note')):
+            def corrupt(s, column=column, value=value):
+                s.cell(18, 20, 2.5)
+                for note_column in (5, 14):
+                    s.cell(23, note_column, '「※注_Notes」シートを参照')
+                s.cell(23, column, value)
+            with self.subTest(column=column, value=value), self.assertRaisesRegex(ValueError, 'UNRECOGNIZED_DATA_PERIOD'):
+                parse_japan_labour(self.book(corrupt), release, now=self.CURRENT_NOW)
+
+    def test_calendar_nonmonotonic_dates_and_any_newer_due_period_are_rejected(self):
+        from official_quarterly_labour import parse_japan_labour_metadata
+        calendar = self.current_calendar().replace('October 30</td>', 'November 5</td>').replace('December 1</td>', 'November 1</td>')
+        # Even before either new date arrives, the inverted release order is
+        # a contract conflict, not permission to extend August's deadline.
+        for now in (self.CURRENT_NOW, datetime(2026, 11, 2, 12, tzinfo=timezone.utc)):
+            with self.subTest(now=now), self.assertRaisesRegex(ValueError, 'CALENDAR_CONFLICT'):
+                parse_japan_labour_metadata(self.metadata(), calendar, now=now)
+
+    def test_current_revision_is_allowed_but_missing_duplicate_future_months_are_not(self):
+        from official_quarterly_labour import parse_japan_labour, parse_japan_labour_metadata
+        release = parse_japan_labour_metadata(self.metadata(), self.current_calendar(), now=self.CURRENT_NOW)
+        revised = parse_japan_labour(self.book(lambda s: s.cell(18, 20, 2.6)), release, now=self.CURRENT_NOW)
+        self.assertEqual((revised['value'], revised['reference_period']), (2.6, '2026-08'))
+        self.assertIsNone(revised['published_at'])
+        def missing(s): s.cell(18, 20, None)
+        def duplicate(s): s.cell(18, 20, 2.5); s.cell(19, 2, '8月')
+        def future(s): s.cell(18, 20, 2.5); s.cell(19, 20, 2.7)
+        for mutate in (missing, duplicate, future):
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                parse_japan_labour(self.book(mutate), release, now=self.CURRENT_NOW)
 
 
 if __name__ == '__main__': unittest.main()

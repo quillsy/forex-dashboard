@@ -394,7 +394,10 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
             phase = "estat_release"
             release_response = client.get(ESTAT_RELEASE_URL, timeout=15)
             release_response.raise_for_status()
-            release = parse_japan_cpi_release(release_response.text, now)
+            # The official page declares Shift_JIS inside its HTML. Passing
+            # bytes lets the HTML parser use that declaration rather than
+            # requests' default ISO-8859-1 text decoding.
+            release = parse_japan_cpi_release(release_response.content, now)
             phase = "estat_calendar"
             calendar_response = client.get(ESTAT_CALENDAR_URL, timeout=15)
             calendar_response.raise_for_status()
