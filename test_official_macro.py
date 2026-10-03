@@ -5,7 +5,7 @@ from pathlib import Path
 import requests
 from datetime import datetime, timezone
 from unittest.mock import Mock
-from official_macro import EUROSTAT_SPECS, STATCAN_BASE, STATCAN_CPI_COORD, parse_eurostat_observation, fetch_eurostat_observation, validate_statcan_cpi
+from official_macro import EUROSTAT_SPECS, EUROSTAT_OBS_FLAGS, STATCAN_BASE, STATCAN_CPI_COORD, parse_eurostat_observation, fetch_eurostat_observation, validate_statcan_cpi
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
@@ -293,6 +293,132 @@ class EurostatTests(unittest.TestCase):
         self.assertEqual(kwargs["params"]["unit"], "CLV_PCH_SM")
         self.assertNotIn("api_key", kwargs["params"])
         session.get.return_value.raise_for_status.assert_called_once()
+
+
+class EurostatStatusContractTests(unittest.TestCase):
+    series = (("Arbeitsmarkt", "EA21"), ("GDP", "EA21"), ("GDP", "CH"))
+
+    def data(self, category, geo):
+        data = fixture(category)
+        data["dimension"]["geo"]["category"]["index"] = {geo: 0}
+        if geo == "CH":
+            data["extension"]["annotation"] = [{"type": "SOURCE_INSTITUTIONS", "text": "Eurostat"}]
+        return data
+
+    def parse(self, data, category, geo):
+        return parse_eurostat_observation(data, category, geo=geo, now=NOW)
+
+    def test_optional_and_unflagged_status_preserve_observation_fields(self):
+        for category, geo in self.series:
+            data = self.data(category, geo)
+            expected = self.parse(data, category, geo)
+            for statuses in ({}, [None] * data["size"][-1], ""):
+                with self.subTest(category=category, geo=geo, status=statuses):
+                    data["status"] = statuses
+                    actual = self.parse(data, category, geo)
+                    self.assertEqual(actual, dict(expected, provider_status="" if statuses == "" else None))
+
+    def test_valid_status_forms_apply_to_the_same_selected_cell(self):
+        for category, geo in self.series:
+            data = self.data(category, geo)
+            n = data["size"][-1]
+            for flag in ("e", "p", "ep", "bp", "bdep", "i", "ip", "bip"):
+                # Labour's third period is sparse: broadcasts must still flag
+                # its latest numeric cell, rather than only position zero.
+                for statuses in (flag, [flag], [flag] * n, {"1": flag}):
+                    with self.subTest(category=category, geo=geo, flag=flag, form=statuses):
+                        data["status"] = statuses
+                        result = self.parse(data, category, geo)
+                        self.assertEqual(result["provider_status"], flag)
+                        self.assertEqual(result["reference_period"], "2026-07" if category == "Arbeitsmarkt" else "2026-Q2")
+                        self.assertIsNone(result["published_at"])
+
+    def test_all_exact_numeric_obs_codes_retain_the_original_flag(self):
+        self.assertEqual(len(EUROSTAT_OBS_FLAGS), 42)
+        for category, geo in self.series:
+            for flag in EUROSTAT_OBS_FLAGS:
+                data = self.data(category, geo); data["status"] = {"1": flag}
+                if "n" in flag:
+                    data["value"]["1"] = 0.0
+                with self.subTest(category=category, geo=geo, flag=flag):
+                    if "m" in flag or "f" in flag:
+                        with self.assertRaises(ValueError): self.parse(data, category, geo)
+                    else:
+                        self.assertEqual(self.parse(data, category, geo)["provider_status"], flag)
+
+    def test_unknown_flags_fail_even_on_older_or_null_cells(self):
+        for category, geo in self.series:
+            for flag in ("r", "pr", "er", "p e", "pe", "pp", "Pp", "UNKNOWN", " ", "s"):
+                for pos in ("0", "1"):
+                    for null in (False, True):
+                        data = self.data(category, geo); data["status"] = {pos: flag}
+                        if null: data["value"][pos] = None
+                        with self.subTest(category=category, geo=geo, flag=flag, pos=pos, null=null):
+                            with self.assertRaises(ValueError): self.parse(data, category, geo)
+
+    def test_wrong_status_types_fail_before_null_filtering(self):
+        for category, geo in self.series:
+            for raw in (None, 42, True, ("p",), {"0": None}, {"0": 42}, {"0": True},
+                        {"0": {"c": True}}, {"0": ["p"]}, [42], [True], [["p"]], [{"c": True}]):
+                data = self.data(category, geo); data["status"] = raw
+                data["value"]["0"] = None
+                with self.subTest(category=category, geo=geo, status=raw):
+                    with self.assertRaises(ValueError): self.parse(data, category, geo)
+
+    def test_sparse_status_positions_must_be_canonical_and_inside_cube(self):
+        for category, geo in self.series:
+            for key in ("01", "-1", "99", "2026-Q1", "1.0", " 1", 1, True):
+                data = self.data(category, geo); data["status"] = {key: "p"}
+                with self.subTest(category=category, geo=geo, key=key):
+                    with self.assertRaises(ValueError): self.parse(data, category, geo)
+
+    def test_dense_status_shape_is_exact_except_string_singleton_broadcast(self):
+        for category, geo in self.series:
+            data = self.data(category, geo); n = data["size"][-1]
+            bad = ([], [None], [None] * (n + 1), [None] * (n - 1) if n > 2 else [None])
+            for statuses in bad:
+                data["status"] = statuses
+                with self.subTest(category=category, geo=geo, status=statuses):
+                    with self.assertRaises(ValueError): self.parse(data, category, geo)
+            data["status"] = [None] * n
+            data["status"][-1] = "UNKNOWN"
+            with self.assertRaises(ValueError): self.parse(data, category, geo)
+
+    def test_forecast_missing_and_confidential_numbers_never_fall_back(self):
+        for category, geo in self.series:
+            for flag in ("f", "bf", "df", "bdf", "m", "bm", "dm", "bdm", "c", ":", "z", "C", "N", "P"):
+                for pos in ("0", "1"):
+                    data = self.data(category, geo); data["status"] = {pos: flag}
+                    with self.subTest(category=category, geo=geo, flag=flag, pos=pos):
+                        with self.assertRaises(ValueError): self.parse(data, category, geo)
+
+    def test_recognized_empty_history_keeps_existing_null_period_semantics(self):
+        for category, geo in self.series:
+            for flag in ("m", "bm", "dm", "bdm", "c", ":", "z", "C", "N", "P"):
+                data = self.data(category, geo); data["status"] = {"0": flag}
+                data["value"]["0"] = None
+                with self.subTest(category=category, geo=geo, flag=flag):
+                    self.assertEqual(self.parse(data, category, geo)["value"], fixture(category)["value"]["1"])
+            data = self.data(category, geo); data["value"] = {}; data["status"] = {"1": "m"}
+            self.assertIsNone(self.parse(data, category, geo))
+
+    def test_valid_negative_and_zero_gdp_and_zero_unemployment(self):
+        for category, geo in self.series:
+            for value in ((-2.5, 0.0) if category == "GDP" else (0.0,)):
+                data = self.data(category, geo); data["value"]["1"] = value; data["status"] = "ep"
+                with self.subTest(category=category, geo=geo, value=value):
+                    result = self.parse(data, category, geo)
+                    self.assertEqual((result["value"], result["provider_status"]), (value, "ep"))
+
+    def test_cube_sizes_are_integer_and_dimension_arrays_are_required(self):
+        for category, geo in self.series:
+            for size in (True, 1.0, "1", -1):
+                data = self.data(category, geo); data["size"][0] = size
+                with self.subTest(category=category, geo=geo, size=size):
+                    with self.assertRaises(ValueError): self.parse(data, category, geo)
+            for field in ("id", "size"):
+                data = self.data(category, geo); data[field] = tuple(data[field])
+                with self.assertRaises(ValueError): self.parse(data, category, geo)
 
 from official_macro import ABS_SPECS, parse_abs_observation, fetch_abs_observation
 

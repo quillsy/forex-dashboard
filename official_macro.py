@@ -25,6 +25,59 @@ EUROSTAT_SPECS = {
     },
 }
 
+# Both current UNE_RT_M and NAMQ_10_GDP structures reference OBS_FLAG 1.39.
+# Codes are complete strings, not arbitrary combinations of their letters.
+# https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/codelist/ESTAT/OBS_FLAG/?compressed=false&format=TSV&lang=en
+EUROSTAT_OBS_FLAGS = frozenset(
+    "b bd bde bdep bdf bdn bdp bdu be bep bf bn bp bpu bu "
+    "d de dep df dn dp dpu du e ep f n p pu u "
+    "bdip bdi bdm bip bi bm dip di dm ip i m".split()
+)
+# Recognize missing/confidential markers only to retain empty historical cells.
+# They must never authorize a numeric observation. CONF_STATUS 1.2 is C/N/P;
+# c/z are legacy markers; ':' is the special not-available value.
+# https://ec.europa.eu/eurostat/de/data/database
+EUROSTAT_EMPTY_FLAGS = frozenset(("c", ":", "z", "C", "N", "P"))
+
+
+def _eurostat_statuses(payload, cube_size):
+    """Validate every status cell before observation selection.
+
+    JSON-stat 2.0 permits string broadcasts, dense string/null arrays and
+    sparse string objects. Its deprecated singleton string array is also a
+    broadcast, never a status for position zero alone.
+    https://json-stat.org/full/#status
+    https://json-stat.org/format/schema/2.0/dataset.json
+    """
+    raw = payload.get("status", {})
+    if isinstance(raw, str):
+        statuses = [raw] * cube_size
+        supplied = [raw]
+    elif isinstance(raw, list):
+        if len(raw) == 1 and cube_size != 1 and isinstance(raw[0], str):
+            statuses = raw * cube_size
+        elif len(raw) == cube_size:
+            statuses = list(raw)
+        else:
+            raise ValueError("Invalid observation status shape")
+        supplied = raw
+        if any(status is not None and not isinstance(status, str) for status in supplied):
+            raise ValueError("Invalid observation status type")
+    elif isinstance(raw, dict):
+        positions = {str(pos) for pos in range(cube_size)}
+        if any(key not in positions for key in raw):
+            raise ValueError("Invalid observation status positions")
+        if any(not isinstance(status, str) for status in raw.values()):
+            raise ValueError("Invalid observation status type")
+        statuses = [raw.get(str(pos)) for pos in range(cube_size)]
+        supplied = raw.values()
+    else:
+        raise ValueError("Invalid observation status type")
+    if any(status not in (None, "") and status not in EUROSTAT_OBS_FLAGS
+           and status not in EUROSTAT_EMPTY_FLAGS for status in supplied):
+        raise ValueError("Unknown observation status")
+    return statuses
+
 
 def _utc_now(now=None):
     now = now or datetime.now(timezone.utc)
@@ -80,7 +133,11 @@ def parse_eurostat_observation(payload, category, *, now=None, geo="EA21"):
         if institutions != ["Eurostat"]:
             raise ValueError("Eurostat source institution not confirmed")
     ids, sizes = payload.get("id", []), payload.get("size", [])
-    if len(ids) != len(set(ids)) or set(ids) != set(filters) | {"time"} or len(ids) != len(sizes):
+    if (not isinstance(ids, list) or not isinstance(sizes, list)
+            or any(not isinstance(name, str) for name in ids)
+            or any(type(size) is not int or size < 0 for size in sizes)
+            or len(ids) != len(set(ids)) or set(ids) != set(filters) | {"time"}
+            or len(ids) != len(sizes)):
         raise ValueError("Ambiguous dimensions")
     dimensions = payload.get("dimension", {})
     for dimension, expected in filters.items():
@@ -97,9 +154,7 @@ def parse_eurostat_observation(payload, category, *, now=None, geo="EA21"):
         values = {str(pos): value for pos, value in enumerate(values)}
     if not isinstance(values, dict) or any(key not in {str(i) for i in range(len(times))} for key in values):
         raise ValueError("Invalid observation positions")
-    statuses = payload.get("status", {})
-    if not isinstance(statuses, (dict, list)):
-        raise ValueError("Invalid observation status")
+    statuses = _eurostat_statuses(payload, math.prod(sizes))
     observations = []
     for period, pos in times.items():
         date = _period_end(period, filters["freq"])
@@ -114,9 +169,11 @@ def parse_eurostat_observation(payload, category, *, now=None, geo="EA21"):
             raise ValueError("Invalid unemployment percentage")
         if category == "GDP" and not -100 <= raw <= 200:
             raise ValueError("Invalid GDP growth")
-        status = statuses.get(str(pos)) if isinstance(statuses, dict) else (statuses[pos] if pos < len(statuses) else None)
-        if status and any(flag in str(status).split() for flag in ("c", ":")):
+        status = statuses[pos]
+        if status in EUROSTAT_EMPTY_FLAGS or (status and "m" in status):
             raise ValueError("Confidential or unavailable observation")
+        if status and "f" in status:
+            raise ValueError("Forecast is not an observed macro value")
         observations.append((date, period, float(raw), status))
     if not observations:
         return None
