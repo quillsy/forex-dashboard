@@ -1425,6 +1425,93 @@ class DirectMacroCollectorIntegrationTests(unittest.TestCase):
                 self.assertNotIn('last_error', row)
 
 
+class EurostatStatusCollectorIntegrationTests(unittest.TestCase):
+    """Real Eurostat HTTP/parser -> app/score -> persisted record and reader."""
+    def collect_case(self, currency, factor, status=None, outage=False):
+        import ast
+        from types import SimpleNamespace
+        from test_core_regressions import load_core
+        from test_official_macro import fixture
+        from official_macro import parse_eurostat_observation
+        now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        data = fixture(factor)
+        geo = 'CH' if currency == 'CHF' else 'EA21'
+        if geo == 'CH':
+            data['dimension']['geo']['category']['index'] = {'CH': 0}
+            data['extension']['annotation'] = [{'type': 'SOURCE_INSTITUTIONS', 'text': 'Eurostat'}]
+        previous_observation = parse_eurostat_observation(data, factor, now=now, geo=geo)
+        previous_observation['needs_hourly_check'] = True
+        previous = live.build_record(factor, 10.0, previous_observation, 'FRESH',
+                                     (now - timedelta(minutes=30)).isoformat())
+        self.assertTrue(live.eligible(previous, now, factor=factor, currency=currency)[0])
+        if status is not None: data['status'] = status
+        core = load_core()
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        route = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name == 'get_macro_observation_details')
+        route.decorator_list = []
+        exec(compile(ast.Module(body=[route], type_ignores=[]), '<eurostat-route>', 'exec'), core)
+        transport = Mock(exceptions=requests.exceptions)
+        transport.get.return_value.json.return_value = data
+        if outage: transport.get.side_effect = requests.exceptions.Timeout('offline')
+        fred = Mock(side_effect=AssertionError('Eurostat must not fall back to FRED'))
+        core.update(datetime=Clock, requests=transport, get_fred_data=fred)
+        app = SimpleNamespace(FRED_KEY=None, requests=transport,
+                              compute_currency_details=core['compute_currency_details'])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save({'model_version': live.MODEL,
+                       'currencies': {currency: {factor: previous}}}, path)
+            with patch('official_macro.datetime', Clock), \
+                 patch.object(live, 'now_utc', return_value=now), \
+                 patch.object(live, 'CURRENCIES', (currency,)), \
+                 patch.object(live, 'FACTORS', {factor: live.FACTORS[factor]}):
+                live.collect(app, path)
+                batch = live.load(path)
+        transport.get.assert_called_once()
+        self.assertEqual(transport.get.call_args.kwargs['params']['geo'], geo)
+        fred.assert_not_called()
+        self.assertTrue(batch['completed_at'])
+        return previous, batch['currencies'][currency][factor], now
+
+    def test_valid_official_flags_remain_eligible_and_persist_exactly(self):
+        for currency, factor in (('EUR', 'Arbeitsmarkt'), ('EUR', 'GDP'), ('CHF', 'GDP')):
+            for status in ('ep', ['bp'], {'1': 'ip'}):
+                with self.subTest(currency=currency, factor=factor, status=status):
+                    previous, row, now = self.collect_case(currency, factor, status)
+                    expected = status if isinstance(status, str) else status[0] if isinstance(status, list) else status['1']
+                    self.assertEqual(row['validation'], 'VALID')
+                    self.assertIsNotNone(row['score'])
+                    self.assertEqual(row['observation']['provider_status'], expected)
+                    self.assertIsNone(row['published_at'])
+                    self.assertTrue(live.eligible(row, now, factor=factor, currency=currency)[0])
+
+    def test_invalid_status_contract_revokes_previous_valid_record(self):
+        for currency, factor in (('EUR', 'Arbeitsmarkt'), ('EUR', 'GDP'), ('CHF', 'GDP')):
+            for status in ({'0': 'unknown'}, {'1': 42}, {'1': {'flag': 'p'}},
+                           {'1': 'f'}, {'1': 'm'}, {'1': 'C'}, {'999': 'p'}, ['p'] * 4):
+                with self.subTest(currency=currency, factor=factor, status=status):
+                    previous, row, now = self.collect_case(currency, factor, status)
+                    self.assertEqual(row['validation'], 'UNVERIFIED')
+                    self.assertIsNone(row['score'])
+                    self.assertIsNone(row['observation']['value'])
+                    self.assertNotIn('last_error', row)
+                    self.assertFalse(live.eligible(row, now, factor=factor, currency=currency)[0])
+
+    def test_transport_outage_retains_only_prior_hourly_window(self):
+        for currency, factor in (('EUR', 'Arbeitsmarkt'), ('EUR', 'GDP'), ('CHF', 'GDP')):
+            previous, row, now = self.collect_case(currency, factor, outage=True)
+            for field in ('score', 'observation', 'checked_at', 'expires_at', 'next_due_at'):
+                self.assertEqual(row[field], previous[field])
+            self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+            self.assertTrue(live.eligible(row, now, factor=factor, currency=currency)[0])
+            self.assertFalse(live.eligible(row, now + timedelta(minutes=30), factor=factor, currency=currency)[0])
+
+
 class AbsCpiUnitCollectorIntegrationTests(unittest.TestCase):
     """Actual ABS parser, app routes and writer; no prevalidated source mock."""
     def collect_case(self, invalid=False):
