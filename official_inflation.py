@@ -84,7 +84,6 @@ def parse_estat_cpi(payload, now=None):
         raise ValueError("ESTAT_UNIT_INVALID")
     records = {}
     seen_times = set()
-    missing_months = set()
     for item in _list(data["DATA_INF"].get("VALUE", [])):
         if any(item.get(key) != value for key, value in
                {"@tab": "3", "@cat01": "0001", "@area": "00000", "@unit": "%"}.items()):
@@ -97,7 +96,9 @@ def parse_estat_cpi(payload, now=None):
         if not match:
             raise ValueError("ESTAT_TIME_INVALID")
         if item.get("$") in {"***", "-", "", None}:
-            missing_months.add(f"{match[1]}-{match[2]}")
+            # A completed reference month may still be unpublished. This is
+            # only an API candidate: fetch_official_cpi must qualify its exact
+            # period/value against the national release and release calendar.
             continue
         # Validate numerical schema even when the reference month is future.
         if isinstance(item["$"], bool) or not isinstance(item["$"], (str, int, float)):
@@ -106,8 +107,6 @@ def parse_estat_cpi(payload, now=None):
         if not math.isfinite(numeric) or not -25 <= numeric <= 25:
             raise ValueError("CPI_VALUE_INVALID")
         _put(records, f"{match[1]}-{match[2]}", numeric, now)
-    if records and any(max(records) <= period < now.strftime("%Y-%m") for period in missing_months):
-        raise ValueError("ESTAT_LATEST_VALUE_MISSING")
     return _result(records, now, "Statistics Japan e-Stat 2025-base headline CPI YoY", ESTAT_TABLE)
 
 

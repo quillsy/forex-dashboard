@@ -169,9 +169,10 @@ class OfficialInflationTests(unittest.TestCase):
         data["DATA_INF"]["VALUE"].insert(0, {**latest, "@time": "2026000606"})
         latest["$"] = "***"
         client = japan_client(payload); diagnostic = {}
-        self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostic))
-        self.assertEqual(diagnostic["code"], "ESTAT_LATEST_VALUE_MISSING")
-        self.assertEqual(client.get.call_count, 1)
+        row = fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostic)
+        self.assertEqual(row["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostic["code"], "ESTAT_API_RELEASE_LAG")
+        self.assertEqual(client.get.call_count, 3)
         data["DATA_INF"]["VALUE"].pop()
         row = fetch_official_cpi("JPY", client=japan_client(payload), estat_key="test-only", now=NOW, diagnostics=diagnostic)
         self.assertEqual(diagnostic["code"], "ESTAT_API_RELEASE_LAG")
@@ -182,6 +183,28 @@ class OfficialInflationTests(unittest.TestCase):
             client.get.side_effect = responses
             self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostic))
             self.assertEqual(diagnostic, {"code": token, "provider_status": 0})
+
+    def test_unpublished_placeholder_does_not_replace_national_release_gate(self):
+        payload = estat(); data = payload["GET_STATS_DATA"]["STATISTICAL_DATA"]
+        data["CLASS_INF"]["CLASS_OBJ"][-1]["CLASS"] = [{"@code": "2026000707"}, {"@code": "2026000808"}]
+        data["DATA_INF"]["VALUE"].append({**data["DATA_INF"]["VALUE"][0], "@time": "2026000808", "$": "***"})
+        diagnostic = {}
+        client = japan_client(payload)
+        row = fetch_official_cpi("JPY", client=client, estat_key="fixture-only", now=NOW, diagnostics=diagnostic)
+        self.assertEqual(row["reference_period"], "2026-07")
+        self.assertNotIn("_validation", row)
+        self.assertEqual(diagnostic["code"], "OK")
+        self.assertEqual(client.get.call_count, 3)
+        client = japan_client(payload)
+        row = fetch_official_cpi("JPY", client=client, estat_key="fixture-only", now="2026-09-18T00:00:00+00:00", diagnostics=diagnostic)
+        self.assertEqual(row["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostic["code"], "ESTAT_DUE_UNCONFIRMED")
+        client = japan_client(payload); responses = list(client.get.side_effect)
+        responses[1].text = japan_release(month=8, date="2026年9月18日")
+        client.get.side_effect = responses
+        row = fetch_official_cpi("JPY", client=client, estat_key="fixture-only", now="2026-09-20T00:00:00+00:00", diagnostics=diagnostic)
+        self.assertEqual(row["_validation"], "UNVERIFIED")
+        self.assertEqual(diagnostic["code"], "ESTAT_API_RELEASE_LAG")
 
     def test_japan_calendar_malformed_and_year_rollover(self):
         for html in [japan_calendar().replace("September 18", "September 99"), japan_calendar().replace("<td>August</td><td>September 18", "<td>October</td><td>September 18"), japan_calendar().replace("Japan</th>", "Other</th>")]:
