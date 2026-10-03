@@ -753,6 +753,41 @@ def get_verified_policy_rate(currency):
     return obj
 
 
+def _policy_live_display(obj):
+    """Project live eligibility without changing the cached policy evidence."""
+    display = dict(obj) if isinstance(obj, dict) else {}
+    if display.get("verification_status") == "🔴 MANUAL OVERRIDE" and policy_rate_is_usable(display):
+        return display
+    display["last_verified_rate"] = display.get("rate")
+    status = display.get("verification_status", "🔴 OFFICIAL SOURCE UNAVAILABLE")
+    try:
+        now = _policy_now()
+        verified = pd.Timestamp(display.get("verified_at"))
+        if pd.isna(verified) or verified.tzinfo is None or verified > now:
+            raise ValueError("INVALID_POLICY_TIME")
+        deadline = verified + timedelta(hours=1)
+        for proof in display.get("verification_evidence", []):
+            retrieved = pd.Timestamp(proof.get("retrieved_at"))
+            if pd.isna(retrieved) or retrieved.tzinfo is None or retrieved > now:
+                raise ValueError("INVALID_POLICY_TIME")
+            if "valid_until" in proof:
+                until = pd.Timestamp(proof["valid_until"])
+                if pd.isna(until) or until.tzinfo is None:
+                    raise ValueError("INVALID_POLICY_TIME")
+                deadline = min(deadline, until)
+        if now >= deadline:
+            if status in {"🟢 VERIFIED", "🟢 VERIFIED_UNCHANGED", "🟡 LAST VERIFIED"}:
+                status = "🔴 LIVE CHECK DUE"
+        elif policy_rate_is_usable(display):
+            return display
+        elif status in {"🟢 VERIFIED", "🟢 VERIFIED_UNCHANGED", "🟡 LAST VERIFIED"}:
+            status = "🔴 OFFICIAL SOURCE UNAVAILABLE"
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        status = "🔴 OFFICIAL SOURCE UNAVAILABLE"
+    display.update(rate=None, previous_rate=None, verification_status=status)
+    return display
+
+
 def get_all_verified_policy_rates():
     return {currency: get_verified_policy_rate(currency) for currency in POLICY_RATE_DEFINITIONS}
 
@@ -6105,7 +6140,7 @@ def categorize_article(art):
         
     return "📊 Sonstige Makro-News"
 
-def get_country_rate(country_code, fred_key):
+def get_country_rate(country_code, fred_key, *, live_display=False):
     # Mapping country codes to currencies
     map_code = {
         "USA": "USD",
@@ -6119,6 +6154,8 @@ def get_country_rate(country_code, fred_key):
     }
     curr = map_code.get(country_code, country_code)
     pol_obj = get_verified_policy_rate(curr)
+    if live_display:
+        pol_obj = _policy_live_display(pol_obj)
     if not policy_rate_is_usable(pol_obj):
         return None, None, pol_obj.get("verification_status", "UNAVAILABLE")
     val = pol_obj.get("rate")
@@ -6553,6 +6590,10 @@ if not getattr(st, "_mock_mode", False):
         table_rows = []
         for c in ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"]:
             pol = rates_obj.get(c, {})
+            if use_live_core_cache():
+                pol = _policy_live_display(pol)
+            last_rate = (None if pol.get("verification_status") == "🔴 MANUAL OVERRIDE"
+                         else pol.get("last_verified_rate", pol.get("rate")))
             r_val = pol.get("rate")
             p_val = pol.get("previous_rate", r_val)
             stat = pol.get("verification_status", "🔴 OFFICIAL SOURCE UNAVAILABLE")
@@ -6560,7 +6601,8 @@ if not getattr(st, "_mock_mode", False):
                 "Currency": c,
                 "Central Bank": pol.get("central_bank", "Central Bank"),
                 "Policy Instrument": pol.get("instrument", "Policy Rate"),
-                "Rate (siehe Status)": f"{r_val:.2f}%" if r_val is not None else "N/A",
+                ("Aktueller Live-Zins" if use_live_core_cache() else "Rate (siehe Status)"): f"{r_val:.2f}%" if r_val is not None else "N/A",
+                "Zuletzt belegte Rate": f"{last_rate:.2f}%" if last_rate is not None else "N/A",
                 "Previous Rate": f"{p_val:.2f}%" if p_val is not None else "N/A",
                 "Rate Effective": pol.get("rate_effective_date", "N/A"),
                 "Last Decision": pol.get("last_policy_decision_date", "N/A"),
@@ -8126,7 +8168,7 @@ if not getattr(st, "_mock_mode", False):
         
         rates_data = {}
         for curr, info in CURRENCIES.items():
-            r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY)
+            r_val, bps_chg, src = get_country_rate(info["wb_code"], FRED_KEY, live_display=use_live_core_cache())
             rates_data[curr] = {
                 "rate": r_val,
                 "bps_change": bps_chg,
