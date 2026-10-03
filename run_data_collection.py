@@ -74,111 +74,14 @@ def _seed_fallback_live(source, destination):
     live_data.save(incoming, destination)
 
 
-def maybe_start_live_fallback(keys):
-    """One throttled collector per active app instance, outside its checkout.
+def maybe_start_live_fallback(keys=None):
+    """Retired compatibility entry point; UI provider collection is disabled.
 
-    GitHub remains the scheduled collector. This only starts on an active UI
-    render when its available dataset is older than 30 minutes. Local locks
-    cannot coordinate usage with GitHub; counters remain instance estimates.
+    Live views consume the commit-pinned public central collector batch via
+    shared_snapshot. This function never reads keys, seeds budgets or launches
+    subprocesses, including when invoked by older integrations.
     """
-    import fcntl
-    import shutil
-    import subprocess
-    import threading
-    from pathlib import Path
-    import live_data
-
-    if os.environ.get("FX_COLLECTOR") == "1":
-        return "disabled"
-    now = datetime.now(timezone.utc)
-    completed = live_data.timestamp(live_data.load().get("completed_at"))
-    if completed and 0 <= (now - completed).total_seconds() < 1800:
-        return "fresh"
-    # An instance without its live credentials cannot repair missing data.
-    if not keys.get("FRED_API_KEY"):
-        return "unavailable"
-    directory = live_data.runtime_directory()
-    lock = None
-    seed_lock = None
-    try:
-        if directory.is_symlink():
-            return "unavailable"
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock = (directory / ".launch.lock").open("a")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock.close()
-            return "running"
-        state_path = directory / ".launch-state.json"
-        try:
-            state = json.loads(state_path.read_text())
-        except (OSError, ValueError):
-            state = {}
-        if not isinstance(state, dict):
-            state = {}
-        attempted = live_data.timestamp(state.get("attempted_at"))
-        if attempted and (now - attempted).total_seconds() < 1800:
-            lock.close()
-            return state.get("state") if state.get("state") in ("failed", "timeout") else "cooldown"
-        # A manual/local collector also holds this lock, even if it was not
-        # launched by this UI instance. Its read/merge/save budget updates must
-        # never race a seed protected only by the separate launch lock.
-        seed_lock = (directory / ".data_collection.lock").open("a")
-        try:
-            fcntl.flock(seed_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            seed_lock.close()
-            lock.close()
-            return "running"
-        state = {"attempted_at": now.isoformat(), "state": "running"}
-        # Seed only admissible live/public cache files; never .env or secrets.
-        source = live_data.selected_live_directory()
-        if source.resolve() != directory.resolve():
-            _seed_fallback_status(source / "data_collection_status.json", directory / "data_collection_status.json")
-            _seed_fallback_live(source / "live_core_data.json", directory / "live_core_data.json")
-            candidate = source / ".policy_rates_cache.json"
-            if candidate.is_file():
-                shutil.copy2(candidate, directory / candidate.name)
-        _fallback_state(state_path, state)
-        # A minimal child environment also prevents unrelated inherited keys.
-        environment = {name: os.environ[name] for name in
-                       ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR")
-                       if name in os.environ}
-        environment.update({name: value for name, value in keys.items()
-                            if name in LIVE_FALLBACK_KEYS and isinstance(value, str) and value})
-        environment.update(FX_COLLECTOR="1", FX_FALLBACK_MODE="1")
-        command = [sys.executable, "-B", str(Path(__file__).resolve()), "--live-only"]
-        # The child takes this same lock in main(). The launch lock continues
-        # to cover the gap and the child's whole lifetime for UI page changes.
-        seed_lock.close()
-        seed_lock = None
-
-        def worker():
-            try:
-                result = subprocess.run(command, cwd=str(directory), env=environment,
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, timeout=600, check=False)
-                state["state"] = "completed" if result.returncode == 0 else "failed"
-            except subprocess.TimeoutExpired:
-                state.update(state="timeout", usage_complete=False)
-            except Exception:
-                state.update(state="failed", usage_complete=False)
-            finally:
-                state["finished_at"] = datetime.now(timezone.utc).isoformat()
-                try:
-                    _fallback_state(state_path, state)
-                finally:
-                    lock.close()
-
-        threading.Thread(target=worker, name="fx-live-fallback", daemon=True).start()
-        return "started"
-    except (OSError, ValueError, RuntimeError):
-        if seed_lock is not None:
-            seed_lock.close()
-        if lock is not None:
-            lock.close()
-        return "unavailable"
+    return "disabled"
 
 
 def load_status():

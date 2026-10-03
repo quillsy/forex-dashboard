@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -233,7 +232,7 @@ class FallbackTests(unittest.TestCase):
             with patch.object(live_data, 'runtime_directory', return_value=directory), \
                  patch.object(live_data, 'selected_live_directory', return_value=source), \
                  patch.object(live_data, 'load', return_value={}), patch('subprocess.run') as process:
-                self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY': 'test-only'}), 'unavailable')
+                self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY': 'test-only'}), 'disabled')
             process.assert_not_called()
             self.assertEqual(status.read_text(), 'invalid json')
 
@@ -264,7 +263,7 @@ class FallbackTests(unittest.TestCase):
                      patch.object(live_data, 'selected_live_directory', return_value=source), \
                      patch.object(live_data, 'load', return_value={}), \
                      patch.object(collector, '_seed_fallback_status') as seed, patch('subprocess.run') as process:
-                    self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY': 'test-only'}), 'running')
+                    self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY': 'test-only'}), 'disabled')
                 seed.assert_not_called(); process.assert_not_called()
                 self.assertEqual(status_path.read_bytes(), before_status)
                 self.assertEqual(live_path.read_bytes(), before_live)
@@ -344,67 +343,19 @@ class FallbackTests(unittest.TestCase):
             self.assertFalse(saved['sleeping.example']['usage_complete'])
             self.assertTrue(saved['early.example']['usage_complete'])
 
-    def test_fresh_data_never_starts_process(self):
-        with patch.object(live_data,'load',return_value={'completed_at':datetime.now(timezone.utc).isoformat()}), patch('subprocess.run') as run:
-            self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY':'test'}),'fresh')
-            run.assert_not_called()
-
-    def test_no_key_no_start(self):
-        with patch.object(live_data,'load',return_value={}), patch('subprocess.run') as run:
-            self.assertEqual(collector.maybe_start_live_fallback({}),'unavailable')
-            run.assert_not_called()
-
-    def test_shared_lock_and_persistent_cooldown(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); source=root/'source';source.mkdir(); directory=root/'runtime'
-            (source/'live_core_data.json').write_text('{}')
-            (source/'.env').write_text('PRIVATE=test-only')
-            started=threading.Event();release=threading.Event(); finished=threading.Event()
-            def run(*args,**kwargs):
-                started.set(); release.wait(5); return Mock(returncode=0)
-            original=collector._fallback_state
-            def save(path,state):
-                original(path,state)
-                if state.get('state')=='completed':finished.set()
-            with patch.object(live_data,'runtime_directory',return_value=directory),patch.object(live_data,'selected_live_directory',return_value=source),patch.object(live_data,'load',return_value={}),patch('subprocess.run',side_effect=run) as process,patch.object(collector,'_fallback_state',side_effect=save):
-                with patch.dict(os.environ,{'EODHD_API_KEY':'never-inherit','DASHBOARD_OPERATOR_PASSWORD':'never-inherit'}):
-                    self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY':'test-only','DASHBOARD_OPERATOR_PASSWORD':'never-pass'}),'started')
-                self.assertTrue(started.wait(2))
-                self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY':'test-only'}),'running')
-                self.assertNotEqual(os.environ.get('FX_COLLECTOR'),'1')
-                release.set();self.assertTrue(finished.wait(2))
-                # State survives a new invocation and prevents a duplicate.
-                result=collector.maybe_start_live_fallback({'FRED_API_KEY':'test-only'})
-                self.assertIn(result,('running','cooldown'))
-                self.assertEqual(process.call_count,1)
-                args,kwargs=process.call_args
-                self.assertEqual(args[0][-1],'--live-only')
-                self.assertEqual(args[0][1],'-B')
-                self.assertEqual(kwargs['cwd'],str(directory))
-                self.assertEqual(kwargs['timeout'],600)
-                self.assertEqual(kwargs['stdout'],subprocess.DEVNULL)
-                self.assertEqual(kwargs['stderr'],subprocess.DEVNULL)
-                self.assertEqual(kwargs['env']['FRED_API_KEY'],'test-only')
-                self.assertEqual(kwargs['env']['FX_FALLBACK_MODE'],'1')
-                self.assertNotIn('EODHD_API_KEY',kwargs['env'])
-                self.assertNotIn('DASHBOARD_OPERATOR_PASSWORD',kwargs['env'])
-                self.assertNotIn('test-only',' '.join(args[0]))
-                self.assertFalse((directory/'.env').exists())
-                self.assertNotIn('test-only',(directory/'.launch-state.json').read_text())
-
-    def test_timeout_preserves_dataset_and_marks_incomplete_usage(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory=Path(tmp); completed=threading.Event()
-            original=collector._fallback_state
-            def save(path,state):
-                original(path,state)
-                if state.get('state')=='timeout':completed.set()
-            with patch.object(live_data,'runtime_directory',return_value=directory),patch.object(live_data,'selected_live_directory',return_value=directory),patch.object(live_data,'load',return_value={}),patch('subprocess.run',side_effect=subprocess.TimeoutExpired('collector',600)),patch.object(collector,'_fallback_state',side_effect=save):
-                self.assertEqual(collector.maybe_start_live_fallback({'FRED_API_KEY':'test-only'}),'started')
-                self.assertTrue(completed.wait(2))
-                state=json.loads((directory/'.launch-state.json').read_text())
-                self.assertFalse(state['usage_complete'])
-                self.assertFalse((directory/'live_core_data.json').exists())
+    def test_ui_fallback_is_retired_for_every_key_and_collector_state(self):
+        for keys in (None, {}, {'FRED_API_KEY': 'test-only'},
+                     {'DASHBOARD_OPERATOR_PASSWORD': 'must-not-read'}):
+            for collecting in ('0', '1'):
+                with self.subTest(keys=bool(keys), collecting=collecting), \
+                     patch.dict(os.environ, {'FX_COLLECTOR': collecting}), \
+                     patch.object(live_data, 'load') as load, \
+                     patch.object(collector, '_seed_fallback_status') as seed_status, \
+                     patch.object(collector, '_seed_fallback_live') as seed_live, \
+                     patch('threading.Thread') as thread, patch('subprocess.run') as run:
+                    self.assertEqual(collector.maybe_start_live_fallback(keys), 'disabled')
+                    load.assert_not_called(); seed_status.assert_not_called()
+                    seed_live.assert_not_called(); thread.assert_not_called(); run.assert_not_called()
 
     def test_fallback_key_resolution_cannot_read_other_secrets(self):
         import ast

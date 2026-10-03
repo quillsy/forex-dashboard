@@ -8,6 +8,7 @@ import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from contextvars import ContextVar
 
 import requests as http
 from source_contracts import PUBLIC_RIGHTS_HOLDS
@@ -16,6 +17,7 @@ MODEL = "CORE_V2_8_2026_09"
 PATH = Path("live_core_data.json")
 FACTORS = {"Geldpolitik": 35, "Inflation": 20, "Arbeitsmarkt": 20, "PMI": 20, "GDP": 5}
 CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
+_RENDER_DIRECTORY = ContextVar("fx_live_render_directory", default=None)
 STATCAN_PRODUCTS = {
     "Inflation": ("Consumer Price Index, monthly, not seasonally adjusted", "1810000401"),
     "Arbeitsmarkt": ("Labour force characteristics, monthly, seasonally adjusted and trend-cycle", "1410028701"),
@@ -115,12 +117,35 @@ def selected_live_directory():
     directory = Path.cwd()
     if os.environ.get("FX_COLLECTOR") == "1":
         return directory
+    pinned = _RENDER_DIRECTORY.get()
+    if pinned is not None:
+        return pinned
+    from shared_snapshot import current_shared_directory, bundled_snapshot_directory
+    root = runtime_directory()
+    shared = current_shared_directory(root)
+    bundled = bundled_snapshot_directory(directory, root)
+    directory = root / "unavailable-snapshot"
     now = now_utc()
     latest = None
-    for candidate in (directory, runtime_directory()):
+    for candidate in (bundled, shared):
+        if candidate is None:
+            continue
         completed = timestamp(_load_file(candidate / PATH).get("completed_at"))
         if completed is not None and completed <= now and (latest is None or completed > latest):
             directory, latest = candidate, completed
+    return directory
+
+
+def clear_render_directory():
+    """A new Streamlit render may select a newly published generation."""
+    _RENDER_DIRECTORY.set(None)
+
+
+def pin_render_directory():
+    """All CORE, policy and operator reads in this render use one directory."""
+    clear_render_directory()
+    directory = selected_live_directory()
+    _RENDER_DIRECTORY.set(directory)
     return directory
 
 
@@ -830,7 +855,8 @@ def collect(app, path=PATH):
     data["status"] = "SUCCESS" if all(counts) else "PARTIAL" if any(counts) else "FAILED"
     data["completed_at"] = now_utc().isoformat()
     save(data, path)
-    return {"status": data["status"], "eligible_factors": sum(counts), "total_factors": 40}
+    return {"status": data["status"], "eligible_factors": sum(counts), "total_factors": 40,
+            "completed_at": data["completed_at"]}
 
 
 def _freshness_check_label(record, observation, now):

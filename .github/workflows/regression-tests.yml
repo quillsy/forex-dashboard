@@ -41,7 +41,7 @@ jobs:
           test_live_context_ui test_live_view_refresh test_collector_fallback
           test_collector_preflight test_bis_research test_research_collection
           test_research_panel test_ec_industry_research test_ec_industry_collection
-          test_research_vintages test_niche_context
+          test_research_vintages test_niche_context test_shared_snapshot test_shared_snapshot_integration
           """.split()
           violations = Counter()
 
