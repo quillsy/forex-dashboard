@@ -29,6 +29,10 @@ class UIRegressions(unittest.TestCase):
                     self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
                     self.assertEqual(len(app.tabs), 22)  # 13 main tabs and 9 sub-tabs.
                     self.assertGreater(len(app.dataframe), 10)
+                    bond_table = next(e.value for e in app.dataframe if 'Trend (2Y)' in e.value.columns)
+                    missing_trends = bond_table.loc[bond_table['2Y Rendite'] == 'N/A', 'Trend (2Y)']
+                    self.assertGreater(len(missing_trends), 0)
+                    self.assertEqual(set(missing_trends), {'N/A'})
                     self.assertEqual(Path('live_signals.json').read_bytes(), original_history)
                     self.assertNotIn('🔑 API-Konfiguration', [e.label for e in app.sidebar.get('expander')])
                     self.assertNotIn('📝 Streamlit Secrets Anleitung', [e.label for e in app.sidebar.get('expander')])
