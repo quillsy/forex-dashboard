@@ -6617,10 +6617,10 @@ if not getattr(st, "_mock_mode", False):
         st.caption("Offizielle Leitzinsen werden ausschließlich vom zentralen Collector geprüft. Die gemeinsame Ablage wird höchstens alle fünf Minuten abgerufen.")
 
         with st.expander("🚨 Advanced / Emergency Manual Override", expanded=False):
-            st.caption("Standard: AUS. Bei Aktivierung überschreiben manuelle Werte die offiziellen Daten. Dies wird in den Snapshots dokumentiert.")
+            st.caption("Standard: AUS. Manuelle Werte sind als Override gekennzeichnet. Der Live-CORE verwendet weiterhin den zentral geprüften Collector-Datensatz.")
             emergency_on = st.checkbox("Manuelles Emergency-Override aktivieren", value=False, key="emergency_manual_rates_override", disabled=not operator_is_authorized())
             if emergency_on and operator_is_authorized():
-                st.warning("🔴 MANUAL POLICY RATE OVERRIDE ACTIVE – CORE verwendet manuelle Eingaben!")
+                st.warning("🔴 MANUAL POLICY RATE OVERRIDE ACTIVE – Manuelle Leitzinswerte sind aktiv. Der Live-CORE liest den zentral geprüften Datensatz.")
                 st.number_input("European Central Bank (EUR) %", min_value=0.0, max_value=15.0, key="manual_rate_EUR", value=2.25, step=0.05)
                 st.number_input("Federal Reserve (USD) %", min_value=0.0, max_value=15.0, key="manual_rate_USD", value=3.50, step=0.05)
                 st.number_input("Bank of England (GBP) %", min_value=0.0, max_value=15.0, key="manual_rate_GBP", value=3.75, step=0.05)
@@ -7905,7 +7905,7 @@ if not getattr(st, "_mock_mode", False):
         
         st.info("💡 **3-Schritte Fundamentalanalyse Workflow:**\n"
                 "1. **Einzelwährungen analysieren:** Stärkste Währung (🟢 Bullish) und schwächste Währung (🔴 Bearish) im Ranking identifizieren.\n"
-                "2. **Währungspaar selbst auswählen:** Starke Basis gegen schwache Quote kombinieren (z. B. USD stark vs. JPY schwach ➔ Long USD/JPY).\n"
+                "2. **Paaranalyse öffnen:** Starke Basis gegen schwache Quote auswählen. Ein Paar-Signal wird erst bei 100% CORE-Abdeckung beider Währungen freigegeben.\n"
                 "3. **Manuelle News-Prüfung:** Vor Trade-Einstieg manuelle Prüfung wichtiger Wirtschaftsdaten auf Forex Factory im Tab *📅 Manual News Check*.")
                 
         # Compute scores for all 8 currencies
