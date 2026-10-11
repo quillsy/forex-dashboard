@@ -15,6 +15,16 @@ from datetime import date, datetime, timezone
 ENDPOINT = 'https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/ei_bsin_m_r2'
 PARAMS = dict(freq='M', indic='BS-ICI', s_adj='SA', unit='BAL', geo='EA21', lastTimePeriod=13, lang='EN')
 DIMENSIONS = ['freq', 'indic', 's_adj', 'unit', 'geo', 'time']
+# Full BCS releases, not consumer flashes. Calendar states concern planned days
+# only: 11h00 has no evidenced timezone, so it is never converted to publication
+# timestamps. The next-release day guard is effective from 00:00 UTC.
+# https://ec.europa.eu/economy_finance/db_indicators/surveys/documents/calendar/Publication%20dates%202026.pdf
+CALENDAR_WINDOWS = {
+    '2026-08': (date(2026, 8, 28), date(2026, 9, 29)),
+    '2026-09': (date(2026, 9, 29), date(2026, 10, 29)),
+    '2026-10': (date(2026, 10, 29), date(2026, 11, 27)),
+    '2026-11': (date(2026, 11, 27), date(2027, 1, 7)),
+}
 
 
 def _unique_object(pairs):
@@ -188,9 +198,18 @@ def validate_artifact(data, *, now=None):
         result['freshness_state'] = 'missing_observation'
     elif period < '2026-08':
         result['freshness_state'] = 'behind_verified_release'
-    elif period == '2026-08':
-        # Midnight UTC is explicitly a conservative day guard, not a claimed release time.
-        result['freshness_state'] = 'release_due_unconfirmed' if moment.date() >= date(2026, 9, 29) else 'verified_calendar_window'
+    elif period in CALENDAR_WINDOWS:
+        release_day, next_day = CALENDAR_WINDOWS[period]
+        result['calendar_release_date'] = release_day.isoformat()
+        result['calendar_next_release_date'] = next_day.isoformat()
+        # A planned calendar day does not establish the value's publication.
+        # Earlier captures must not acquire a later release qualification by age.
+        if moment.date() >= next_day:
+            result['freshness_state'] = 'release_due_unconfirmed'
+        elif moment.date() >= release_day and _timestamp(data['retrieved_at']).date() >= release_day:
+            result['freshness_state'] = 'verified_calendar_window'
+        else:
+            result['freshness_state'] = 'calendar_unknown_recent_check' if result['retrieval_age_hours'] <= 1 else 'calendar_unknown_check_overdue'
     else:
         result['freshness_state'] = 'calendar_unknown_recent_check' if result['retrieval_age_hours'] <= 1 else 'calendar_unknown_check_overdue'
     return result
@@ -238,15 +257,18 @@ def render_ec_industry(st, path):
     st.caption('Das Alter wird beim Lesen berechnet. Datenbank-Aktualisierung und Abruf sind keine Erstveröffentlichung. Historische Werte können revidiert sein; keine unveränderte historische Vintage.')
     state = data['freshness_state']
     if state == 'verified_calendar_window':
-        st.caption('Geprüfter vollständiger BCS-Bericht: 28.08.2026; nächster vollständiger Bericht: 29.09.2026. Kalenderzeit 11:00, Zeitzone nicht bestätigt. Kalender nur bis zu diesem Termin geprüft. Dies bestätigt den Kalender, nicht jeden später revidierten August-Wert.')
+        release_day = date.fromisoformat(data['calendar_release_date']).strftime('%d.%m.%Y')
+        next_day = date.fromisoformat(data['calendar_next_release_date']).strftime('%d.%m.%Y')
+        st.caption(f'Geprüfter Kalender für Referenzmonat {data["reference_period"]}: vollständiger BCS-Termin {release_day}; nächster vollständiger Termin {next_day}. Kalenderzeit 11:00, Zeitzone nicht bestätigt. Dies bestätigt geplante Kalendertage, nicht die Erstveröffentlichung, unveränderte Vintage oder Aktualität dieses Werts.')
         if data['retrieval_age_hours'] > 1:
             st.warning('Stündlicher EA21-Research-Abruf überfällig; letzter erfolgreicher Abruf liegt mehr als einer Stunde zurück.')
     elif state == 'release_due_unconfirmed':
-        st.warning('Neue vollständige Veröffentlichung am 29.09.2026 fällig; weiterhin nur August vorhanden. Ab Tagesbeginn UTC konservativ unbestätigt, kein behaupteter exakter Veröffentlichungstermin.')
+        next_day = date.fromisoformat(data['calendar_next_release_date']).strftime('%d.%m.%Y')
+        st.warning(f'Neue vollständige Veröffentlichung am {next_day} fällig; weiterhin nur Referenzmonat {data["reference_period"]} vorhanden. Ab Tagesbeginn UTC konservativ unbestätigt, kein behaupteter exakter Veröffentlichungstermin.')
     elif state == 'calendar_unknown_check_overdue':
-        st.warning('Veröffentlichungskalender für diesen neueren Monat unbekannt; keine erfolgreiche Aktualitätsprüfung innerhalb der letzten Stunde. Beobachtung nur historisch auswerten.')
+        st.warning('Kein bestätigtes Kalenderfenster für diese Beobachtung; keine erfolgreiche Aktualitätsprüfung innerhalb der letzten Stunde. Beobachtung nur historisch auswerten.')
     elif state == 'calendar_unknown_recent_check':
-        st.caption('Veröffentlichungskalender für diesen neueren Monat unbekannt. Erfolgreicher Abruf innerhalb einer Stunde; kein Nachweis einer bestimmten Erstveröffentlichung.')
+        st.caption('Kein bestätigtes Kalenderfenster für diese Beobachtung. Erfolgreicher Abruf innerhalb einer Stunde; kein Nachweis einer bestimmten Erstveröffentlichung.')
     else:
         st.warning('Neuester indexierter Monat fehlt oder Daten liegen hinter der bereits geprüften August-Veröffentlichung. Ältere Beobachtung wird ausdrücklich historisch angezeigt.')
     if data['missing_periods'] or data['absent_calendar_periods']:
