@@ -6682,25 +6682,29 @@ if not getattr(st, "_mock_mode", False):
             except Exception as e:
                 st.error(f"Fehler bei Tabelle: {e}")
     
-        with st.expander("🔑 API Key Status", expanded=False):
-            st.caption("Geladene Schlüssel (Env / Secrets):")
-            st.write(f"FRED_API_KEY: {'🟢 Aktiv' if FRED_KEY else '🔴 Fehlt'}")
-            st.write(f"NEWSDATA_API_KEY: {'🟢 Aktiv' if NEWSDATA_KEY else '🔴 Fehlt'}")
-            st.write(f"NEWSAPI_KEY: {'🟢 Aktiv' if NEWSAPI_KEY else '🔴 Fehlt'}")
-            st.write(f"APIFREAKS_API_KEY: {'🟢 Aktiv' if APIFREAKS_KEY else '🔴 Fehlt'}")
-            st.write(f"EODHD_API_KEY: {get_eodhd_status_label()}")
-            st.write(f"ESTAT_APP_ID: {'🟢 Aktiv' if ESTAT_APP_ID else '🔴 Fehlt'}")
-    
-        with st.expander("📝 Streamlit Secrets Anleitung", expanded=False):
-            st.markdown("""
-            Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
-            ```toml
-            APIFREAKS_API_KEY = "IhrKey"
-            FRED_API_KEY = "IhrKey"
-            EODHD_API_KEY = "IhrKey"
-            # ...
-            ```
-            """)
+        if operator_is_authorized():
+            with st.expander("🔑 API-Konfiguration", expanded=False):
+                st.caption("Schlüssel vorhanden bedeutet nur konfiguriert. Verbindung, Nutzungsrechte und verbleibendes Kontingent werden damit nicht bestätigt.")
+                for key_name, configured in (
+                    ("FRED_API_KEY", FRED_KEY),
+                    ("NEWSDATA_API_KEY", NEWSDATA_KEY),
+                    ("NEWSAPI_KEY", NEWSAPI_KEY),
+                    ("APIFREAKS_API_KEY", APIFREAKS_KEY),
+                    ("ESTAT_APP_ID", ESTAT_APP_ID),
+                ):
+                    st.write(f"{key_name}: {'Konfiguriert; Verbindung ungeprüft' if configured else 'Nicht konfiguriert'}")
+                st.write(f"EODHD: gespeicherter Abrufstatus · {get_eodhd_status_label()}")
+
+            with st.expander("📝 Streamlit Secrets Anleitung", expanded=False):
+                st.markdown("""
+                Wenn die App auf Streamlit Cloud läuft, tragen Sie Keys im Dashboard unter **Settings -> Secrets** ein:
+                ```toml
+                APIFREAKS_API_KEY = "IhrKey"
+                FRED_API_KEY = "IhrKey"
+                EODHD_API_KEY = "IhrKey"
+                # ...
+                ```
+                """)
             
         df_cal, t_cal, is_live_cal = None, None, False
         st.caption("News-Termine werden manuell geprüft; automatische News-Abfragen sind deaktiviert.")
@@ -8683,16 +8687,19 @@ if not getattr(st, "_mock_mode", False):
             st.info("Nicht verfügbar: Das Journal ist noch nicht angebunden; Eingaben und Experimente werden hier nicht aufgezeichnet.")
 
         with lab6:
-            st.subheader("🛠 Technical API & Data Status")
-            st.caption("Konfiguration der Datenquellen. Ein vorhandener API-Schlüssel bestätigt keine erfolgreiche Datenabfrage.")
-            
-            api_health = [
-                {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
-                {"API / Datenquelle": "FCS Price Data API", "Status": fcs_credential_status()},
-                {"API / Datenquelle": "Tiingo Commodity API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
-                {"API / Datenquelle": "World Bank Indicator API", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"},
-                {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"}
-            ]
-            st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
-            st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
+            if operator_is_authorized():
+                st.subheader("🛠 Technical API & Data Status")
+                st.caption("Konfiguration der Datenquellen. Ein vorhandener API-Schlüssel bestätigt keine erfolgreiche Datenabfrage.")
+
+                api_health = [
+                    {"API / Datenquelle": "FRED API (St. Louis Fed)", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if FRED_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                    {"API / Datenquelle": "EODHD Macro / Bonds API", "Status": get_eodhd_status_label()},
+                    {"API / Datenquelle": "FCS Price Data API", "Status": fcs_credential_status()},
+                    {"API / Datenquelle": "Tiingo Commodity API", "Status": "Schlüssel vorhanden (Verbindung ungeprüft)" if TIINGO_KEY else "Inaktiv 🔴 (API-Key fehlt)"},
+                    {"API / Datenquelle": "World Bank Indicator API", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"},
+                    {"API / Datenquelle": "OECD Consumer Expectations", "Status": "Öffentliche Quelle (Verbindung ungeprüft)"}
+                ]
+                st.dataframe(pd.DataFrame(api_health), hide_index=True, use_container_width=True)
+                st.caption("🛡️ News-APIs (Finnhub, NewsAPI, StockData, Benzinga News) sind dauerhaft deaktiviert (0% Einfluss auf Fundamentalanalyse).")
+            else:
+                st.info("Technische Anbieterinformationen sind im geschützten Betreiberzugang verfügbar. Aktuelle Werte, Quellen und Sperrgründe stehen oben im Live-Datenstatus.")
