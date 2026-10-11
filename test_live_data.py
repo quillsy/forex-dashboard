@@ -602,6 +602,14 @@ class LiveDataTests(unittest.TestCase):
         nzd=next(row for row in overview if row['Währung']=='NZD')
         self.assertEqual(nzd['Arbeitslosenquote (%)'],'5.60 · 2026-06-30')
         self.assertEqual(nzd['Reales GDP (% zum Vorjahr)'],'—')
+        source_rows=st.dataframe.call_args_list[1].args[0]
+        labour=next(r for r in source_rows if r['Währung']=='NZD' and r['Faktor']=='Arbeitsmarkt')
+        gdp=next(r for r in source_rows if r['Währung']=='NZD' and r['Faktor']=='GDP')
+        self.assertEqual(labour['Wert'],5.6)
+        self.assertEqual(gdp['Status'],'Gesperrt')
+        self.assertIsNone(gdp['Wert'])
+        self.assertEqual(gdp['Referenzperiode'],expired['observation']['date'])
+        self.assertEqual(gdp['Quelle'],'Eurostat')
         self.assertEqual(live.details('NZD',NOW+timedelta(hours=2),data)['_completeness'],20)
 
     def test_overview_preserves_official_provisional_flag(self):
@@ -656,6 +664,30 @@ class LiveDataTests(unittest.TestCase):
                 row=next(r for r in st.dataframe.call_args_list[1].args[0] if r['Währung']=='CHF' and r['Faktor']=='Inflation')
                 self.assertEqual(row['Status'],'Gesperrt')
                 self.assertEqual(row['Grund'],'Kein abgeschlossener Live-Datensatz')
+                self.assertIsNone(row['Wert'])
+                self.assertEqual(row['Referenzperiode'],'2026-08-31')
+
+    def test_source_table_masks_blocked_yield_and_policy_without_mutating_observations(self):
+        record=live.build_record('Geldpolitik',20,{'value':None,'yield_2y':4.34,'policy_rate':4.25,
+            'date':'2026-09-04','source':'FRED'},'FRESH',NOW.isoformat())
+        self.assertTrue(live.eligible(record,NOW,factor='Geldpolitik',currency='USD')[0])
+        for completed_at,at in ((None,NOW),('invalid',NOW),
+                                ((NOW+timedelta(minutes=1)).isoformat(),NOW),
+                                (NOW.isoformat(),NOW+timedelta(hours=1))):
+            with self.subTest(completed_at=completed_at,at=at):
+                data={'completed_at':completed_at,'currencies':{'USD':{'Geldpolitik':copy.deepcopy(record)}}}
+                original=copy.deepcopy(data)
+                st=MagicMock()
+                with patch.object(live,'load',return_value=data),patch.object(live,'now_utc',return_value=at):
+                    live.render_status(st)
+                row=next(r for r in st.dataframe.call_args_list[1].args[0]
+                         if r['Währung']=='USD' and r['Faktor']=='Geldpolitik')
+                self.assertEqual(row['Status'],'Gesperrt')
+                self.assertIsNone(row['Wert'])
+                self.assertIsNone(row['Leitzins (%)'])
+                self.assertEqual(row['Quelle'],'FRED')
+                self.assertEqual(row['Referenzperiode'],'2026-09-04')
+                self.assertEqual(data,original)
 
     def test_quarterly_labour_age_still_expires_and_release_deadline_wins(self):
         row=live.build_record('Arbeitsmarkt',20,{'value':5.6,'date':'2026-06-30','frequency':'quarterly',
