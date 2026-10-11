@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 from ec_industry_research import fetch, validate_artifact, _snapshot, render_ec_industry
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from ec_industry_research import DIMENSIONS, PARAMS, parse_json, parse_response
 
 NOW = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
@@ -120,6 +120,14 @@ def saved_artifact(data=None, now=NOW):
     return result
 
 
+def saved_month_artifact(period, now):
+    year, month = map(int, period.split('-'))
+    previous = f'{year - (month == 1):04d}-{(month - 2) % 12 + 1:02d}'
+    source = fixture()
+    source['dimension']['time']['category']['index'] = {previous: 0, period: 1}
+    return saved_artifact(source, now=now)
+
+
 class ProductionTests(unittest.TestCase):
     def test_fetch_is_bounded_and_no_redirect(self):
         response = Mock(status_code=200, text=json.dumps(fixture()))
@@ -148,9 +156,83 @@ class ProductionTests(unittest.TestCase):
         source = fixture()
         source['dimension']['time']['category']['index'] = {'2026-08': 0, '2026-09': 1}
         data = saved_artifact(source, now=due)
-        self.assertEqual(validate_artifact(data, now=due)['freshness_state'], 'calendar_unknown_recent_check')
+        self.assertEqual(validate_artifact(data, now=due)['freshness_state'], 'verified_calendar_window')
         later = datetime(2026, 9, 29, 2, tzinfo=timezone.utc)
+        checked = validate_artifact(data, now=later)
+        self.assertEqual(checked['freshness_state'], 'verified_calendar_window')
+        self.assertGreater(checked['retrieval_age_hours'], 1)
+
+    def test_reviewed_calendar_windows_and_conservative_due_boundaries(self):
+        for period, observed, following in (
+            ('2026-09', '2026-10-11T12:00:00+00:00', '2026-10-29T00:00:00+00:00'),
+            ('2026-10', '2026-11-01T12:00:00+00:00', '2026-11-27T00:00:00+00:00'),
+            ('2026-11', '2026-12-01T12:00:00+00:00', '2027-01-07T00:00:00+00:00'),
+        ):
+            with self.subTest(period=period):
+                start, due = datetime.fromisoformat(observed), datetime.fromisoformat(following)
+                data = saved_month_artifact(period, start)
+                for check in (start, due - timedelta(seconds=1)):
+                    verified = validate_artifact(data, now=check)
+                    self.assertEqual(verified['freshness_state'], 'verified_calendar_window')
+                    self.assertEqual(verified['calendar_next_release_date'], due.date().isoformat())
+                    self.assertIsNone(verified['published_at'])
+                    self.assertIs(verified['core_eligible'], False)
+                    self.assertIsNone(verified['signal'])
+                self.assertEqual(validate_artifact(data, now=due)['freshness_state'], 'release_due_unconfirmed')
+
+    def test_early_capture_and_future_unreviewed_calendar_stay_unknown(self):
+        early = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+        data = saved_month_artifact('2026-09', early)
+        self.assertEqual(validate_artifact(data, now=early)['freshness_state'], 'calendar_unknown_recent_check')
+        # Time passing alone must not qualify a pre-release capture.
+        later = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
         self.assertEqual(validate_artifact(data, now=later)['freshness_state'], 'calendar_unknown_check_overdue')
+        # December's known first-release day does not supply an unknown next day.
+        for period, check in (('2026-12', datetime(2027, 1, 7, 12, tzinfo=timezone.utc)),
+                              ('2027-01', datetime(2027, 2, 1, 12, tzinfo=timezone.utc))):
+            with self.subTest(period=period):
+                data = saved_month_artifact(period, check)
+                self.assertEqual(validate_artifact(data, now=check)['freshness_state'], 'calendar_unknown_recent_check')
+                self.assertEqual(validate_artifact(data, now=check + timedelta(hours=2))['freshness_state'], 'calendar_unknown_check_overdue')
+
+    def test_september_caption_is_dynamic_and_hourly_warning_is_retained(self):
+        from streamlit.testing.v1 import AppTest
+        captured = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+        data = saved_month_artifact('2026-09', captured)
+        checked_at = captured + timedelta(hours=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ec_industry.json'
+            path.write_text(json.dumps(data))
+            script = "import streamlit as st\nfrom ec_industry_research import render_ec_industry\nrender_ec_industry(st, " + repr(str(path)) + ')'
+            with patch('ec_industry_research.validate_artifact',
+                       side_effect=lambda artifact: validate_artifact(artifact, now=checked_at)):
+                app = AppTest.from_string(script).run()
+            self.assertEqual(len(app.exception), 0)
+            captions = '\n'.join(str(c.value) for c in app.caption)
+            self.assertIn('29.09.2026', captions)
+            self.assertIn('29.10.2026', captions)
+            self.assertNotIn('28.08.2026', captions)
+            self.assertIn('Zeitzone nicht bestätigt', captions)
+            self.assertTrue(any('Stündlicher EA21-Research-Abruf überfällig' in w.value for w in app.warning))
+            self.assertEqual(app.metric[0].value, '-2.0')
+
+    def test_due_warning_uses_reviewed_next_year_day(self):
+        from streamlit.testing.v1 import AppTest
+        captured = datetime(2026, 12, 1, 12, tzinfo=timezone.utc)
+        checked_at = datetime(2027, 1, 7, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ec_industry.json'
+            path.write_text(json.dumps(saved_month_artifact('2026-11', captured)))
+            script = "import streamlit as st\nfrom ec_industry_research import render_ec_industry\nrender_ec_industry(st, " + repr(str(path)) + ')'
+            with patch('ec_industry_research.validate_artifact',
+                       side_effect=lambda artifact: validate_artifact(artifact, now=checked_at)):
+                app = AppTest.from_string(script).run()
+            self.assertEqual(len(app.exception), 0)
+            warnings = '\n'.join(str(w.value) for w in app.warning)
+            self.assertIn('07.01.2027', warnings)
+            self.assertIn('Referenzmonat 2026-11', warnings)
+            self.assertIn('Ab Tagesbeginn UTC konservativ unbestätigt', warnings)
+            self.assertEqual(app.metric[0].value, '-2.0')
 
     def test_real_streamlit_display_and_missing_file(self):
         from streamlit.testing.v1 import AppTest
