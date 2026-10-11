@@ -8225,7 +8225,7 @@ if not getattr(st, "_mock_mode", False):
             spread_str = f"{(y10_det['value'] - y2_det['value']):+.2f}%" if (y2_det and y10_det and y2_det.get('value') is not None and y10_det.get('value') is not None) else "N/A"
             chg_1w = f"{y2_det['chg_1w']:+.2f}%" if (y2_det and y2_det.get('chg_1w') is not None) else "N/A"
             chg_1m = f"{y2_det['chg_1m']:+.2f}%" if (y2_det and y2_det.get('chg_1m') is not None) else "N/A"
-            trend_str = y2_det["trend"] if y2_det else "▬"
+            trend_str = y2_det["trend"] if y2_det else "N/A"
             src_str = y2_det["source"] if y2_det else "N/A"
             src_5y_str = y5_det["source"] if y5_det else "5Y YIELD UNAVAILABLE"
             
