@@ -90,6 +90,26 @@ def manual(percentile=50.0, *, age=0, **changes):
     return entry
 
 
+def canonical_ast_digest(node):
+    """Keep syntax fields stable across Python 3.10/3.13, not dump formatting.
+
+    Python 3.12 added type_params to functions/classes. Only its absent-versus-
+    empty representation is normalized; actual type parameters remain protected.
+    Locations are excluded because iter_fields contains syntax, not attributes.
+    """
+    def normalize(value):
+        if isinstance(value, ast.AST):
+            return {"node": type(value).__name__, "fields": {
+                field: normalize(child) for field, child in ast.iter_fields(value)
+                if not (field == "type_params" and child == [])}}
+        if isinstance(value, list):
+            return [normalize(child) for child in value]
+        return value
+    serialized = json.dumps(normalize(node), sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=True, allow_nan=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class LiveCOTParserTests(unittest.TestCase):
     def setUp(self):
         self.ns = functions_namespace()
@@ -491,18 +511,45 @@ class LiveCOTWriterTests(unittest.TestCase):
 
 class FrozenHistoricalAndCoreTests(unittest.TestCase):
     def test_original_historical_getters_and_core_functions_are_ast_unchanged(self):
-        # Captured independently from fixed baseline 2e56e927, not from the patch.
+        # Canonical hashes independently derived from git-show baseline 2e56e927:
+        # app.py SHA 8942c925ee05619cdccbdfec32994052af518d08534eeadbb484e0921734a707.
+        # No Git history or network is needed when these tests run in shallow CI.
         expected = {
-            "load_manual_cot": "e07521ad2350d1e11ceb1d6a2ac82958310b77fb4a6f360d35958223acaddd5c",
-            "get_cot_signal": "8fa2018f076eeb8e757ba4b5fa200faabd6177be71cdb98daf50c5452c13407c",
-            "get_latest_cot_percentile": "4df2928d650b6de1330f8f8977ac0284cf1e017f41b10ab78400dab6228b2c44",
-            "compute_correction_score": "6e188ef2fb69e4b8a3d042909e55fc4cbbb5f31037a40859b94cad70da3b461a",
+            "load_manual_cot": "c2e84b1dd5e2bd0405a3ec7adb15ff77376632152cce170b807af385a5b60591",
+            "get_cot_signal": "8c6a45f4dcefa2dd0588f23e52f30d5969cfd73e31c6a625eb85c83eaab4effb",
+            "get_latest_cot_percentile": "4e0a50f4dc6a3ff688a7b5d9f3b04c7213bb23144651fe1153edc3ca28db9f28",
+            "compute_correction_score": "bf37b513840bef75391819a6b4bdd2aec8183c6b41d4ba918e3913483e6f1100",
         }
         functions = {node.name: node for node in TREE.body if isinstance(node, ast.FunctionDef)}
         for name, digest in expected.items():
             with self.subTest(function=name):
-                self.assertEqual(hashlib.sha256(ast.dump(functions[name],
-                    include_attributes=False).encode()).hexdigest(), digest)
+                self.assertEqual(canonical_ast_digest(functions[name]), digest)
+
+    def test_canonical_hash_normalizes_only_absent_or_empty_type_parameters(self):
+        original = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "get_cot_signal")
+        absent, empty = copy.deepcopy(original), copy.deepcopy(original)
+        fields = tuple(field for field in original._fields if field != "type_params")
+        absent._fields = fields
+        if hasattr(absent, "type_params"):
+            del absent.type_params
+        empty._fields = fields + ("type_params",)
+        empty.type_params = []
+        self.assertEqual(canonical_ast_digest(absent), canonical_ast_digest(empty))
+        # A real newly populated syntax field must not disappear during normalization.
+        empty.type_params = [ast.Name(id="SyntheticTypeParameter", ctx=ast.Load())]
+        self.assertNotEqual(canonical_ast_digest(absent), canonical_ast_digest(empty))
+
+    def test_canonical_guard_rejects_a_representative_actual_body_mutation(self):
+        original = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "get_cot_signal")
+        changed = copy.deepcopy(original)
+        sentinel = next(node for node in ast.walk(changed) if isinstance(node, ast.Constant)
+                        and isinstance(node.value, float) and node.value == 50.0)
+        sentinel.value = 51.0
+        with self.assertRaises(AssertionError):
+            self.assertEqual(canonical_ast_digest(changed),
+                "8c6a45f4dcefa2dd0588f23e52f30d5969cfd73e31c6a625eb85c83eaab4effb")
 
 
 class TemporaryStorePreservationTests(unittest.TestCase):
