@@ -6185,6 +6185,14 @@ COT_SYMBOLS = {
     "JPY": "097741"
 }
 
+# CFTC legacy futures report: EURO FX is 099741; 098662 is USD INDEX.
+# Verified separately for the live view: https://www.cftc.gov/dea/newcot/deafut.txt
+# Historical COT_SYMBOLS and historical calculation paths remain unchanged.
+LIVE_COT_SYMBOLS = {
+    "EUR": "099741", "GBP": "096742", "CHF": "092741", "CAD": "090741",
+    "AUD": "232741", "NZD": "112741", "JPY": "097741"
+}
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_cot_year_cached(year):
     try:
@@ -6276,19 +6284,377 @@ def load_manual_cot():
     except Exception:
         return {}
 
-def save_manual_cot_entry(curr, position, net_pos, percentile, date_str):
+def _live_cot_now(now=None):
+    checked = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if pd.isna(checked):
+        raise ValueError("COT-Prüfzeit ist ungültig.")
+    return checked.tz_localize("UTC") if checked.tzinfo is None else checked.tz_convert("UTC")
+
+
+def _live_cot_result(now, status="UNAVAILABLE", reason="Keine COT-Daten verfügbar.", input_mode="automatic"):
+    return {"percentile": None, "status": status, "reason": reason, "as_of": None,
+            "sample_size": 0, "source": "CFTC Legacy Futures-only · Noncommercial (cot_reports)",
+            "input_mode": input_mode, "checked_at": now.isoformat() if now is not None else None}
+
+
+def _live_cot_number(value):
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _live_cot_contract_code(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit() and len(text) <= 6:
+            return text.zfill(6)
+        return None
+    number = _live_cot_number(value)
+    return str(int(number)).zfill(6) if number is not None and number.is_integer() and 0 <= number <= 999999 else None
+
+
+def _live_cot_report_date(value, short_format=False):
+    if short_format:
+        if not isinstance(value, str):
+            number = _live_cot_number(value)
+            value = str(int(number)).zfill(6) if number is not None and number.is_integer() else ""
+        text = value.strip()
+        if len(text) != 6 or not text.isascii() or not text.isdigit():
+            return pd.NaT
+        return pd.to_datetime(text, format="%y%m%d", errors="coerce", utc=True)
+    if isinstance(value, (datetime, pd.Timestamp)):
+        parsed = pd.to_datetime(value, errors="coerce", utc=True)
+        return parsed.normalize() if pd.notna(parsed) else pd.NaT
+    if not isinstance(value, str) or len(value.strip()) != 10:
+        return pd.NaT
+    return pd.to_datetime(value.strip(), format="%Y-%m-%d", errors="coerce", utc=True)
+
+
+def _live_cot_source_reference(value):
+    from urllib.parse import urlsplit
+    message = "Herkunft muss ein HTTPS-Link ohne Zugangsdaten, Query oder Fragment sein."
+    if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 500
+            or any(character.isspace() or ord(character) < 32 or character in '<>"\\' for character in value.strip())):
+        raise ValueError(message)
+    reference = value.strip()
+    try:
+        parsed = urlsplit(reference)
+        if (parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.query or parsed.fragment):
+            raise ValueError(message)
+        parsed.port  # Reject malformed ports; this performs no connection.
+        host = parsed.hostname.encode("idna").decode("ascii")
+        if not all(character.isalnum() or character in ".-:" for character in host):
+            raise ValueError(message)
+    except (ValueError, UnicodeError):
+        raise ValueError(message) from None
+    return reference
+
+
+def _live_cot_manual_details(entry, now):
+    result = _live_cot_result(now, "INVALID", "Manueller COT-Eintrag ist ungültig.", "manual")
+    result["source"] = "Manueller externer Kontext · nicht automatisch verifiziert"
+    if not isinstance(entry, dict):
+        return result
+    percentile = _live_cot_number(entry.get("percentile"))
+    if percentile is None or not 0 <= percentile <= 100:
+        result["reason"] = "Manuelles Perzentil fehlt oder liegt nicht endlich zwischen 0 und 100."
+        return result
+    raw_date = entry.get("date")
+    parsed_date = _live_cot_report_date(raw_date)
+    if pd.isna(parsed_date) or not isinstance(raw_date, str) or parsed_date.strftime("%Y-%m-%d") != raw_date:
+        result["reason"] = "Manuelles Berichtsdatum muss ein gültiges YYYY-MM-DD sein."
+        return result
+    result["as_of"] = parsed_date.strftime("%Y-%m-%d")
+    age = (now.normalize() - parsed_date).days
+    if age < 0:
+        result["reason"] = "Manuelles Berichtsdatum liegt in der Zukunft."
+        return result
+    if age > 10:
+        result.update(status="STALE", reason="Manuelles Berichtsdatum ist älter als zehn Kalendertage.")
+        return result
+    if "net_position" in entry:
+        net = _live_cot_number(entry["net_position"])
+        if net is None or not net.is_integer():
+            result["reason"] = "Manuelle Netto-Kontrakte müssen eine endliche ganze Zahl sein."
+            return result
+    if "position" in entry and entry["position"] not in ("Bullish", "Bearish", "Neutral"):
+        result["reason"] = "Manuelle Positionierung ist ungültig."
+        return result
+    try:
+        reference = _live_cot_source_reference(entry.get("source_reference"))
+    except ValueError:
+        result["reason"] = "Manuelle Herkunft fehlt oder ist kein zulässiger HTTPS-Quellenlink."
+        return result
+    result.update(percentile=percentile, status="VALID",
+                  reason="Manueller externer Kontext; Quelle und Perzentil nicht automatisch verifiziert.",
+                  source=result["source"] + ": " + reference)
+    return result
+
+
+def parse_live_cot_frames(symbol_code, frames, now):
+    """Validate live legacy-futures positioning without changing historical COT logic."""
+    try:
+        checked = _live_cot_now(now)
+    except (TypeError, ValueError):
+        return _live_cot_result(None, "INVALID", "COT-Prüfzeit ist ungültig.")
+    result = _live_cot_result(checked)
+    code = _live_cot_contract_code(symbol_code)
+    if code is None:
+        result.update(status="INVALID", reason="COT-Kontraktkennung ist ungültig.")
+        return result
+    result["contract_code"] = code
+    selected_frames = []
+    long_col, short_col = "Noncommercial Positions-Long (All)", "Noncommercial Positions-Short (All)"
+    try:
+        for frame in frames or []:
+            if frame is None or isinstance(frame, pd.DataFrame) and frame.empty:
+                continue
+            if not isinstance(frame, pd.DataFrame):
+                result.update(status="INVALID", reason="COT-Datenformat ist ungültig.")
+                return result
+            frame = frame.copy()
+            frame.columns = frame.columns.astype(str).str.strip()
+            if frame.columns.duplicated().any():
+                result.update(status="INVALID", reason="COT-Spalten sind widersprüchlich oder doppelt.")
+                return result
+            code_col = next((column for column in ("CFTC Contract Market Code", "CFTC_Contract_Market_Code")
+                             if column in frame.columns), None)
+            if code_col is None:
+                result.update(status="INVALID", reason="COT-Kontraktspalte fehlt.")
+                return result
+            code_aliases = [column for column in ("CFTC Contract Market Code", "CFTC_Contract_Market_Code")
+                            if column in frame.columns]
+            if len(code_aliases) == 2:
+                first_codes, second_codes = [frame[column].map(_live_cot_contract_code) for column in code_aliases]
+                relevant = (first_codes == code) | (second_codes == code)
+                if (first_codes[relevant] != second_codes[relevant]).any():
+                    result.update(status="INVALID", reason="COT-Kontraktspalten widersprechen sich.")
+                    return result
+            matching = frame[frame[code_col].map(_live_cot_contract_code) == code].copy()
+            if matching.empty:
+                continue
+            expected_market = {"099741": "EURO FX - CHICAGO MERCANTILE EXCHANGE",
+                               "098662": "USD INDEX - ICE FUTURES U.S."}.get(code)
+            market_col = next((column for column in ("Market and Exchange Names", "Market_and_Exchange_Names")
+                               if column in matching.columns), None)
+            if expected_market and market_col:
+                names = matching[market_col].map(lambda value: " ".join(str(value).upper().split()))
+                if (names != expected_market).any():
+                    result.update(status="INVALID", reason="COT-Kontraktkennung und amtlicher Marktname widersprechen sich.")
+                    return result
+            date_col = next((column for column in ("As of Date in Form YYYY-MM-DD", "As of Date in Form YYMMDD")
+                             if column in matching.columns), None)
+            if date_col is None or long_col not in matching or short_col not in matching:
+                result.update(status="INVALID", reason="COT-Berichtsdatum oder Long-/Short-Pflichtspalten fehlen.")
+                return result
+            matching["as_of"] = matching[date_col].map(
+                lambda value: _live_cot_report_date(value, date_col == "As of Date in Form YYMMDD"))
+            if "As of Date in Form YYYY-MM-DD" in matching and "As of Date in Form YYMMDD" in matching:
+                second_dates = matching["As of Date in Form YYMMDD"].map(
+                    lambda value: _live_cot_report_date(value, True))
+                if second_dates.isna().any() or (matching["as_of"] != second_dates).any():
+                    result.update(status="INVALID", reason="COT-Berichtsdatumsspalten widersprechen sich.")
+                    return result
+            if matching["as_of"].isna().any():
+                result.update(status="INVALID", reason="COT-Berichtsdatum ist nicht gültig auswertbar.")
+                return result
+            for original, normalized in ((long_col, "long"), (short_col, "short")):
+                matching[normalized] = matching[original].map(_live_cot_number)
+                matching[normalized] = matching[normalized].map(
+                    lambda value: value if pd.notna(value) and value >= 0 and float(value).is_integer() else np.nan)
+            selected_frames.append(matching[["as_of", "long", "short"]])
+        if not selected_frames:
+            result["reason"] = "Für diesen COT-Kontrakt sind keine Berichte verfügbar."
+            return result
+        selected = pd.concat(selected_frames, ignore_index=True).sort_values("as_of")
+        latest = selected["as_of"].max()
+        result["as_of"] = latest.strftime("%Y-%m-%d")
+        age = (checked.normalize() - latest).days
+        if age < 0:
+            result.update(status="INVALID", reason="Der neueste COT-Bericht liegt in der Zukunft.")
+            return result
+        if age > 10:
+            result.update(status="STALE", reason="COT-Berichtsdatum ist älter als zehn Kalendertage.")
+            return result
+        if selected.loc[selected["as_of"] == latest, ["long", "short"]].isna().any().any():
+            result.update(status="INVALID", reason="Neueste COT-Position ist fehlend oder keine zulässige Kontraktzahl.")
+            return result
+        for _, group in selected.groupby("as_of"):
+            values = group[["long", "short"]]
+            if len(values) > 1 and (values.isna().any().any() or len(values.drop_duplicates()) > 1):
+                result.update(status="INVALID", reason="Widersprüchliche COT-Berichte für denselben Kontrakt und Berichtstag.")
+                return result
+        sample = selected.dropna(subset=["long", "short"]).drop_duplicates("as_of").tail(156)
+        result["sample_size"] = len(sample)
+        if len(sample) < 5:
+            result["reason"] = "Weniger als fünf gültige eindeutige COT-Berichte verfügbar."
+            return result
+        net = sample["long"] - sample["short"]
+        result.update(percentile=float((net <= net.iloc[-1]).sum() / len(net) * 100.0),
+                      status="VALID", reason="Berichtsdatum zulässig; Veröffentlichungszeit nicht geprüft.")
+        return result
+    except Exception:
+        result.update(status="INVALID", reason="COT-Daten konnten nicht gültig verarbeitet werden.")
+        return result
+
+
+def _live_cot_inputs(now):
+    frames = []
+    for offset in range(4):
+        try:
+            frames.append(load_cot_year_cached(now.year - offset))
+        except Exception:
+            frames.append(None)
+    try:
+        manual = load_live_manual_cot()
+    except Exception:
+        manual = {"_store_error": True}
+    return frames, manual if isinstance(manual, dict) else {"_store_error": True}
+
+
+def _live_cot_select(curr, frames, manual, now):
+    if curr not in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"):
+        return _live_cot_result(now, "INVALID", "Währung ist nicht für den COT-Kontext vorgesehen.")
+    rejected = None
+    manual_result = None
+    store_error = bool(manual.get("_store_error"))
+    if store_error:
+        rejected = "Manuelle COT-Ablage ist nicht lesbar oder ungültig; manuelle Werte werden nicht verwendet."
+    elif curr in manual:
+        manual_result = _live_cot_manual_details(manual[curr], now)
+        if manual_result["status"] == "VALID":
+            return manual_result
+        rejected = manual_result["reason"]
+    code = LIVE_COT_SYMBOLS.get(curr)
+    if code:
+        result = parse_live_cot_frames(code, frames, now)
+    else:
+        result = _live_cot_result(now, reason="Keine automatische COT-Kontraktzuordnung für diese Währung.")
+        result["source"] = "Keine automatische COT-Quelle zugeordnet"
+    if rejected:
+        if manual_result is not None and result["status"] == "UNAVAILABLE":
+            manual_result["reason"] = "Manueller Eintrag abgelehnt: " + rejected + " Keine gültigen amtlichen Ersatzdaten. " + result["reason"]
+            return manual_result
+        prefix = ("Warnung: " if store_error else "Manueller Eintrag abgelehnt: ") + rejected
+        result["reason"] = prefix + (" Amtlicher Abruf verwendet. " if result["status"] == "VALID" else " ") + result["reason"]
+    return result
+
+
+def get_live_cot_details(curr, now=None):
+    try:
+        checked = _live_cot_now(now)
+    except (TypeError, ValueError):
+        return _live_cot_result(None, "INVALID", "COT-Prüfzeit ist ungültig.")
+    frames, manual = _live_cot_inputs(checked)
+    return _live_cot_select(curr, frames, manual, checked)
+
+
+def get_live_cot_rows(now=None):
+    """Build one shared eight-currency view with four cached frames and one manual read."""
+    try:
+        checked = _live_cot_now(now)
+    except (TypeError, ValueError):
+        checked = None
+    frames, manual = _live_cot_inputs(checked) if checked is not None else ([], {})
+    rows = []
+    for curr in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"):
+        details = (_live_cot_select(curr, frames, manual, checked) if checked is not None
+                   else _live_cot_result(None, "INVALID", "COT-Prüfzeit ist ungültig."))
+        percentile = details["percentile"]
+        position_warning = ("Extrem bullish" if percentile > 80 else "Extrem bearish" if percentile < 20 else "") if percentile is not None else ""
+        status = {"VALID": "Berichtsdatum zulässig", "STALE": "Veraltet", "INVALID": "Ungültig",
+                  "UNAVAILABLE": "Nicht verfügbar"}[details["status"]]
+        reason = details["reason"] + (" " + position_warning if position_warning else "")
+        rows.append(dict(details, currency=curr, **{
+            "Währung": curr, "Perzentil": f"{percentile:.1f}%" if percentile is not None else "N/A",
+            "Bericht (As-of)": details["as_of"] or "N/A",
+            "Stichprobe": str(details["sample_size"]) if details["input_mode"] == "automatic" else "Manuell",
+            "Quelle": details["source"], "Status / Warnung": status + " · " + reason}))
+    return rows
+
+
+def _live_cot_reject_json_constant(value):
+    raise ValueError("Ungültige JSON-Zahl.")
+
+
+def _live_cot_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Doppelte JSON-Schlüssel.")
+        result[key] = value
+    return result
+
+
+def load_live_manual_cot():
+    """Read the live manual store strictly; never alter the historical reader or file."""
+    file_path = "manual_cot.json"
+    if not os.path.exists(file_path):
+        return {}
+    message = "Manuelle COT-Ablage ist nicht lesbar oder ungültig."
+    try:
+        with open(file_path, "r", encoding="utf-8") as source:
+            data = json.load(source, parse_constant=_live_cot_reject_json_constant,
+                             object_pairs_hook=_live_cot_json_object)
+    except (OSError, ValueError):
+        raise ValueError(message) from None
+    if not isinstance(data, dict):
+        raise ValueError(message)
+    return data
+
+
+def save_manual_cot_entry(curr, position, net_pos, percentile, date_str, source_reference=None):
     if not operator_is_authorized():
         raise PermissionError("OPERATOR_ACCESS_REQUIRED")
+    if curr not in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD") or position not in ("Bullish", "Bearish", "Neutral"):
+        raise ValueError("Währung oder Positionierung ist ungültig.")
+    net = _live_cot_number(net_pos)
+    if net is None or not net.is_integer():
+        raise ValueError("Netto-Kontrakte müssen eine endliche ganze Zahl sein.")
+    reference = _live_cot_source_reference(source_reference)
+    entry = {"position": position, "net_position": int(net), "percentile": percentile,
+             "date": date_str, "source_reference": reference}
+    checked = _live_cot_manual_details(entry, _live_cot_now())
+    if checked["status"] != "VALID":
+        raise ValueError(checked["reason"])
+    entry["percentile"] = checked["percentile"]
     file_path = "manual_cot.json"
-    cot_data = load_manual_cot()
-    cot_data[curr] = {
-        "position": position,
-        "net_position": net_pos,
-        "percentile": percentile,
-        "date": date_str
-    }
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(cot_data, f, indent=4)
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as existing:
+                cot_data = json.load(existing, parse_constant=_live_cot_reject_json_constant,
+                                     object_pairs_hook=_live_cot_json_object)
+        except (OSError, ValueError):
+            raise ValueError("Bestehende COT-Datei ist nicht lesbar oder ungültig; sie bleibt unverändert.") from None
+        if not isinstance(cot_data, dict):
+            raise ValueError("Bestehende COT-Datei hat kein gültiges Objektformat; sie bleibt unverändert.")
+    else:
+        cot_data = {}
+    cot_data[curr] = entry
+    temporary_path = None
+    try:
+        import tempfile
+        serialized = json.dumps(cot_data, indent=4, allow_nan=False)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(os.path.abspath(file_path)),
+                                         prefix=".manual_cot.", suffix=".tmp", delete=False) as temporary:
+            temporary_path = temporary.name
+            temporary.write(serialized)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, file_path)
+    except (OSError, TypeError, ValueError):
+        raise ValueError("COT-Eintrag konnte nicht gespeichert werden; bestehende Daten bleiben unverändert.") from None
+    finally:
+        if temporary_path is not None:
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
 
 def get_latest_cot_percentile(curr, target_date=None):
     # Check manual COT input first
@@ -6560,6 +6926,7 @@ base_curr = "USD"
 quote_curr = "EUR"
 selected_pair = "USD/EUR"
 latest_close = 0.0
+cot_live_rows = None
 
 if not getattr(st, "_mock_mode", False):
     with st.sidebar:
@@ -6630,57 +6997,13 @@ if not getattr(st, "_mock_mode", False):
                 st.number_input("Reserve Bank of Australia (AUD) %", min_value=0.0, max_value=15.0, key="manual_rate_AUD", value=4.35, step=0.05)
                 st.number_input("Reserve Bank of New Zealand (NZD) %", min_value=0.0, max_value=15.0, key="manual_rate_NZD", value=2.50, step=0.05)
         
-        def get_cot_data_status():
-            try:
-                now = datetime.now()
-                y = now.year
-                df_cot = load_cot_year_cached(y)
-                if df_cot is None or df_cot.empty:
-                    df_cot = load_cot_year_cached(y - 1)
-                if df_cot is not None and not df_cot.empty:
-                    date_col = "As of Date in Form YYYY-MM-DD" if "As of Date in Form YYYY-MM-DD" in df_cot.columns else "As of Date in Form YYMMDD"
-                    dates = pd.to_datetime(df_cot[date_col])
-                    latest_date = dates.max()
-                    days_diff = (now - latest_date).days
-                    
-                    if days_diff <= 10:
-                        status = "🟢 Aktuell"
-                        weekday = now.weekday()
-                        if weekday in [5, 6, 0]:
-                            explanation = "Der Bericht spiegelt die Daten vom letzten Dienstag wider."
-                        elif weekday in [1, 2, 3]:
-                            explanation = "Daten vom Dienstag dieser Woche werden am Freitagabend veröffentlicht."
-                        else:
-                            explanation = "Neue Daten werden heute Abend (Freitag) veröffentlicht."
-                    else:
-                        status = "🟡 Veraltet"
-                        explanation = f"Der letzte Bericht ist {days_diff} Tage alt. Bitte warten Sie auf das nächste Update am Freitag/Samstag."
-                        
-                    return latest_date.strftime("%d.%m.%Y"), status, explanation
-            except Exception:
-                pass
-            return None, "🔴 Nicht verfügbar", "Es konnten keine COT-Daten geladen werden."
-    
         with st.expander("📅 COT-Status", expanded=False):
-            rep_date, status_val, explanation_val = get_cot_data_status()
-            st.write(f"**Status:** {status_val}")
-            if rep_date:
-                st.write(f"**Bericht vom:** {rep_date}")
-            st.caption(explanation_val)
-            
-            try:
-                y = datetime.now().year
-                df_cot = load_cot_year_cached(y)
-                if df_cot is None or df_cot.empty:
-                    df_cot = load_cot_year_cached(y - 1)
-                if df_cot is not None and not df_cot.empty:
-                    cot_rows = []
-                    for curr, code in COT_SYMBOLS.items():
-                        rank = get_cot_signal(code, datetime.now().strftime("%Y-%m-%d"))
-                        cot_rows.append({"Währung": curr, "Perzentil": f"{rank:.1f}%"})
-                    st.dataframe(pd.DataFrame(cot_rows), hide_index=True)
-            except Exception as e:
-                st.error(f"Fehler bei Tabelle: {e}")
+            cot_live_rows = get_live_cot_rows()
+            usable_count = sum(row["status"] == "VALID" for row in cot_live_rows)
+            st.write(f"**Berichtsdatum zulässig:** {usable_count}/8 Währungen")
+            st.caption("As-of ist der Positionsstichtag. Veröffentlichungszeit und neuester veröffentlichter Stand sind nicht geprüft; der bestehende Abruf-Cache bleibt aktiv.")
+            st.dataframe(pd.DataFrame(cot_live_rows)[[
+                "Währung", "Perzentil", "Bericht (As-of)", "Stichprobe", "Quelle", "Status / Warnung"]], hide_index=True)
     
         if operator_is_authorized():
             with st.expander("🔑 API-Konfiguration", expanded=False):
@@ -8501,45 +8824,35 @@ if not getattr(st, "_mock_mode", False):
     # ----------------- TAB 11: POSITIONING (COT) -----------------
     with tab11:
         st.header("📍 Positioning (COT Report)")
-        st.caption("Netto-Spekulanten-Positionierung der G8-Währungen aus dem Commitment of Traders Report.")
+        st.caption("COT-Kontext: automatisch bis zu 156 eindeutige Wochenberichte, mindestens fünf. As-of ist der Positionsstichtag; Veröffentlichungszeit und neuester veröffentlichter Stand sind nicht geprüft.")
         
         st.info("ℹ️ **TradingView Notice:** COT is externally monitored via TradingView. Manuelle Korrekturen sind ausschließlich im geschützten Betreiberzugang möglich.")
         
         with st.expander("📝 Manuelle COT-Daten eingeben / aktualisieren"):
+            st.caption("Manuelle externe Kontextwerte werden nicht automatisch nachgerechnet oder verifiziert. Ein Quellenlink bestätigt keine Nutzungsrechte oder Signalqualität.")
             m_curr = st.selectbox("Währung:", list(CURRENCIES.keys()), key="cot_m_curr_new")
             m_pos = st.selectbox("Positionierung:", ["Bullish", "Bearish", "Neutral"], key="cot_m_pos_new")
             m_net = st.number_input("Netto-Kontrakte:", value=0, key="cot_m_net_new")
             m_perc = st.slider("Percentile (0-100%):", 0.0, 100.0, 50.0, step=1.0, key="cot_m_perc_new")
-            m_date = st.date_input("Berichtsdatum:", key="cot_m_date_new")
+            cot_today = _live_cot_now().date()
+            m_date = st.date_input("Berichtsdatum (As-of):", min_value=cot_today - timedelta(days=10), max_value=cot_today, key="cot_m_date_new")
+            m_source = st.text_input("Herkunft (öffentlicher HTTPS-Link ohne Zugangsdaten):", max_chars=500, key="cot_m_source_new")
             
             if st.button("💾 Manuellen COT-Eintrag speichern", key="save_m_cot_btn_new", disabled=not operator_is_authorized()) and operator_is_authorized():
-                save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"))
-                st.success(f"COT-Daten für {m_curr} gespeichert!")
-                st.rerun()
-    
-        st.subheader("🛍️ COT Netto-Positionierung (Percentile)")
-        cot_rows = []
-        for curr in CURRENCIES.keys():
-            try:
-                percentile = get_latest_cot_percentile(curr)
-                if percentile is None:
-                    cot_rows.append({
-                        "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-                        "COT Rollierendes Percentil (3Y)": "DATA UNAVAILABLE 🔴",
-                        "Status / Warnung": "Keine aktuellen Daten verfügbar"
-                    })
+                try:
+                    save_manual_cot_entry(m_curr, m_pos, m_net, m_perc, m_date.strftime("%Y-%m-%d"), source_reference=m_source)
+                except ValueError as error:
+                    st.error(str(error))
                 else:
-                    warning_str = "⚠️ Extrem bullish (Überkauft)" if percentile > 80.0 else "⚠️ Extrem bearish (Überverkauft)" if percentile < 20.0 else "Gesund"
-                    cot_rows.append({
-                        "Währung": f"{CURRENCIES[curr]['flag']} {curr}",
-                        "COT Rollierendes Percentil (3Y)": f"{percentile:.1f}%",
-                        "Status / Warnung": warning_str
-                    })
-            except Exception:
-                pass
-                
-        if cot_rows:
-            st.dataframe(pd.DataFrame(cot_rows), hide_index=True, use_container_width=True)
+                    st.success(f"Manueller externer COT-Kontext für {m_curr} gespeichert.")
+                    st.rerun()
+
+        st.subheader("🛍️ COT-Perzentil und Datenstatus")
+        if cot_live_rows is None:
+            cot_live_rows = get_live_cot_rows()
+        st.dataframe(pd.DataFrame(cot_live_rows)[[
+            "Währung", "Perzentil", "Bericht (As-of)", "Stichprobe", "Quelle", "Status / Warnung"]],
+            hide_index=True, use_container_width=True)
     
     # ----------------- TAB 12: LIVE SIGNAL HISTORY & OUTCOMES -----------------
     with tab12:
