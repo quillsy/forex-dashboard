@@ -8180,9 +8180,13 @@ if not getattr(st, "_mock_mode", False):
             }
             
         df_rates_plot = pd.DataFrame([
-            {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"], "Change": data["bps_change"]}
+            {"Zentralbank": f"{curr} ({CURRENCIES[curr]['name']})", "Zinssatz": data["rate"],
+             "Change": data["bps_change"], "Quelle": data["source"]}
             for curr, data in rates_data.items()
         ])
+        manual_policy_display = df_rates_plot["Quelle"].eq("MANUAL OVERRIDE").any()
+        if manual_policy_display:
+            st.warning("Dieses Diagramm enthält manuell eingegebene Leitzinsen. Die Quelle steht im Tooltip. Der Live-CORE verwendet weiterhin ausschließlich den zentral geprüften Datensatz.")
         
         fig_rates_g8 = go.Figure()
         fig_rates_g8.add_trace(go.Bar(
@@ -8191,10 +8195,13 @@ if not getattr(st, "_mock_mode", False):
             marker_color=['#7d7d8a' if finite_number(r) is None else '#10b981' if r > 4.0 else '#e2b13c' if r > 1.5 else '#ef4444' for r in df_rates_plot["Zinssatz"]],
             text=[f"{r:.2f}%" if finite_number(r) is not None else "N/A" for r in df_rates_plot["Zinssatz"]],
             textposition='auto',
+            customdata=df_rates_plot["Quelle"],
+            hovertemplate="%{x}<br>Zinssatz: %{y:.2f}%<br>Quelle: %{customdata}<extra></extra>",
             name="Zinssatz"
         ))
         fig_rates_g8.update_layout(
-            title="<b>Zentralbank-Leitzinsen der G8</b>",
+            title=("<b>Leitzinsansicht · manuelle Werte enthalten</b>" if manual_policy_display
+                   else "<b>Zentralbank-Leitzinsen der G8</b>"),
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             font=dict(color="#d1d5db", size=10),
@@ -8384,13 +8391,16 @@ if not getattr(st, "_mock_mode", False):
         st.write("")
         st.subheader("🛍️ Rohstoff-Sensitivität (AUD, CAD, NZD)")
         st.caption("Korrekturfaktoren für rohstoffgebundene G8-Währungen (Öl, Kupfer, Milch/Agrar).")
+        if use_live_core_cache():
+            st.caption("Struktur-Korrekturfaktoren sind im Live-Betrieb nicht geprüft und erscheinen als N/A. Die Währungstypen sind feste Kategorien, keine gemessene aktuelle Sensitivität.")
         
         com_rows = []
         for c in ["AUD", "CAD", "NZD", "USD", "EUR", "GBP", "JPY", "CHF"]:
-            c_score, _, _, corr_val, _ = compute_currency_professional_score_and_regime(c)
+            c_score, _, _, corr_val, c_details = compute_currency_professional_score_and_regime(c)
             com_rows.append({
                 "Währung": f"{CURRENCIES[c]['flag']} {c}",
-                "Struktur-Korrekturfaktor": f"{corr_val:+.1f}",
+                "Struktur-Korrekturfaktor": ("N/A" if c_details.get("_context_status") == "NOT_COLLECTED"
+                                            else format_score(corr_val)),
                 "Typ": "Rohstoffwährung" if c in ["AUD", "CAD", "NZD"] else "Sicherer Hafen" if c in ["USD", "CHF", "JPY"] else "Standard"
             })
         st.dataframe(pd.DataFrame(com_rows), hide_index=True, use_container_width=True)
