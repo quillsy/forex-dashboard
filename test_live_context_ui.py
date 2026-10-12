@@ -69,5 +69,81 @@ class LiveContextTests(unittest.TestCase):
             self.assertTrue(all(row['confidence'] is None for row in rows))
             self.assertTrue(all(row['data_quality'] == 0 for row in rows))
 
+    def correction_rows(self, correction, details):
+        # Execute the actual market-context table loop, not a replica formatter.
+        loops = [node for node in ast.walk(TREE) if isinstance(node, ast.For)
+                 and any(isinstance(child, ast.Dict) and any(
+                     isinstance(key, ast.Constant) and key.value == 'Struktur-Korrekturfaktor'
+                     for key in child.keys) for child in ast.walk(node))]
+        self.assertEqual(len(loops), 1)
+        formatter = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                         and node.name == 'format_score')
+        import math
+        ns = {'com_rows': [], 'CURRENCIES': {currency: {'flag': currency} for currency in
+              ('USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD')},
+              'compute_currency_professional_score_and_regime': Mock(
+                  return_value=(20, 'Context nicht geprüft', 20, correction, details)),
+              'finite_number': lambda value: float(value) if value is not None and
+                  math.isfinite(float(value)) else None}
+        exec(compile(ast.Module(body=[formatter, loops[0]], type_ignores=[]),
+                     '<context-table>', 'exec'), ns)
+        self.assertEqual(len(ns['com_rows']), 8)
+        return [row['Struktur-Korrekturfaktor'] for row in ns['com_rows']]
+
+    def test_uncollected_live_context_is_not_a_neutral_correction(self):
+        self.assertEqual(self.correction_rows(0.0, {'_context_status': 'NOT_COLLECTED'}), ['N/A'] * 8)
+
+    def test_uncollected_context_never_exposes_a_numeric_placeholder(self):
+        for value in (12.5, -3.5, None):
+            self.assertEqual(self.correction_rows(value, {'_context_status': 'NOT_COLLECTED'}), ['N/A'] * 8)
+
+    def test_historical_neutral_and_nonzero_corrections_remain_visible(self):
+        for value, expected in ((0.0, '+0.0'), (-3.5, '-3.5'), (12.5, '+12.5')):
+            self.assertEqual(self.correction_rows(value, {}), [expected] * 8)
+
+    def test_missing_historical_correction_is_not_zero(self):
+        self.assertEqual(self.correction_rows(None, {}), ['N/A'] * 8)
+
+    def policy_chart(self, manual=False):
+        import pandas as pd
+        from types import SimpleNamespace
+        tab = next(node for node in ast.walk(TREE) if isinstance(node, ast.With)
+                   and any(isinstance(item.context_expr, ast.Name) and item.context_expr.id == 'tab3'
+                           for item in node.items))
+        start = next(index for index, node in enumerate(tab.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'rates_data' for target in node.targets))
+        end = next(index for index, node in enumerate(tab.body) if isinstance(node, ast.Expr)
+                   and isinstance(node.value, ast.Call) and node.value.args
+                   and isinstance(node.value.args[0], ast.Constant)
+                   and node.value.args[0].value == '🏦 Bond Market & 2Y Benchmark Yields')
+        figure, bar, ui = Mock(), Mock(), Mock()
+        ns = {'pd': pd, 'st': ui, 'go': SimpleNamespace(Figure=Mock(return_value=figure), Bar=bar),
+              'CURRENCIES': {'USD': {'wb_code': 'USA', 'name': 'US Dollar'},
+                             'JPY': {'wb_code': 'JPN', 'name': 'Japanese Yen'}},
+              'get_country_rate': lambda code, *args, **kwargs: (
+                  (9.0, None, 'MANUAL OVERRIDE' if manual else 'Federal Reserve') if code == 'USA'
+                  else (None, None, 'UNAVAILABLE')),
+              'use_live_core_cache': lambda: True, 'FRED_KEY': None,
+              'finite_number': lambda value: value if value is not None and pd.notna(value) else None}
+        exec(compile(ast.Module(body=tab.body[start:end], type_ignores=[]), '<policy-chart>', 'exec'), ns)
+        return ns, figure, bar, ui
+
+    def test_manual_policy_plot_has_local_warning_title_and_source(self):
+        ns, figure, bar, ui = self.policy_chart(manual=True)
+        self.assertTrue(ns['manual_policy_display'])
+        self.assertIn('manuell', ui.warning.call_args.args[0])
+        self.assertIn('manuelle Werte', figure.update_layout.call_args.kwargs['title'])
+        self.assertEqual(list(bar.call_args.kwargs['customdata']), ['MANUAL OVERRIDE', 'UNAVAILABLE'])
+        self.assertIn('Quelle:', bar.call_args.kwargs['hovertemplate'])
+        self.assertEqual(ns['df_rates_plot'].iloc[0]['Zinssatz'], 9.0)
+        self.assertTrue(ns['df_rates_plot']['Zinssatz'].isna().iloc[1])
+
+    def test_official_policy_plot_retains_title_and_does_not_claim_manual_input(self):
+        ns, figure, bar, ui = self.policy_chart(manual=False)
+        self.assertFalse(ns['manual_policy_display'])
+        ui.warning.assert_not_called()
+        self.assertEqual(figure.update_layout.call_args.kwargs['title'], '<b>Zentralbank-Leitzinsen der G8</b>')
+        self.assertEqual(list(bar.call_args.kwargs['customdata']), ['Federal Reserve', 'UNAVAILABLE'])
+
 
 if __name__=='__main__':unittest.main()
