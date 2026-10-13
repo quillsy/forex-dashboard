@@ -27,6 +27,13 @@ def fixture(completed=NOW - timedelta(minutes=1)):
     return dict(zip(shared.FILES, [core, status, policies]))
 
 
+def frontier(currency='AUD', factor='Arbeitsmarkt'):
+    source, series_id = shared.FRONTIER_SERIES[(currency, factor)]
+    return {'source': source, 'series_id': series_id, 'date': '2026-01-01',
+            'latest_date': '2026-01-01', 'next_due_at': '2026-01-09T00:00:00+00:00',
+            'next_due_precision': 'official_scheduled_time'}
+
+
 class Response:
     def __init__(self, payload=b'', status=200, headers=None):
         self.raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -63,6 +70,76 @@ class SharedSnapshotTests(unittest.TestCase):
         self.guard.stop(); self.temp.cleanup()
     def refresh(self, client=None, now=NOW):
         return shared.refresh_shared_snapshot(now=now, root=self.root, client=client or Client())
+    def test_release_frontiers_survive_public_and_bundled_invalid_records(self):
+        docs = fixture()
+        for currency, factor in shared.FRONTIER_SERIES:
+            docs[shared.FILES[0]]['currencies'][currency][factor]['release_frontier'] = frontier(currency, factor)
+        self.assertEqual(self.refresh(Client(docs))['outcome'], 'UPDATED')
+        public = shared.current_shared_directory(self.root)
+        self.assertEqual(json.loads((public / shared.FILES[0]).read_text()), docs[shared.FILES[0]])
+        source = self.root / 'source'; source.mkdir()
+        for name, value in docs.items(): (source / name).write_text(json.dumps(value))
+        with patch.object(shared.requests, 'Session', side_effect=AssertionError('NO_HTTP')):
+            bundled = shared.bundled_snapshot_directory(source, self.root)
+        self.assertIsNotNone(bundled)
+        self.assertEqual(json.loads((bundled / shared.FILES[0]).read_text()), docs[shared.FILES[0]])
+
+    def test_release_frontier_blocks_old_observation_even_without_other_due(self):
+        docs = fixture()
+        core, status = docs[shared.FILES[0]], docs[shared.FILES[1]]
+        at = core['completed_at']
+        row = {'factor': 'Arbeitsmarkt', 'score': 20, 'validation': 'VALID',
+               'freshness': 'FRESH', 'checked_at': at, 'last_attempt_at': at,
+               'published_at': None, 'next_due_at': None,
+               'expires_at': '2026-04-01T00:00:00+00:00',
+               'observation': {'date': '2026-01-01', 'value': 4.0,
+                               'unit': 'percent of labour force', 'source': 'ABS',
+                               'series_id': 'LF:M13.3.1599.20.AUS.M'},
+               'release_frontier': frontier()}
+        core['currencies']['AUD']['Arbeitsmarkt'] = row
+        self.assertFalse(live_data.eligible(row, shared._time(at), 'Arbeitsmarkt', 'AUD')[0])
+        self.assertEqual(shared._validate(docs, NOW), shared._time(at))
+        row['observation']['date'] = '2026-01-02'
+        row['release_frontier']['latest_date'] = '2026-01-02'
+        self.assertTrue(live_data.eligible(row, shared._time(at), 'Arbeitsmarkt', 'AUD')[0])
+        core.update(status='PARTIAL', eligible_factors=1)
+        status['last_run_status'] = 'PARTIAL'
+        status['components']['live_core'].update(status='PARTIAL', eligible_factors=1)
+        self.assertEqual(shared._validate(docs, NOW), shared._time(at))
+
+    def test_release_frontier_exact_public_schema_and_identity(self):
+        docs = fixture()
+        core = docs[shared.FILES[0]]
+        core['currencies']['AUD']['Arbeitsmarkt']['release_frontier'] = frontier()
+        self.assertEqual(shared._validate(docs, NOW), shared._time(core['completed_at']))
+        changes = {
+            'private field': lambda d: d['release_frontier'].update(private_key='secret'),
+            'nested field': lambda d: d['release_frontier'].update(source={'private': 'secret'}),
+            'wrong source': lambda d: d['release_frontier'].update(source='Other'),
+            'wrong series': lambda d: d['release_frontier'].update(series_id='OTHER'),
+            'missing latest': lambda d: d['release_frontier'].pop('latest_date'),
+            'malformed reference': lambda d: d['release_frontier'].update(date='2026-01-99'),
+            'non-ISO reference': lambda d: d['release_frontier'].update(date='2026-1-1'),
+            'future reference': lambda d: d['release_frontier'].update(date='2026-01-11', latest_date='2026-01-11'),
+            'future latest': lambda d: d['release_frontier'].update(latest_date='2026-01-11'),
+            'latest before reference': lambda d: d['release_frontier'].update(date='2026-01-02'),
+            'naive due': lambda d: d['release_frontier'].update(next_due_at='2026-01-09T00:00:00'),
+            'non-UTC due': lambda d: d['release_frontier'].update(next_due_at='2026-01-09T01:00:00+01:00'),
+            'unknown precision': lambda d: d['release_frontier'].update(next_due_precision='secret'),
+            'wrong currency': lambda d: d['currencies']['NZD'].__setitem__('Arbeitsmarkt', d['currencies']['AUD']['Arbeitsmarkt']),
+            'wrong factor': lambda d: d['currencies']['AUD'].__setitem__('GDP', d['currencies']['AUD']['Arbeitsmarkt']),
+        }
+        for label, mutation in changes.items():
+            with self.subTest(label=label):
+                bad = copy.deepcopy(docs)
+                mutation(bad[shared.FILES[0]] if label in {'wrong currency', 'wrong factor'} else bad[shared.FILES[0]]['currencies']['AUD']['Arbeitsmarkt'])
+                with self.assertRaises((shared.Invalid, ValueError)):
+                    shared._validate(bad, NOW)
+        bad = copy.deepcopy(docs)
+        bad[shared.FILES[0]]['currencies']['AUD']['Arbeitsmarkt']['release_frontier']['private_key'] = 'secret'
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(shared.refresh_shared_snapshot(NOW, root, Client(bad)), {'outcome': 'UNAVAILABLE'})
+            self.assertIsNone(shared.current_shared_directory(root))
     def test_exact_pinned_urls_transport_and_unchanged_bytes(self):
         docs = fixture(); client = Client(docs)
         self.assertEqual(self.refresh(client)['outcome'], 'UPDATED')

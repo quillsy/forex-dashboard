@@ -356,6 +356,20 @@ def eligible(record, now=None, factor=None, currency=None):
             return False, "Amtliche Referenzperiode noch nicht fällig: " + scheduled.get("minimum_period_label", scheduled["minimum_period_start"][:7])
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
+    if record.get("release_frontier") is not None:
+        frontier = _release_frontier(factor, record["release_frontier"])
+        if (frontier is None
+                or (currency is not None and _RELEASE_FRONTIER_SERIES.get(
+                    (factor, frontier["source"], frontier["series_id"])) != currency)
+                or (observation.get("source"), observation.get("series_id"))
+                != (frontier["source"], frontier["series_id"])):
+            return False, "Gespeicherter Veröffentlichungstermin oder Reihenbezug ungültig"
+        old_reference = datetime.strptime(frontier["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        latest_reference = datetime.strptime(frontier["latest_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if reference < latest_reference:
+            return False, "Ältere Referenzperiode als bereits geprüft"
+        if reference <= old_reference and now >= timestamp(frontier["next_due_at"]):
+            return False, "Bekannte Folge-Veröffentlichung fällig; neue Referenzperiode nicht bestätigt"
     if any(record.get(field) is not None and timestamp(record[field]) is None
            for field in ("published_at", "next_due_at", "checked_at", "expires_at")):
         return False, "Ungültige Zeitangabe"
@@ -510,7 +524,90 @@ def public_observation(observation):
     return result
 
 
+# Exact period-based surveys; revision-only series deliberately stay separate.
+_RELEASE_FRONTIER_SERIES = {
+    ("Arbeitsmarkt", "ABS", "LF:M13.3.1599.20.AUS.M"): "AUD",
+    ("GDP", "ABS", "ANA_AGG:M1.GPM.20.AUS.Q"): "AUD",
+    ("Arbeitsmarkt", "Stats NZ", "HLFS:unemployment_rate:Total:SA:Q"): "NZD",
+    ("GDP", "Stats NZ GDP expenditure", "SNEQ.SG02RSC00B15"): "NZD",
+}
+
+
+def _release_frontier(factor, candidate):
+    """Strict public projection of an already observed release frontier."""
+    if not isinstance(candidate, dict):
+        return None
+    identity = (factor, candidate.get("source"), candidate.get("series_id"))
+    due = timestamp(candidate.get("next_due_at"))
+    try:
+        reference = datetime.strptime(candidate.get("date"), "%Y-%m-%d").date()
+        latest = datetime.strptime(candidate.get("latest_date", candidate.get("date")), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    if identity not in _RELEASE_FRONTIER_SERIES or due is None or latest < reference:
+        return None
+    precision = candidate.get("next_due_precision")
+    return {"source": identity[1], "series_id": identity[2], "date": reference.isoformat(),
+            "latest_date": latest.isoformat(),
+            "next_due_at": due.isoformat(),
+            "next_due_precision": precision if precision in (
+                "official_scheduled_time", "date_only_start_of_NZ_day", "date_only_start_of_AU_day") else None}
+
+
 def build_record(factor, score, observation, freshness, checked_at, previous=None, validation="VALID", reason=None):
+    """Keep release knowledge independent of unsuccessful observation checks."""
+    record = _build_record(factor, score, observation, freshness, checked_at,
+                           previous, validation, reason)
+    frontier = None
+    if isinstance(previous, dict):
+        frontier = _release_frontier(factor, previous.get("release_frontier"))
+        if frontier is None:
+            # Upgrade a legacy valid record without changing its timestamps.
+            old = previous.get("observation")
+            if previous.get("validation") == "VALID" and isinstance(old, dict):
+                old = dict(old)
+                dues = [timestamp(value) for value in
+                        (previous.get("next_due_at"), old.get("next_due_at"))]
+                known = min((value for value in dues if value is not None), default=None)
+                if known is not None:
+                    old["next_due_at"] = known.isoformat()
+                    frontier = _release_frontier(factor, old)
+    current = record.get("observation", {})
+    identity = (factor, current.get("source"), current.get("series_id"))
+    checked = timestamp(checked_at)
+    valid = (record.get("validation") == "VALID"
+             and identity in _RELEASE_FRONTIER_SERIES
+             and eligible(record, checked, factor=factor,
+                          currency=_RELEASE_FRONTIER_SERIES[identity])[0])
+    if frontier is not None:
+        old_identity = (factor, frontier["source"], frontier["series_id"])
+        # A successor satisfies the old deadline, but never erases its period floor.
+        if valid and identity == old_identity and current["date"] > frontier["date"]:
+            latest = max(frontier["latest_date"], current["date"])
+            if current["date"] >= frontier["latest_date"]:
+                frontier = _release_frontier(factor, current) or frontier
+            frontier["latest_date"] = latest
+        elif record.get("validation") == "VALID" and identity == old_identity:
+            due = timestamp(current.get("next_due_at"))
+            known = timestamp(frontier["next_due_at"])
+            if current.get("next_due_at") is None or (due is not None and due > known):
+                current = dict(current)
+                current.update(next_due_at=frontier["next_due_at"],
+                               next_due_precision=frontier["next_due_precision"],
+                               needs_hourly_check=True)
+                record.update(observation=current, next_due_at=frontier["next_due_at"])
+            elif due is not None and due < known:
+                latest = frontier["latest_date"]
+                frontier = _release_frontier(factor, current)
+                frontier["latest_date"] = max(latest, frontier["latest_date"])
+    elif valid:
+        frontier = _release_frontier(factor, current)
+    if frontier is not None:
+        record["release_frontier"] = frontier
+    return record
+
+
+def _build_record(factor, score, observation, freshness, checked_at, previous=None, validation="VALID", reason=None):
     checked = timestamp(checked_at)
     if checked is None:
         raise ValueError("UTC_CHECK_TIME_REQUIRED")
