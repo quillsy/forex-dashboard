@@ -376,6 +376,22 @@ def eligible(record, now=None, factor=None, currency=None):
     checked = timestamp(record.get("checked_at"))
     if checked is None or checked > now:
         return False, "Erfolgreiche Aktualitätsprüfung fehlt"
+    if currency == "GBP" and factor in ("Inflation", "GDP"):
+        from official_ons import ons_live_release_metadata
+        try:
+            # Apply the original-series release floors even to legacy records
+            # without cached deadlines, and after failed checks or restarts.
+            ons_live_release_metadata(factor, observation, now=now, checked_at=checked)
+        except ValueError as error:
+            reason = {
+                "ONS_FUTURE_RELEASE": "ONS: vor dem amtlichen Veröffentlichungstermin",
+                "ONS_RELEASE_DUE": "ONS: fälliger Veröffentlichungs- oder Revisionsstand nicht bestätigt",
+                "ONS_CHECK_TIME_INVALID": "ONS: erfolgreicher Abruf seit Veröffentlichung nicht bestätigt",
+                "ONS_CHECK_BEFORE_RELEASE": "ONS: erfolgreicher Abruf seit Veröffentlichung nicht bestätigt",
+                "ONS_Q2_REVISION_DUE": "ONS-Q2-Revision fällig; aktueller QNA-Stand nicht bestätigt",
+                "ONS_Q3_REVISION_DUE": "ONS-Q3-Revision fällig; aktueller QNA-Stand nicht bestätigt",
+            }.get(str(error), "ONS: Veröffentlichungsbeleg oder Reihenbezug ungültig")
+            return False, reason
     if currency == "GBP" and factor == "Arbeitsmarkt":
         from official_ons import LABOUR_URL, LABOUR_2026_OCTOBER_DATE, LABOUR_2026_OCTOBER_DUE
         from zoneinfo import ZoneInfo

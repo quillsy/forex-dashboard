@@ -2442,3 +2442,191 @@ class PolicyProofAgeCollectorTests(unittest.TestCase):
         self.assertEqual(held['next_due_at'], record['next_due_at'])
         self.assertEqual(held['checked_at'], record['checked_at'])
         self.assertFalse(live.eligible(held, self.verified + timedelta(hours=1), 'Geldpolitik', 'EUR')[0])
+
+
+class ONSFollowingReleaseGateTests(unittest.TestCase):
+    """Synthetic boundary cases; future values are not provider observations."""
+    cpi_due = datetime(2026, 10, 21, 6, tzinfo=timezone.utc)
+    gdp_due = datetime(2026, 11, 12, 7, tzinfo=timezone.utc)
+    revision_due = datetime(2026, 12, 22, 7, tzinfo=timezone.utc)
+    cpi_url = 'https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/d7g7/mm23/data'
+    gdp_base = 'https://www.ons.gov.uk/economy/grossdomesticproductgdp/timeseries/ihyr/'
+
+    def observation(self, factor, *, successor=False, revised=False):
+        if factor == 'Inflation':
+            return {'value': 3.1, 'date': '2026-09-01' if successor else '2026-08-01',
+                    'source': 'ONS', 'series_id': 'D7G7', 'source_url': self.cpi_url,
+                    'frequency': 'monthly', 'unit': 'annual percent change',
+                    'release_date_known': '2026-10-21' if successor else '2026-09-16'}
+        family = 'QNA' if revised or not successor else 'PN2'
+        return {'value': 1.4, 'date': '2026-09-30' if successor else '2026-06-30',
+                'source': 'ONS', 'series_id': 'IHYR/' + family,
+                'source_url': self.gdp_base + family.lower(),
+                'frequency': 'quarterly', 'unit': 'real GDP YoY percent',
+                'seasonal_adjustment': 'SA',
+                'release_date_known': ('2026-12-22' if revised else '2026-11-12')
+                                      if successor else '2026-09-30'}
+
+    def record(self, factor, at, **options):
+        return live.build_record(factor, 25, self.observation(factor, **options),
+                                 'FRESH', at.isoformat())
+
+    def test_old_period_fails_at_due_despite_fresh_check_or_erased_deadline(self):
+        for factor, due in (('Inflation', self.cpi_due), ('GDP', self.gdp_due)):
+            before = due - timedelta(seconds=1)
+            self.assertTrue(live.eligible(self.record(factor, before), before, factor, 'GBP')[0])
+            for offset in (0, 1):
+                after = due + timedelta(seconds=offset)
+                row = self.record(factor, after)
+                row['next_due_at'] = None
+                row['observation'].pop('next_due_at', None)
+                with self.subTest(factor=factor, offset=offset):
+                    self.assertFalse(live.eligible(row, after, factor, 'GBP')[0])
+                    self.assertFalse(live.record_not_due(row, 'GBP', factor, after))
+
+    def test_new_period_and_same_day_vintage_cannot_pass_before_scheduled_hour(self):
+        for factor, due in (('Inflation', self.cpi_due), ('GDP', self.gdp_due)):
+            before = due - timedelta(seconds=1)
+            row = self.record(factor, before, successor=True)
+            self.assertFalse(live.eligible(row, before, factor, 'GBP')[0])
+            # Even a missing cached vintage cannot turn an early period valid.
+            row['observation'].pop('release_date_known')
+            self.assertFalse(live.eligible(row, before, factor, 'GBP')[0])
+
+    def test_successor_requires_true_vintage_identity_and_post_release_check(self):
+        for factor, due in (('Inflation', self.cpi_due), ('GDP', self.gdp_due)):
+            after = due + timedelta(seconds=1)
+            good = self.record(factor, after, successor=True)
+            self.assertTrue(live.eligible(good, after, factor, 'GBP')[0])
+            changes = ({'release_date_known': None}, {'release_date_known': 'invalid'},
+                       {'release_date_known': '2026-09-16'}, {'source': 'unverified'},
+                       {'series_id': 'other'}, {'source_url': 'https://example.invalid/series'})
+            for change in changes:
+                bad = copy.deepcopy(good); bad['observation'].update(change)
+                with self.subTest(factor=factor, change=change):
+                    self.assertFalse(live.eligible(bad, after, factor, 'GBP')[0])
+            bad = copy.deepcopy(good); bad['checked_at'] = (due-timedelta(seconds=1)).isoformat()
+            self.assertFalse(live.eligible(bad, after, factor, 'GBP')[0])
+
+    def test_q3_first_release_and_qna_revision_have_separate_deadlines(self):
+        before = self.revision_due - timedelta(seconds=1)
+        first = self.record('GDP', before, successor=True)
+        self.assertTrue(live.eligible(first, before, 'GDP', 'GBP')[0])
+        self.assertFalse(live.eligible(first, self.revision_due, 'GDP', 'GBP')[0])
+        early_revision = self.record('GDP', before, successor=True, revised=True)
+        self.assertFalse(live.eligible(early_revision, before, 'GDP', 'GBP')[0])
+        revised = self.record('GDP', self.revision_due, successor=True, revised=True)
+        # An unchanged numeric value may still be an evidenced new QNA vintage.
+        self.assertEqual(first['observation']['value'], revised['observation']['value'])
+        self.assertTrue(live.eligible(revised, self.revision_due, 'GDP', 'GBP')[0])
+        disguised = copy.deepcopy(revised)
+        disguised['observation'].update(series_id='IHYR/PN2', source_url=self.gdp_base+'pn2')
+        self.assertFalse(live.eligible(disguised, self.revision_due, 'GDP', 'GBP')[0])
+        old_q2 = self.record('GDP', self.gdp_due)
+        self.assertFalse(live.eligible(old_q2, self.gdp_due, 'GDP', 'GBP')[0])
+
+    def test_later_quarter_not_held_to_earlier_q3_revision_family(self):
+        now = datetime(2027, 2, 15, 9, tzinfo=timezone.utc)
+        observation = self.observation('GDP', successor=True)
+        observation.update(date='2026-12-31', release_date_known='2027-02-15')
+        row = live.build_record('GDP', 25, observation, 'FRESH', now.isoformat())
+        self.assertTrue(live.eligible(row, now, 'GDP', 'GBP')[0])
+
+    def test_restart_outage_and_renewed_old_answer_cannot_erase_due(self):
+        for factor, due in (('Inflation', self.cpi_due), ('GDP', self.gdp_due)):
+            before, after = due-timedelta(seconds=1), due+timedelta(seconds=1)
+            old = self.record(factor, before)
+            outage = live.build_record(factor, None, {}, 'UNAVAILABLE', after.isoformat(),
+                previous=old, validation='SOURCE_UNAVAILABLE')
+            self.assertEqual(outage['checked_at'], old['checked_at'])
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)/'live.json'
+                live.save({'model_version': live.MODEL, 'completed_at': after.isoformat(),
+                           'currencies': {'GBP': {factor: outage}}}, path)
+                restored = live.load(path)
+            self.assertIsNone(live.details('GBP', after, restored)[factor])
+            renewed = live.build_record(factor, 25, self.observation(factor), 'FRESH',
+                                        after.isoformat(), previous=restored['currencies']['GBP'][factor])
+            self.assertFalse(live.eligible(renewed, after, factor, 'GBP')[0])
+
+    def test_unknown_next_calendar_keeps_hourly_successful_check_requirement(self):
+        for factor, at, options in (
+            ('Inflation', self.cpi_due, {'successor': True}),
+            ('GDP', self.revision_due, {'successor': True, 'revised': True}),
+        ):
+            row = self.record(factor, at, **options)
+            self.assertIsNone(row['next_due_at'])
+            self.assertTrue(live.eligible(row, at+timedelta(minutes=59), factor, 'GBP')[0])
+            self.assertFalse(live.eligible(row, at+timedelta(hours=1), factor, 'GBP')[0])
+
+    def test_cpi_live_loader_carries_actual_vintage_without_rewriting_history(self):
+        import ast
+        import pandas as pd
+        from test_official_ons import ONSCpiContractTests
+        from test_core_regressions import load_core
+        checked = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
+        payload = ONSCpiContractTests.fixture()
+        node = next(n for n in ast.parse(Path(__file__).with_name('app.py').read_text()).body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'get_ons_cpi_data')
+        node.decorator_list = []
+        response = Mock(status_code=200); response.json.return_value = payload
+        namespace = {'requests': Mock(), 'pd': pd, 'datetime': datetime,
+                     'live_data': live, 'check_demo_active': lambda: False}
+        namespace['requests'].get.return_value = response
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<ons-live-loader>', 'exec'), namespace)
+        with patch('official_ons._now', return_value=checked):
+            frame, _, is_live = namespace['get_ons_cpi_data']()
+        self.assertTrue(is_live)
+        self.assertEqual(frame.iloc[0]['value'], 3.1)
+        self.assertEqual(frame.iloc[0]['release_date'], pd.Timestamp('2026-09-15T23:00:00'))
+        metadata = frame.attrs['ons_live_release']
+        self.assertEqual(metadata['release_date_known'], '2026-09-16')
+        self.assertEqual(metadata['next_due_at'], '2026-10-21T06:00:00+00:00')
+        self.assertTrue(metadata['needs_hourly_check'])
+        self.assertNotIn('published_at', metadata)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return checked.astimezone(tz) if tz else checked.replace(tzinfo=None)
+        core = load_core()
+        core.update(datetime=Clock, get_cpi_yoy_details=lambda *args: (
+            3.1, '2026-08-01', 'CPI_YOY', 'ONS', 'D7G7', 'FRESH'),
+            get_ons_cpi_data=Mock(return_value=(frame, checked, True)),
+            get_statsnz_cpi_data=Mock(), get_statcan_cpi_data=Mock())
+        with patch.dict(os.environ, {'FX_COLLECTOR': '1'}):
+            details = core['compute_currency_details']('GBP', '2026-10-13',
+                include_context=False, factors_to_refresh=('Inflation',))
+        observation = details['_observations']['Inflation']
+        self.assertEqual(observation['release_date_known'], '2026-09-16')
+        self.assertEqual(observation['next_due_at'], metadata['next_due_at'])
+        self.assertEqual(observation['value'], 3.1)
+        self.assertAlmostEqual(details['Inflation'], 55.0)
+        self.assertNotIn('published_at', observation)
+        row = live.build_record('Inflation', details['Inflation'], observation, 'FRESH', checked.isoformat())
+        restored = json.loads(json.dumps(row))
+        self.assertEqual(restored['next_due_at'], metadata['next_due_at'])
+        self.assertEqual(restored['observation']['release_date_known'], '2026-09-16')
+        self.assertFalse(live.eligible(restored, self.cpi_due, 'Inflation', 'GBP')[0])
+
+    def test_read_floor_propagates_to_complete_currency_and_pair_gate(self):
+        from test_core_regressions import load_core
+        from official_ons import LABOUR_URL
+        before = self.cpi_due-timedelta(seconds=1)
+        rows = {
+            'Inflation': self.record('Inflation', before),
+            'GDP': self.record('GDP', before),
+            'Arbeitsmarkt': live.build_record('Arbeitsmarkt', 25, {
+                'value': 4.0, 'date': '2026-08-31', 'source': 'ONS', 'series_id': 'MGSX/LMS',
+                'source_url': LABOUR_URL, 'release_date_known': '2026-10-20'}, 'FRESH', before.isoformat()),
+            'PMI': live.build_record('PMI', 25, {'value': 55.0, 'date': '2026-09-30'}, 'FRESH', before.isoformat()),
+            'Geldpolitik': live.build_record('Geldpolitik', 25, {
+                'policy_rate': 4.0, 'yield_2y': 4.0, 'date': '2026-10-21'}, 'FRESH', before.isoformat()),
+        }
+        data = {'model_version': live.MODEL, 'completed_at': before.isoformat(), 'currencies': {'GBP': rows}}
+        core = load_core()
+        self.assertTrue(core['pair_core_is_complete'](live.details('GBP', before, data)))
+        blocked = live.details('GBP', self.cpi_due, data)
+        self.assertIsNone(blocked['Inflation'])
+        self.assertIsNotNone(blocked['GDP'])
+        self.assertFalse(core['pair_core_is_complete'](blocked))
