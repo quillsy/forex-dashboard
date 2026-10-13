@@ -21,7 +21,15 @@ FILES = ('live_core_data.json', 'data_collection_status.json', '.policy_rates_ca
 MAX_BYTES = 2 * 1024 * 1024
 POLL_SECONDS = 300
 SHA = re.compile(r'[0-9a-f]{40}')
-RECORD = set('factor score validation reason freshness checked_at last_attempt_at published_at next_due_at expires_at observation last_error'.split())
+RECORD = set('factor score validation reason freshness checked_at last_attempt_at published_at next_due_at expires_at observation last_error release_frontier'.split())
+FRONTIER = set('source series_id date latest_date next_due_at next_due_precision'.split())
+FRONTIER_SERIES = {
+    ('AUD', 'Arbeitsmarkt'): ('ABS', 'LF:M13.3.1599.20.AUS.M'),
+    ('AUD', 'GDP'): ('ABS', 'ANA_AGG:M1.GPM.20.AUS.Q'),
+    ('NZD', 'Arbeitsmarkt'): ('Stats NZ', 'HLFS:unemployment_rate:Total:SA:Q'),
+    ('NZD', 'GDP'): ('Stats NZ GDP expenditure', 'SNEQ.SG02RSC00B15'),
+}
+FRONTIER_PRECISIONS = {None, 'official_scheduled_time', 'date_only_start_of_NZ_day', 'date_only_start_of_AU_day'}
 POLICY = set('currency rate previous_rate upper_bound instrument central_bank rate_effective_date last_policy_decision_date verified_at verification_timestamp last_verified_at primary_source secondary_source verification_evidence verification_status last_attempt_at last_attempt_error candidate_rate'.split())
 EVIDENCE = set('currency instrument source_url rate retrieved_at rate_effective_date previous_rate observation_date upper_bound last_policy_decision_date decision_source effective_date_source valid_until announced_rate announced_effective_date deadline_basis superseded_terms_source superseded_terms_rate superseded_terms_revision_date'.split())
 PROVIDER = set('requests_this_run status remaining limit reset_at budget_evidence outcomes_this_run last_attempt_at last_checked_at requests_observed_utc_day counted_day_utc requests_reserved_utc_day requests_uncertain_utc_day prior_usage_uncertain usage_complete last_failure_at data_status provider_response_status retry_after_at'.split())
@@ -123,6 +131,30 @@ def _number(value):
     return value
 
 
+def _frontier_day(value, completed):
+    if type(value) is not str or re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) is None:
+        raise Invalid()
+    try:
+        day = datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise Invalid() from None
+    if day > completed.date():
+        raise Invalid()
+    return day
+
+
+def _validate_frontier(frontier, currency, factor, completed):
+    _keys(frontier, FRONTIER, FRONTIER)
+    _scalars(frontier)
+    if (frontier['source'], frontier['series_id']) != FRONTIER_SERIES.get((currency, factor)):
+        raise Invalid()
+    reference = _frontier_day(frontier['date'], completed)
+    latest = _frontier_day(frontier['latest_date'], completed)
+    if latest < reference or frontier['next_due_precision'] not in FRONTIER_PRECISIONS:
+        raise Invalid()
+    _time(frontier['next_due_at'])
+
+
 def _validate(documents, now):
     import live_data
     core, status, policies = [documents[name] for name in FILES]
@@ -147,7 +179,9 @@ def _validate(documents, now):
             _keys(record, RECORD, {'score', 'validation', 'observation', 'last_attempt_at'})
             if record['validation'] not in {'VALID', 'UNVERIFIED', 'SOURCE_UNAVAILABLE', 'FAILED'}:
                 raise Invalid()
-            _scalars(record, {'observation'})
+            _scalars(record, {'observation', 'release_frontier'})
+            if 'release_frontier' in record:
+                _validate_frontier(record['release_frontier'], currency, factor, completed)
             observation = record['observation']
             _keys(observation, live_data.OBS_FIELDS)
             if any(isinstance(v, (dict, list)) for v in observation.values()):

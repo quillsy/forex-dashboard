@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -13,6 +14,139 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def test_abs_statsnz_known_deadline_survives_missing_and_shifted_calendar(self):
+        cases = (
+            ('AUD', 'Arbeitsmarkt', 'ABS', 'LF:M13.3.1599.20.AUS.M', '2026-08-31', '2026-10-15T00:30:00+00:00'),
+            ('AUD', 'GDP', 'ABS', 'ANA_AGG:M1.GPM.20.AUS.Q', '2026-06-30', '2026-12-02T00:30:00+00:00'),
+            ('NZD', 'Arbeitsmarkt', 'Stats NZ', 'HLFS:unemployment_rate:Total:SA:Q', '2026-06-30', '2026-11-03T11:00:00+00:00'),
+            ('NZD', 'GDP', 'Stats NZ GDP expenditure', 'SNEQ.SG02RSC00B15', '2026-06-30', '2026-12-16T11:00:00+00:00'),
+        )
+        for currency, factor, source, series, date, deadline in cases:
+            due = datetime.fromisoformat(deadline)
+            before, after = due - timedelta(minutes=1), due + timedelta(minutes=1)
+            obs = {'value': 4.0, 'date': date, 'source': source, 'series_id': series,
+                   'frequency': 'monthly' if currency == 'AUD' and factor == 'Arbeitsmarkt' else 'quarterly',
+                   'next_due_at': deadline, 'next_due_precision': 'official_scheduled_time'}
+            previous = live.build_record(factor, 25, obs, 'FRESH', before.isoformat())
+            for proposed in (None, (due + timedelta(days=10)).isoformat()):
+                with self.subTest(currency=currency, factor=factor, proposed=proposed):
+                    incoming = dict(obs, next_due_at=proposed)
+                    renewed = live.build_record(factor, 25, incoming, 'FRESH', before.isoformat(), previous)
+                    self.assertEqual(incoming['next_due_at'], proposed)  # caller unchanged
+                    self.assertEqual(renewed['next_due_at'], deadline)
+                    self.assertEqual(renewed['observation']['next_due_at'], deadline)
+                    self.assertTrue(live.eligible(renewed, before, factor=factor, currency=currency)[0])
+                    self.assertFalse(live.eligible(renewed, due, factor=factor, currency=currency)[0])
+                    self.assertFalse(live.record_not_due(renewed, currency, factor, due))
+                    for restart in range(2):
+                        renewed = json.loads(json.dumps(renewed))
+                        renewed = live.build_record(factor, 25, incoming, 'FRESH', after.isoformat(), renewed)
+                        self.assertEqual(renewed['next_due_at'], deadline)
+                        self.assertFalse(live.eligible(renewed, after, factor=factor, currency=currency)[0])
+                    outage = live.build_record(factor, None, {}, 'UNAVAILABLE', after.isoformat(),
+                                              renewed, 'SOURCE_UNAVAILABLE')
+                    self.assertEqual(outage['checked_at'], renewed['checked_at'])
+                    self.assertFalse(live.eligible(outage, after, factor=factor, currency=currency)[0])
+
+    def test_release_frontier_new_period_earlier_deadline_and_identity_boundaries(self):
+        due = datetime(2026, 10, 15, 0, 30, tzinfo=timezone.utc)
+        after = due + timedelta(minutes=1)
+        obs = {'value': 4.0, 'date': '2026-08-31', 'source': 'ABS',
+               'series_id': 'LF:M13.3.1599.20.AUS.M', 'frequency': 'monthly',
+               'next_due_at': due.isoformat()}
+        old = live.build_record('Arbeitsmarkt', 25, obs, 'FRESH', (due-timedelta(minutes=1)).isoformat())
+        newer = live.build_record('Arbeitsmarkt', 25, dict(obs,date='2026-09-30', next_due_at=None),
+                                 'FRESH', after.isoformat(), old)
+        self.assertIsNone(newer['next_due_at'])
+        self.assertTrue(live.eligible(newer, after, factor='Arbeitsmarkt', currency='AUD')[0])
+        self.assertFalse(live.eligible(newer, after, factor='Arbeitsmarkt', currency='NZD')[0])
+        self.assertFalse(live.eligible(newer, after+timedelta(hours=1), factor='Arbeitsmarkt', currency='AUD')[0])
+        earlier = (due-timedelta(minutes=5)).isoformat()
+        advanced = live.build_record('Arbeitsmarkt',25,dict(obs,next_due_at=earlier),'FRESH',after.isoformat(),old)
+        self.assertEqual(advanced['next_due_at'], earlier)
+        older = live.build_record('Arbeitsmarkt',25,dict(obs,date='2026-07-31',next_due_at=None),'FRESH',after.isoformat(),old)
+        self.assertEqual(older['next_due_at'], due.isoformat())
+        self.assertFalse(live.eligible(older, after, factor='Arbeitsmarkt', currency='AUD')[0])
+        for changed in ({'series_id':'other'}, {'source':'other'}, {'date':'invalid'}):
+            prior = copy.deepcopy(old); prior['observation'].update(changed)
+            prior.pop('release_frontier', None)  # malformed legacy identity, no independent frontier
+            separate = live.build_record('Arbeitsmarkt',25,dict(obs,next_due_at=None),'FRESH',after.isoformat(),prior)
+            self.assertIsNone(separate['next_due_at'])
+        malformed = live.build_record('Arbeitsmarkt',25,dict(obs,next_due_at='invalid'),'FRESH',after.isoformat(),old)
+        self.assertFalse(live.eligible(malformed, after, factor='Arbeitsmarkt', currency='AUD')[0])
+
+    def test_release_frontier_survives_invalidations_disk_restart_and_reader_metadata_loss(self):
+        cases = (
+            ('AUD','Arbeitsmarkt','ABS','LF:M13.3.1599.20.AUS.M','2026-08-31','2026-09-30','2026-10-15T00:30:00+00:00'),
+            ('AUD','GDP','ABS','ANA_AGG:M1.GPM.20.AUS.Q','2026-06-30','2026-09-30','2026-12-02T00:30:00+00:00'),
+            ('NZD','Arbeitsmarkt','Stats NZ','HLFS:unemployment_rate:Total:SA:Q','2026-06-30','2026-09-30','2026-11-03T11:00:00+00:00'),
+            ('NZD','GDP','Stats NZ GDP expenditure','SNEQ.SG02RSC00B15','2026-06-30','2026-09-30','2026-12-16T11:00:00+00:00'),
+        )
+        for currency,factor,source,series,date,new_date,deadline in cases:
+            due = datetime.fromisoformat(deadline); after = due+timedelta(minutes=1)
+            obs = {'value':4.0,'date':date,'source':source,'series_id':series,'next_due_at':deadline,
+                   'frequency':'monthly' if currency=='AUD' and factor=='Arbeitsmarkt' else 'quarterly'}
+            prior = live.build_record(factor,25,obs,'FRESH',(due-timedelta(minutes=1)).isoformat())
+            for invalid_obs,score,validation in (({},None,'UNVERIFIED'),({},None,'FAILED'),
+                    (dict(obs,next_due_at='invalid'),25,'VALID')):
+                with self.subTest(currency=currency,factor=factor,validation=validation):
+                    invalid = live.build_record(factor,score,invalid_obs,'FRESH',after.isoformat(),prior,validation)
+                    self.assertFalse(live.eligible(invalid,after,factor=factor,currency=currency)[0])
+                    with tempfile.TemporaryDirectory() as folder:
+                        path=Path(folder)/'live.json'
+                        live.save({'model_version':live.MODEL,'completed_at':after.isoformat(),'currencies':{currency:{factor:invalid}}},path)
+                        restarted=live.load(path)['currencies'][currency][factor]
+                    recovered = live.build_record(factor,25,dict(obs,next_due_at=None),'FRESH',after.isoformat(),restarted)
+                    self.assertEqual(recovered['next_due_at'],deadline)
+                    self.assertFalse(live.eligible(recovered,after,factor=factor,currency=currency)[0])
+                    # The reader independently protects partial legacy metadata.
+                    recovered['next_due_at']=None; recovered['observation']['next_due_at']=None
+                    self.assertFalse(live.eligible(recovered,after,factor=factor,currency=currency)[0])
+                    successor=live.build_record(factor,25,dict(obs,date=new_date,next_due_at=None),'FRESH',after.isoformat(),recovered)
+                    self.assertEqual(successor['release_frontier']['latest_date'],new_date)
+                    self.assertTrue(live.eligible(successor,after,factor=factor,currency=currency)[0])
+                    self.assertFalse(live.eligible(successor,after+timedelta(hours=1),factor=factor,currency=currency)[0])
+                    successor=json.loads(json.dumps(successor))
+                    rollback=live.build_record(factor,25,dict(obs,next_due_at=None),'FRESH',after.isoformat(),successor)
+                    self.assertFalse(live.eligible(rollback,after,factor=factor,currency=currency)[0])
+                    invalid_again=live.build_record(factor,None,{},'UNAVAILABLE',after.isoformat(),successor,'FAILED')
+                    rollback=live.build_record(factor,25,dict(obs,next_due_at=None),'FRESH',after.isoformat(),json.loads(json.dumps(invalid_again)))
+                    self.assertFalse(live.eligible(rollback,after,factor=factor,currency=currency)[0])
+
+    def test_release_frontier_high_water_period_and_au_date_precision(self):
+        due=datetime(2026,10,15,0,30,tzinfo=timezone.utc)
+        obs={'value':4.0,'date':'2026-08-31','source':'ABS','series_id':'LF:M13.3.1599.20.AUS.M',
+             'frequency':'monthly','next_due_at':due.isoformat(),'next_due_precision':'date_only_start_of_AU_day'}
+        row=live.build_record('Arbeitsmarkt',25,obs,'FRESH',(due-timedelta(minutes=1)).isoformat())
+        checked=datetime(2026,11,5,12,tzinfo=timezone.utc)
+        for period in ('2026-09-30','2026-10-31'):
+            row=live.build_record('Arbeitsmarkt',25,dict(obs,date=period,next_due_at=None),'FRESH',checked.isoformat(),row)
+            self.assertTrue(live.eligible(row,checked,factor='Arbeitsmarkt',currency='AUD')[0])
+            self.assertEqual(row['release_frontier']['next_due_precision'],'date_only_start_of_AU_day')
+        for old_period in ('2026-08-31','2026-09-30'):
+            rollback=live.build_record('Arbeitsmarkt',25,dict(obs,date=old_period,next_due_at=None),'FRESH',checked.isoformat(),json.loads(json.dumps(row)))
+            self.assertFalse(live.eligible(rollback,checked,factor='Arbeitsmarkt',currency='AUD')[0])
+            self.assertEqual(rollback['release_frontier']['latest_date'],'2026-10-31')
+        recovered=live.build_record('Arbeitsmarkt',25,dict(obs,date='2026-10-31',next_due_at=None),'FRESH',checked.isoformat(),rollback)
+        self.assertTrue(live.eligible(recovered,checked,factor='Arbeitsmarkt',currency='AUD')[0])
+        self.assertIsNone(recovered['next_due_at'])
+
+
+    def test_ea21_known_august_observation_blocks_successfully_rechecked_july(self):
+        confirmed = datetime(2026,10,2,23,51,1,459554,tzinfo=timezone.utc)
+        obs = {'value':6.4, 'date':'2026-07-31', 'reference_period':'2026-07',
+               'source':'Eurostat','series_id':'une_rt_m:M.SA.TOTAL.PC_ACT.T.EA21',
+               'frequency':'M','unit':'PC_ACT','seasonal_adjustment':'SA','geography':'EA21'}
+        for at in (confirmed, datetime(2026,10,13,16,tzinfo=timezone.utc)):
+            row = live.build_record('Arbeitsmarkt',10,obs,'FRESH',at.isoformat())
+            for restart in (False, True):
+                if restart: row = json.loads(json.dumps(row))
+                allowed, reason = live.eligible(row, at, factor='Arbeitsmarkt', currency='EUR')
+                self.assertFalse(allowed); self.assertIn('2026-08 (EA21)', reason)
+                self.assertIsNone(live.details('EUR',now=at,data={'completed_at':at.isoformat(),'currencies':{'EUR':{'Arbeitsmarkt':row}}})['Arbeitsmarkt'])
+            august = live.build_record('Arbeitsmarkt',10,dict(obs,date='2026-08-31',reference_period='2026-08'),'FRESH',at.isoformat())
+            self.assertTrue(live.eligible(august,at,factor='Arbeitsmarkt',currency='EUR')[0])
+
     def test_bls_original_labour_pdf_requires_its_exact_release_contract(self):
         from official_bls import _bls_pdf_url
 
@@ -255,14 +389,16 @@ class LiveDataTests(unittest.TestCase):
 
     def test_all_known_release_floors_block_old_periods(self):
         from source_contracts import KNOWN_RELEASES
-        now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
+        baseline = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
         for (currency, factor), release in KNOWN_RELEASES.items():
+            now = max(baseline, live.timestamp(release.get('published_at') or release['confirmed_at']) + timedelta(seconds=1))
             with self.subTest(currency=currency, factor=factor):
                 old_date = '2026-09-03' if factor == 'Geldpolitik' else '2026-03-31' if factor == 'GDP' else '2026-06-01'
                 row = live.build_record(factor, 20, {'value': 2.5, 'date': old_date, 'policy_rate': 4.0, 'yield_2y': 4.34},
                                         'AGING', now.isoformat())
                 self.assertFalse(live.eligible(row, now, currency=currency)[0])
-                row['observation']['date'] = release['period_start']
+                row = live.build_record(factor,20,dict(row['observation'],date=release['period_start']),
+                                        'AGING',now.isoformat())
                 self.assertTrue(live.eligible(row, now, currency=currency)[0])
 
     def test_known_release_is_enforced_on_persisted_data_and_status(self):

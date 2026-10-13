@@ -98,6 +98,15 @@ KNOWN_RELEASES[("CAD", "Arbeitsmarkt")] = {
     "time_basis": "08:30 Eastern official rule; https://www.statcan.gc.ca/en/bcp/daily-key-data-tables",
 }
 
+# Exact fixed-EA21, total, seasonally adjusted unemployment observation read
+# from une_rt_m on 2 October. This is an observation-time floor, not an
+# invented publication hour or the calendar's changing-composition headline.
+KNOWN_RELEASES[("EUR", "Arbeitsmarkt")] = {
+    "period_start": "2026-08-01", "label": "2026-08 (EA21)",
+    "confirmed_at": "2026-10-02T23:51:01.459554+00:00",
+    "source": "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/une_rt_m?freq=M&s_adj=SA&age=TOTAL&unit=PC_ACT&sex=T&geo=EA21&lang=EN&sinceTimePeriod=2025-01",
+}
+
 KNOWN_RELEASES[("USD", "Geldpolitik")] = {
     "period_start": "2026-09-04", "label": "2026-09-04",
     "confirmed_at": "2026-09-08T10:00:12+00:00",
