@@ -28,6 +28,7 @@ FRONTIER_SERIES = {
     ('AUD', 'GDP'): ('ABS', 'ANA_AGG:M1.GPM.20.AUS.Q'),
     ('NZD', 'Arbeitsmarkt'): ('Stats NZ', 'HLFS:unemployment_rate:Total:SA:Q'),
     ('NZD', 'GDP'): ('Stats NZ GDP expenditure', 'SNEQ.SG02RSC00B15'),
+    ('EUR', 'GDP'): ('Eurostat', 'namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21'),
 }
 FRONTIER_PRECISIONS = {None, 'official_scheduled_time', 'date_only_start_of_NZ_day', 'date_only_start_of_AU_day'}
 POLICY = set('currency rate previous_rate upper_bound instrument central_bank rate_effective_date last_policy_decision_date verified_at verification_timestamp last_verified_at primary_source secondary_source verification_evidence verification_status last_attempt_at last_attempt_error candidate_rate'.split())
@@ -152,7 +153,16 @@ def _validate_frontier(frontier, currency, factor, completed):
     latest = _frontier_day(frontier['latest_date'], completed)
     if latest < reference or frontier['next_due_precision'] not in FRONTIER_PRECISIONS:
         raise Invalid()
-    _time(frontier['next_due_at'])
+    if (currency, factor) == ('EUR', 'GDP'):
+        import calendar
+        if any(day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
+               for day in (reference, latest)):
+            raise Invalid()
+    if frontier['next_due_at'] is None:
+        if (currency, factor) != ('EUR', 'GDP') or frontier['next_due_precision'] is not None:
+            raise Invalid()
+    else:
+        _time(frontier['next_due_at'])
 
 
 def _validate(documents, now):

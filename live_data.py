@@ -285,6 +285,9 @@ def eligible(record, now=None, factor=None, currency=None):
         reference = datetime.strptime(observation.get("date"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
+    identity = (factor, observation.get("source"), observation.get("series_id"))
+    if identity in _PERIOD_ONLY_FRONTIER_SERIES and not _ea21_gdp_observation(observation):
+        return False, "Eurostat-GDP: Originalreihe oder Quartalsdefinition widersprüchlich"
     if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt"):
         from official_bls import PINNED_DUES, _api_url, _bls_pdf_url, _pdf_url, _raw_decimal, _successor, BlsInvalid
         series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
@@ -368,7 +371,8 @@ def eligible(record, now=None, factor=None, currency=None):
         latest_reference = datetime.strptime(frontier["latest_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if reference < latest_reference:
             return False, "Ältere Referenzperiode als bereits geprüft"
-        if reference <= old_reference and now >= timestamp(frontier["next_due_at"]):
+        frontier_due = timestamp(frontier["next_due_at"])
+        if reference <= old_reference and frontier_due is not None and now >= frontier_due:
             return False, "Bekannte Folge-Veröffentlichung fällig; neue Referenzperiode nicht bestätigt"
     if any(record.get(field) is not None and timestamp(record[field]) is None
            for field in ("published_at", "next_due_at", "checked_at", "expires_at")):
@@ -546,7 +550,30 @@ _RELEASE_FRONTIER_SERIES = {
     ("GDP", "ABS", "ANA_AGG:M1.GPM.20.AUS.Q"): "AUD",
     ("Arbeitsmarkt", "Stats NZ", "HLFS:unemployment_rate:Total:SA:Q"): "NZD",
     ("GDP", "Stats NZ GDP expenditure", "SNEQ.SG02RSC00B15"): "NZD",
+    ("GDP", "Eurostat", "namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21"): "EUR",
 }
+
+# The original EA21 series supplies observations without a confirmed release
+# calendar. Keep its observed quarter floor without inventing a release time.
+_PERIOD_ONLY_FRONTIER_SERIES = {
+    ("GDP", "Eurostat", "namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21"),
+}
+
+
+def _ea21_gdp_observation(observation):
+    """Bind the learned quarter floor to the existing original API contract."""
+    fields = {"source": "Eurostat", "series_id": "namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21",
+              "source_url": "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/namq_10_gdp",
+              "unit": "CLV_PCH_SM", "frequency": "Q", "seasonal_adjustment": "SCA", "geography": "EA21"}
+    if any(observation.get(key) != value for key, value in fields.items()):
+        return False
+    try:
+        day = datetime.strptime(observation.get("date"), "%Y-%m-%d").date()
+        import calendar
+        return (day.month in (3, 6, 9, 12) and day.day == calendar.monthrange(day.year, day.month)[1]
+                and observation.get("reference_period") == f"{day.year}-Q{day.month // 3}")
+    except (TypeError, ValueError):
+        return False
 
 
 def _release_frontier(factor, candidate):
@@ -560,12 +587,21 @@ def _release_frontier(factor, candidate):
         latest = datetime.strptime(candidate.get("latest_date", candidate.get("date")), "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return None
-    if identity not in _RELEASE_FRONTIER_SERIES or due is None or latest < reference:
+    period_only = identity in _PERIOD_ONLY_FRONTIER_SERIES
+    if (identity not in _RELEASE_FRONTIER_SERIES or latest < reference
+            or (due is None and not period_only)
+            or (candidate.get("next_due_at") is not None and due is None)):
         return None
     precision = candidate.get("next_due_precision")
+    if period_only:
+        import calendar
+        if (any(day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
+                for day in (reference, latest))
+                or (due is None and precision is not None)):
+            return None
     return {"source": identity[1], "series_id": identity[2], "date": reference.isoformat(),
             "latest_date": latest.isoformat(),
-            "next_due_at": due.isoformat(),
+            "next_due_at": due.isoformat() if due is not None else None,
             "next_due_precision": precision if precision in (
                 "official_scheduled_time", "date_only_start_of_NZ_day", "date_only_start_of_AU_day") else None}
 
@@ -585,8 +621,15 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
                 dues = [timestamp(value) for value in
                         (previous.get("next_due_at"), old.get("next_due_at"))]
                 known = min((value for value in dues if value is not None), default=None)
-                if known is not None:
-                    old["next_due_at"] = known.isoformat()
+                old_identity = (factor, old.get("source"), old.get("series_id"))
+                old_checked = timestamp(previous.get("checked_at"))
+                qualified_period = (old_identity in _PERIOD_ONLY_FRONTIER_SERIES
+                                    and old_checked is not None
+                                    and old_checked <= timestamp(checked_at)
+                                    and eligible(previous, old_checked, factor=factor,
+                                                 currency=_RELEASE_FRONTIER_SERIES[old_identity])[0])
+                if (known is not None and old_identity not in _PERIOD_ONLY_FRONTIER_SERIES) or qualified_period:
+                    old["next_due_at"] = known.isoformat() if known is not None else None
                     frontier = _release_frontier(factor, old)
     current = record.get("observation", {})
     identity = (factor, current.get("source"), current.get("series_id"))
@@ -606,13 +649,13 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
         elif record.get("validation") == "VALID" and identity == old_identity:
             due = timestamp(current.get("next_due_at"))
             known = timestamp(frontier["next_due_at"])
-            if current.get("next_due_at") is None or (due is not None and due > known):
+            if known is not None and (current.get("next_due_at") is None or (due is not None and due > known)):
                 current = dict(current)
                 current.update(next_due_at=frontier["next_due_at"],
                                next_due_precision=frontier["next_due_precision"],
                                needs_hourly_check=True)
                 record.update(observation=current, next_due_at=frontier["next_due_at"])
-            elif due is not None and due < known:
+            elif due is not None and (known is None or due < known):
                 latest = frontier["latest_date"]
                 frontier = _release_frontier(factor, current)
                 frontier["latest_date"] = max(latest, frontier["latest_date"])
