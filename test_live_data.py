@@ -14,6 +14,109 @@ from provider_transport import CollectorTransport
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 
 class LiveDataTests(unittest.TestCase):
+    def eurostat_gdp_period(self, quarter='2026-Q3', value=1.3):
+        # Pure future fixture: this is not a published Q3 value or release time.
+        from test_official_macro import fixture
+        from official_macro import parse_eurostat_observation
+        data = fixture('GDP')
+        if quarter == '2026-Q3':
+            data['dimension']['time']['category']['index'][quarter] = 2
+            data['size'][-1] = 3
+            data['value']['2'] = value
+        else:
+            data['value']['1'] = value
+        return parse_eurostat_observation(data, 'GDP', now=datetime(2026,11,1,12,tzinfo=timezone.utc))
+
+    def test_eurostat_gdp_qualified_quarter_cannot_roll_back_after_restart(self):
+        now = datetime(2026,11,1,12,tzinfo=timezone.utc)
+        latest = self.eurostat_gdp_period()
+        prior = live.build_record('GDP',25,latest,'FRESH',(now-timedelta(seconds=1)).isoformat())
+        self.assertTrue(live.eligible(prior,now,'GDP','EUR')[0])
+        for restart in range(2):
+            with tempfile.TemporaryDirectory() as folder:
+                path=Path(folder)/'live.json'
+                live.save({'model_version':live.MODEL,'currencies':{'EUR':{'GDP':prior}}},path)
+                prior=live.load(path)['currencies']['EUR']['GDP']
+            earlier = self.eurostat_gdp_period('2026-Q2',1.2)
+            prior = live.build_record('GDP',20,earlier,'FRESH',now.isoformat(),prior)
+            allowed,reason=live.eligible(prior,now,'GDP','EUR')
+            self.assertFalse(allowed); self.assertIn('Ältere Referenzperiode',reason)
+            self.assertEqual(prior['release_frontier']['latest_date'],'2026-09-30')
+            self.assertIsNone(prior['next_due_at'])
+            self.assertIsNone(prior['published_at'])
+            view=live.details('EUR',now,{'model_version':live.MODEL,'completed_at':now.isoformat(),'currencies':{'EUR':{'GDP':prior}}})
+            self.assertIsNone(view['GDP']); self.assertIn('Ältere Referenzperiode',view['_blocking_reasons']['GDP'])
+
+    def test_eurostat_gdp_floor_survives_invalid_answers_and_recovers_same_quarter(self):
+        now=datetime(2026,11,1,12,tzinfo=timezone.utc)
+        obs=self.eurostat_gdp_period()
+        prior=live.build_record('GDP',25,obs,'FRESH',(now-timedelta(seconds=1)).isoformat())
+        for score,incoming,validation in ((None,{},'FAILED'),(None,{},'UNVERIFIED'),
+                (25,dict(obs,date='invalid'),'VALID'),(25,dict(obs,next_due_at='invalid'),'VALID')):
+            with self.subTest(validation=validation,incoming=incoming):
+                failed=live.build_record('GDP',score,incoming,'UNAVAILABLE',now.isoformat(),prior,validation)
+                self.assertFalse(live.eligible(failed,now,'GDP','EUR')[0])
+                failed=json.loads(json.dumps(failed))
+                rollback=live.build_record('GDP',20,self.eurostat_gdp_period('2026-Q2'),'FRESH',now.isoformat(),failed)
+                self.assertFalse(live.eligible(rollback,now,'GDP','EUR')[0])
+                revised=live.build_record('GDP',30,dict(obs,value=1.4),'FRESH',now.isoformat(),rollback)
+                self.assertTrue(live.eligible(revised,now,'GDP','EUR')[0])
+                self.assertEqual(revised['observation']['value'],1.4)
+                self.assertIsNone(revised['next_due_at'])
+                self.assertFalse(live.eligible(revised,now+timedelta(hours=1),'GDP','EUR')[0])
+
+    def test_eurostat_gdp_legacy_floor_requires_a_qualified_previous_check(self):
+        now=datetime(2026,11,1,12,tzinfo=timezone.utc)
+        obs=self.eurostat_gdp_period()
+        prior=live.build_record('GDP',25,obs,'FRESH',(now-timedelta(seconds=1)).isoformat())
+        prior.pop('release_frontier')
+        rollback=live.build_record('GDP',20,self.eurostat_gdp_period('2026-Q2'),'FRESH',now.isoformat(),prior)
+        self.assertFalse(live.eligible(rollback,now,'GDP','EUR')[0])
+        for changes in ({'validation':'UNVERIFIED'},{'score':None},{'freshness':'UNAVAILABLE'},
+                {'checked_at':(now+timedelta(seconds=1)).isoformat()}, {'expires_at':prior['checked_at']},
+                {'next_due_at':'invalid'}):
+            bad=copy.deepcopy(prior); bad.update(changes)
+            current=live.build_record('GDP',20,self.eurostat_gdp_period('2026-Q2'),'FRESH',now.isoformat(),bad)
+            self.assertTrue(live.eligible(current,now,'GDP','EUR')[0])
+            self.assertEqual(current['release_frontier']['latest_date'],'2026-06-30')
+        for key,value in (('source_url','https://unverified.example/data'),('unit','GDP level'),
+                ('frequency','M'),('seasonal_adjustment','NSA'),('geography','EU27_2020'),
+                ('reference_period','2026-Q2'),('date','2026-09-29')):
+            bad=copy.deepcopy(prior); bad['observation'][key]=value
+            self.assertFalse(live.eligible(bad,now,'GDP','EUR')[0])
+            current=live.build_record('GDP',20,self.eurostat_gdp_period('2026-Q2'),'FRESH',now.isoformat(),bad)
+            self.assertTrue(live.eligible(current,now,'GDP','EUR')[0])
+            self.assertEqual(current['release_frontier']['latest_date'],'2026-06-30')
+
+    def test_eurostat_gdp_floor_does_not_accept_foreign_identity_or_future_quarter(self):
+        now=datetime(2026,11,1,12,tzinfo=timezone.utc)
+        obs=self.eurostat_gdp_period()
+        prior=live.build_record('GDP',25,obs,'FRESH',now.isoformat())
+        for changes in ({'source':'Other'},{'series_id':'namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.CH'},
+                {'date':'2026-12-31'},{'next_due_at':'invalid'}):
+            current=live.build_record('GDP',25,dict(obs,**changes),'FRESH',now.isoformat(),prior)
+            self.assertFalse(live.eligible(current,now,'GDP','EUR')[0])
+            self.assertEqual(current['release_frontier']['latest_date'],'2026-09-30')
+        outage=live.build_record('GDP',None,{},'UNAVAILABLE',(now+timedelta(minutes=1)).isoformat(),prior,'SOURCE_UNAVAILABLE')
+        self.assertEqual(outage['checked_at'],prior['checked_at'])
+        self.assertTrue(live.eligible(outage,now+timedelta(minutes=1),'GDP','EUR')[0])
+        self.assertFalse(live.eligible(outage,now+timedelta(hours=1),'GDP','EUR')[0])
+
+    def test_eurostat_gdp_unqualified_successor_with_deadline_cannot_poison_floor(self):
+        now=datetime(2027,1,15,12,tzinfo=timezone.utc)
+        obs=self.eurostat_gdp_period()
+        prior=live.build_record('GDP',25,obs,'FRESH',now.isoformat())
+        self.assertTrue(live.eligible(prior,now,'GDP','EUR')[0])
+        bad=dict(obs,date='2026-12-31',reference_period='2026-Q4',
+                 source_url='https://unverified.example/data',next_due_at='2027-02-01T12:00:00+00:00')
+        failed=live.build_record('GDP',30,bad,'FRESH',now.isoformat(),prior)
+        self.assertFalse(live.eligible(failed,now,'GDP','EUR')[0])
+        self.assertEqual(failed['release_frontier'],prior['release_frontier'])
+        recovered=live.build_record('GDP',25,obs,'FRESH',now.isoformat(),json.loads(json.dumps(failed)))
+        self.assertTrue(live.eligible(recovered,now,'GDP','EUR')[0])
+        self.assertEqual(recovered['release_frontier']['latest_date'],'2026-09-30')
+        self.assertIsNone(recovered['next_due_at'])
+
     def test_abs_statsnz_known_deadline_survives_missing_and_shifted_calendar(self):
         cases = (
             ('AUD', 'Arbeitsmarkt', 'ABS', 'LF:M13.3.1599.20.AUS.M', '2026-08-31', '2026-10-15T00:30:00+00:00'),

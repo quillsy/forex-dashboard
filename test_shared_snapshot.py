@@ -29,6 +29,9 @@ def fixture(completed=NOW - timedelta(minutes=1)):
 
 def frontier(currency='AUD', factor='Arbeitsmarkt'):
     source, series_id = shared.FRONTIER_SERIES[(currency, factor)]
+    if (currency, factor) == ('EUR', 'GDP'):
+        return {'source': source, 'series_id': series_id, 'date': '2025-12-31',
+                'latest_date': '2025-12-31', 'next_due_at': None, 'next_due_precision': None}
     return {'source': source, 'series_id': series_id, 'date': '2026-01-01',
             'latest_date': '2026-01-01', 'next_due_at': '2026-01-09T00:00:00+00:00',
             'next_due_precision': 'official_scheduled_time'}
@@ -70,6 +73,24 @@ class SharedSnapshotTests(unittest.TestCase):
         self.guard.stop(); self.temp.cleanup()
     def refresh(self, client=None, now=NOW):
         return shared.refresh_shared_snapshot(now=now, root=self.root, client=client or Client())
+    def test_eurostat_period_only_frontier_is_strictly_bound_and_has_no_invented_due(self):
+        docs=fixture()
+        row=docs[shared.FILES[0]]['currencies']['EUR']['GDP']
+        row['release_frontier']=frontier('EUR','GDP')
+        self.assertEqual(shared._validate(docs,NOW),shared._time(docs[shared.FILES[0]]['completed_at']))
+        changes=({'date':'2025-12-30'}, {'latest_date':'2026-01-01'},
+                 {'next_due_precision':'official_scheduled_time'}, {'series_id':'other'},
+                 {'next_due_at':'invalid'}, {'private_key':'secret'})
+        for change in changes:
+            with self.subTest(change=change):
+                bad=copy.deepcopy(docs)
+                bad[shared.FILES[0]]['currencies']['EUR']['GDP']['release_frontier'].update(change)
+                with self.assertRaises((shared.Invalid,ValueError)): shared._validate(bad,NOW)
+        for currency,factor in (('AUD','GDP'),('NZD','GDP')):
+            bad=fixture(); f=frontier(currency,factor); f.update(next_due_at=None,next_due_precision=None)
+            bad[shared.FILES[0]]['currencies'][currency][factor]['release_frontier']=f
+            with self.assertRaises((shared.Invalid,ValueError)): shared._validate(bad,NOW)
+
     def test_release_frontiers_survive_public_and_bundled_invalid_records(self):
         docs = fixture()
         for currency, factor in shared.FRONTIER_SERIES:
