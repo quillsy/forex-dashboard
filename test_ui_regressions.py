@@ -1,4 +1,6 @@
 """Render the real Streamlit app offline, in a disposable copy of its data."""
+import ast
+import copy
 import os
 from pathlib import Path
 import shutil
@@ -7,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import requests
+import numpy as np
 from streamlit.testing.v1 import AppTest
 
 
@@ -29,6 +32,13 @@ class UIRegressions(unittest.TestCase):
                     self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
                     self.assertEqual(len(app.tabs), 22)  # 13 main tabs and 9 sub-tabs.
                     self.assertGreater(len(app.dataframe), 10)
+                    history = next(e.value for e in app.dataframe
+                                   if 'Einzelstatus (gespeichert)' in e.value.columns)
+                    self.assertIn('CORE-Abdeckung (gespeichert)', history.columns)
+                    self.assertIn('Collectorabschluss (gespeichert)', history.columns)
+                    self.assertIn('Freigabeprüfung (gespeichert)', history.columns)
+                    self.assertIn('Modellversion', history.columns)
+                    self.assertIn('Sperrhinweise (gespeichert)', history.columns)
                     bond_table = next(e.value for e in app.dataframe if 'Trend (2Y)' in e.value.columns)
                     missing_trends = bond_table.loc[bond_table['2Y Rendite'] == 'N/A', 'Trend (2Y)']
                     self.assertGreater(len(missing_trends), 0)
@@ -63,6 +73,81 @@ class UIRegressions(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
         self.assertEqual((root / 'live_signals.json').read_bytes(), original_history)
+
+
+class CurrencyHistoryDisplay(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = Path(__file__).with_name('app.py')
+        names = {'finite_number', 'format_score', 'currency_snapshot_history_row'}
+        functions = [node for node in ast.parse(source.read_text()).body
+                     if isinstance(node, ast.FunctionDef) and node.name in names]
+        assert {node.name for node in functions} == names
+        namespace = {'np': np}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), 'exec'), namespace)
+        cls.render = staticmethod(namespace['currency_snapshot_history_row'])
+
+    def test_partial_snapshot_shows_saved_quality_and_provenance_without_mutation(self):
+        snapshot = {'currency': 'USD', 'date': '2026-10-12', 'core_score': 0,
+                    'core_status': 'VALID', 'data_quality': 80, 'missing_factors': ['PMI'],
+                    'model_version': 'CORE_V2_8_2026_09',
+                    'collector_completed_at': '2026-10-12T22:37:32+00:00',
+                    'eligibility_checked_at': '2026-10-12T22:37:34+00:00',
+                    'factor_scores': {'Inflation': 0, 'PMI': None},
+                    'observations': {'PMI': {'_display_status': 'Gesperrt: Freigabe fehlt'}}}
+        original = copy.deepcopy(snapshot)
+        row = self.render('CURR_USD', snapshot)
+        self.assertEqual(row['BASE CORE'], '+0.0')
+        self.assertEqual(row['CORE-Abdeckung (gespeichert)'], '80%')
+        self.assertEqual(row['Einzelstatus (gespeichert)'], 'VALID')
+        self.assertEqual(row['Fehlende Faktoren'], 'PMI')
+        self.assertIn('Gesperrt: Freigabe fehlt', row['Sperrhinweise (gespeichert)'])
+        self.assertEqual(row['Inflation (20%)'], '+0.0')
+        self.assertEqual(row['PMI (20%)'], 'N/A')
+        self.assertEqual(row['Collectorabschluss (gespeichert)'], snapshot['collector_completed_at'])
+        self.assertEqual(row['Freigabeprüfung (gespeichert)'], snapshot['eligibility_checked_at'])
+        self.assertEqual(snapshot, original)
+
+    def test_legacy_unknown_metadata_is_not_complete_or_valid(self):
+        row = self.render('old', {'metadata': {'date': '2020-01-01', 'currency': 'EUR'},
+                                  'score': 12.5, 'factors': {'GDP': -2}})
+        self.assertEqual(row['Währung'], 'EUR')
+        self.assertEqual(row['BASE CORE'], '+12.5')
+        self.assertEqual(row['GDP (5%)'], '-2.0')
+        self.assertEqual(row['Geldpolitik (35%)'], 'N/A')
+        for field in ('CORE-Abdeckung (gespeichert)', 'Einzelstatus (gespeichert)',
+                      'Fehlende Faktoren', 'Sperrhinweise (gespeichert)', 'Modellversion',
+                      'Collectorabschluss (gespeichert)', 'Freigabeprüfung (gespeichert)'):
+            self.assertEqual(row[field], 'Unbekannt', field)
+
+    def test_explicit_missing_core_never_uses_other_score(self):
+        row = self.render('partial', {'core_score': None, 'score': 99, 'total_score': 100,
+                                      'data_quality': 0, 'missing_factors': []})
+        self.assertEqual(row['BASE CORE'], 'N/A')
+        self.assertEqual(row['CORE-Abdeckung (gespeichert)'], '0%')
+        self.assertEqual(row['Fehlende Faktoren'], 'Keine laut Aufzeichnung')
+        unknown = self.render('legacy', {'missing_factors': []})
+        self.assertEqual(unknown['Fehlende Faktoren'], 'Keine laut Aufzeichnung')
+        self.assertEqual(unknown['CORE-Abdeckung (gespeichert)'], 'Unbekannt')
+        self.assertEqual(unknown['Einzelstatus (gespeichert)'], 'Unbekannt')
+
+    def test_invalid_quality_and_factor_values_stay_unknown_or_missing(self):
+        for invalid in (True, False, float('nan'), float('inf'), -1, 101, 'bad', {}, []):
+            with self.subTest(value=invalid):
+                row = self.render('bad', {'data_quality': invalid,
+                                         'factor_scores': {'PMI': invalid}})
+                self.assertEqual(row['CORE-Abdeckung (gespeichert)'], 'Unbekannt')
+                if not isinstance(invalid, (int, float)) or isinstance(invalid, bool) or not np.isfinite(invalid):
+                    self.assertEqual(row['PMI (20%)'], 'N/A')
+
+    def test_malformed_nested_metadata_does_not_claim_no_missing_factors(self):
+        for invalid in (None, 'PMI', {}, ['PMI', None], ['']):
+            with self.subTest(value=invalid):
+                row = self.render('bad', {'metadata': [], 'factors': [], 'factor_scores': 'bad',
+                                         'missing_factors': invalid, 'observations': []})
+                self.assertEqual(row['Fehlende Faktoren'], 'Unbekannt')
+                self.assertEqual(row['Sperrhinweise (gespeichert)'], 'Unbekannt')
+                self.assertEqual(row['PMI (20%)'], 'N/A')
 
 
 if __name__ == '__main__':
