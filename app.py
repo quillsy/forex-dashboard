@@ -2234,7 +2234,7 @@ def get_ons_cpi_data(*, propagate_transport=False):
             raise ValueError(f"ONS HTTP Error {res.status_code}")
         
         data = res.json()
-        from official_ons import validate_ons_cpi
+        from official_ons import validate_ons_cpi, ons_live_release_metadata
         months = validate_ons_cpi(data)
             
         records = []
@@ -2282,6 +2282,13 @@ def get_ons_cpi_data(*, propagate_transport=False):
             raise ValueError("No valid records parsed from ONS data")
             
         df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+        # Separate current release metadata from the historical row dates.
+        # updateDate remains unchanged and is never used as publication proof.
+        df.attrs["ons_live_release"] = ons_live_release_metadata("Inflation", {
+            "date": df.iloc[-1]["date"].strftime("%Y-%m-%d"),
+            "release_date_known": pd.Timestamp(data["description"]["releaseDate"]).tz_convert("Europe/London").date().isoformat(),
+            "source": "ONS", "series_id": "D7G7", "source_url": url,
+        })
         return df, datetime.now(), True
     except Exception as error:
         if propagate_transport and live_data.temporary_source_outage(error):
@@ -5702,6 +5709,8 @@ def compute_currency_details(curr: str, target_date=None, include_context=True, 
                             # proof of the bulletin's actual release time.
                             observations["Inflation"]["publication_basis"] = (
                                 "ONS-Veröffentlichungszeit nicht aus updateDate abgeleitet")
+                            if collector_current:
+                                observations["Inflation"].update(release_frame.attrs.get("ons_live_release", {}))
                         elif not release.get("is_pit_limited", True) and pd.notna(release.get("release_date")):
                             published = pd.Timestamp(release["release_date"])
                             published = published.tz_localize("UTC") if published.tzinfo is None else published.tz_convert("UTC")

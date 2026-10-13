@@ -2,11 +2,13 @@ import ast
 import copy
 import unittest
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, call
 
 import requests
-from official_ons import BASE, PN2_FALLBACK_URL, TITLE, CPI_TITLE, parse_ons_gdp, fetch_ons_gdp, validate_ons_cpi
+from official_ons import (BASE, PN2_FALLBACK_URL, TITLE, CPI_TITLE, CPI_URL,
+    CPI_2026_SEPTEMBER_DUE, GDP_2026_Q3_FIRST_DUE, GDP_2026_Q3_REVISION_DUE,
+    parse_ons_gdp, fetch_ons_gdp, validate_ons_cpi, ons_live_release_metadata)
 
 NOW = datetime(2026, 9, 7, 15, tzinfo=timezone.utc)
 
@@ -176,7 +178,9 @@ class ONSTests(unittest.TestCase):
                 self.assertEqual(result['value'], float(value))
                 self.assertEqual(result['release_date_known'], '2026-09-30')
                 self.assertIsNone(result['published_at'])
-                self.assertNotIn('next_due_at', result)
+                self.assertEqual(result['next_due_at'], GDP_2026_Q3_FIRST_DUE.isoformat())
+                self.assertEqual(result['next_due_precision'], 'official_scheduled_time')
+                self.assertTrue(result['needs_hourly_check'])
 
         # A new envelope date is insufficient if QNA still contains only Q1.
         lagging = self.qna_q1()
@@ -204,6 +208,159 @@ class ONSTests(unittest.TestCase):
             now=datetime(2026, 9, 30, 6, tzinfo=timezone.utc))['value'], 1.2)
 
 
+class ONSFollowingReleaseTests(unittest.TestCase):
+    """Synthetic successor values only; no future ONS value is asserted."""
+
+    @staticmethod
+    def cpi_observation(period='2026-08-01', vintage='2026-09-16'):
+        return {'date': period, 'source': 'ONS', 'source_url': CPI_URL,
+                'series_id': 'D7G7', 'release_date_known': vintage}
+
+    @staticmethod
+    def gdp_observation(period='2026-06-30', dataset='QNA', vintage='2026-09-30'):
+        return {'date': period, 'source': 'ONS', 'source_url': BASE + dataset.lower(),
+                'series_id': 'IHYR/' + dataset, 'release_date_known': vintage}
+
+    @staticmethod
+    def q3_payload(dataset='PN2', value='1.7', release='2026-11-12T00:00:00Z'):
+        payload = fixture(dataset, value, release)
+        payload['quarters'][0].update(date='2026 Q3', label='2026 Q3', quarter='Q3')
+        return payload
+
+    @staticmethod
+    def q2_qna():
+        return fixture('QNA', '1.4', '2026-09-29T23:00:00Z')
+
+    def test_cpi_old_period_deadline_and_legacy_vintage(self):
+        before = CPI_2026_SEPTEMBER_DUE - timedelta(seconds=1)
+        old = self.cpi_observation()
+        old.pop('release_date_known')
+        old.pop('source_url')
+        metadata = ons_live_release_metadata('Inflation', old, now=before)
+        self.assertEqual(metadata, {'release_date_known': None,
+            'next_due_at': CPI_2026_SEPTEMBER_DUE.isoformat(),
+            'next_due_precision': 'official_scheduled_time', 'needs_hourly_check': True})
+        old['source_url'] = CPI_URL
+        with self.assertRaisesRegex(ValueError, 'ONS_RELEASE_DUE'):
+            ons_live_release_metadata('Inflation', old, now=CPI_2026_SEPTEMBER_DUE)
+        new = self.cpi_observation('2026-09-01', '2026-10-21')
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            ons_live_release_metadata('Inflation', new, now=before)
+        with self.assertRaisesRegex(ValueError, 'ONS_CHECK_BEFORE_RELEASE'):
+            ons_live_release_metadata('Inflation', new, now=CPI_2026_SEPTEMBER_DUE,
+                                      checked_at=before.isoformat())
+        metadata = ons_live_release_metadata('Inflation', new, now=CPI_2026_SEPTEMBER_DUE,
+                                              checked_at=CPI_2026_SEPTEMBER_DUE.isoformat())
+        self.assertEqual(metadata, {'release_date_known': '2026-10-21',
+            'next_due_at': None, 'next_due_precision': None, 'needs_hourly_check': True})
+        for bad_vintage in (None, '2026-10-20'):
+            with self.subTest(vintage=bad_vintage), self.assertRaisesRegex(ValueError, 'ONS_RELEASE_DUE'):
+                ons_live_release_metadata('Inflation', self.cpi_observation('2026-09-01', bad_vintage),
+                                          now=CPI_2026_SEPTEMBER_DUE)
+
+    def test_cpi_parser_preserves_synthetic_new_rows_and_zero_negative_values(self):
+        before = CPI_2026_SEPTEMBER_DUE - timedelta(seconds=1)
+        for value in ('0', '-0.5'):
+            with self.subTest(value=value):
+                payload = ONSCpiContractTests.fixture(value)
+                payload['months'][0].update(date='2026 SEP', label='2026 SEP', month='September')
+                payload['description'].update(date='2026 SEP', releaseDate='2026-10-20T23:00:00Z')
+                with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+                    validate_ons_cpi(payload, now=before)
+                self.assertIs(validate_ons_cpi(payload, now=CPI_2026_SEPTEMBER_DUE), payload['months'])
+        with self.assertRaisesRegex(ValueError, 'ONS_RELEASE_DUE'):
+            validate_ons_cpi(ONSCpiContractTests.fixture(), now=CPI_2026_SEPTEMBER_DUE)
+
+    def test_gdp_first_estimate_deadline_keeps_old_qna_component_parseable(self):
+        before = GDP_2026_Q3_FIRST_DUE - timedelta(seconds=1)
+        new_pn2 = self.q3_payload()
+        old_qna = self.q2_qna()
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            parse_ons_gdp(new_pn2, 'PN2', now=before)
+        self.assertEqual(parse_ons_gdp(old_qna, 'QNA', now=GDP_2026_Q3_FIRST_DUE)['date'], '2026-06-30')
+        result = fetch_ons_gdp(now=GDP_2026_Q3_FIRST_DUE,
+                               session=session_for(new_pn2, old_qna))
+        self.assertEqual((result['date'], result['series_id'], result['value']),
+                         ('2026-09-30', 'IHYR/PN2', 1.7))
+        self.assertEqual(result['next_due_at'], GDP_2026_Q3_REVISION_DUE.isoformat())
+        self.assertEqual(result['next_due_precision'], 'official_scheduled_time')
+        self.assertTrue(result['needs_hourly_check'])
+        with self.assertRaisesRegex(ValueError, 'ONS_RELEASE_DUE'):
+            fetch_ons_gdp(now=GDP_2026_Q3_FIRST_DUE,
+                          session=session_for(fixture(), old_qna))
+
+    def test_gdp_q3_revision_requires_qna_vintage_even_same_value(self):
+        before = GDP_2026_Q3_REVISION_DUE - timedelta(seconds=1)
+        first = self.q3_payload(value='1.7')
+        revision = self.q3_payload('QNA', '1.7', '2026-12-22T00:00:00Z')
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            parse_ons_gdp(revision, 'QNA', now=before)
+        with self.assertRaisesRegex(ValueError, 'ONS_Q3_REVISION_DUE'):
+            fetch_ons_gdp(now=GDP_2026_Q3_REVISION_DUE,
+                          session=session_for(first, self.q2_qna()))
+        selected = fetch_ons_gdp(now=GDP_2026_Q3_REVISION_DUE,
+                                 session=session_for(first, revision))
+        self.assertEqual((selected['series_id'], selected['value'], selected['release_date_known']),
+                         ('IHYR/QNA', 1.7, '2026-12-22'))
+        self.assertIsNone(selected['next_due_at'])
+        prior_vintage = self.q3_payload('QNA', '1.7', '2026-12-20T23:00:00Z')
+        with self.assertRaisesRegex(ValueError, 'ONS_Q3_REVISION_DUE'):
+            fetch_ons_gdp(now=GDP_2026_Q3_REVISION_DUE,
+                          session=session_for(first, prior_vintage))
+
+    def test_qna_q3_november_first_estimate_is_allowed_until_revision(self):
+        pn2_first = self.q3_payload(value='1.7')
+        qna_first = self.q3_payload('QNA', '1.7', '2026-11-12T00:00:00Z')
+        self.assertEqual(parse_ons_gdp(qna_first, 'QNA', now=GDP_2026_Q3_FIRST_DUE)['date'],
+                         '2026-09-30')
+        same = fetch_ons_gdp(now=GDP_2026_Q3_FIRST_DUE,
+                             session=session_for(pn2_first, qna_first))
+        self.assertEqual((same['series_id'], same['value'], same['next_due_at']),
+                         ('IHYR/PN2', 1.7, GDP_2026_Q3_REVISION_DUE.isoformat()))
+        qna_later = self.q3_payload('QNA', '1.7', '2026-11-13T00:00:00Z')
+        later = fetch_ons_gdp(now=GDP_2026_Q3_FIRST_DUE + timedelta(days=1),
+                              session=session_for(pn2_first, qna_later))
+        self.assertEqual((later['series_id'], later['next_due_at']),
+                         ('IHYR/QNA', GDP_2026_Q3_REVISION_DUE.isoformat()))
+        same_release_conflict = self.q3_payload('QNA', '1.8', '2026-11-12T00:00:00Z')
+        self.assertIsNone(fetch_ons_gdp(now=GDP_2026_Q3_FIRST_DUE,
+                                        session=session_for(pn2_first, same_release_conflict)))
+        with self.assertRaisesRegex(ValueError, 'ONS_Q3_REVISION_DUE'):
+            fetch_ons_gdp(now=GDP_2026_Q3_REVISION_DUE,
+                          session=session_for(pn2_first, qna_first))
+
+    def test_future_day_vintage_is_blocked_without_a_new_numeric_period(self):
+        before_cpi = CPI_2026_SEPTEMBER_DUE - timedelta(seconds=1)
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            ons_live_release_metadata('Inflation', self.cpi_observation(vintage='2026-10-21'),
+                                      now=before_cpi)
+        before_gdp = GDP_2026_Q3_FIRST_DUE - timedelta(seconds=1)
+        preloaded_qna = fixture('QNA', '1.4', '2026-11-12T00:00:00Z')
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            parse_ons_gdp(preloaded_qna, 'QNA', now=before_gdp)
+        self.assertEqual(parse_ons_gdp(preloaded_qna, 'QNA', now=GDP_2026_Q3_FIRST_DUE)['date'],
+                         '2026-06-30')
+
+    def test_exact_identity_and_check_time_are_required_after_due(self):
+        new = self.cpi_observation('2026-09-01', '2026-10-21')
+        for field, value in (('source', 'OTHER'), ('series_id', 'D7BT'), ('source_url', BASE + 'pn2')):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'ONS_RELEASE_IDENTITY_INVALID'):
+                wrong = dict(new, **{field: value})
+                ons_live_release_metadata('Inflation', wrong, now=CPI_2026_SEPTEMBER_DUE)
+        for bad_time in ('2026-10-21T06:00:00', 'bad', '2026-10-22T00:00:00+00:00'):
+            with self.subTest(check=bad_time), self.assertRaisesRegex(ValueError, 'ONS_CHECK_TIME_INVALID'):
+                ons_live_release_metadata('Inflation', new, now=CPI_2026_SEPTEMBER_DUE,
+                                          checked_at=bad_time)
+        q3 = self.gdp_observation('2026-09-30', 'PN2', '2026-11-12')
+        q3['source_url'] = PN2_FALLBACK_URL
+        self.assertEqual(ons_live_release_metadata('GDP', q3, now=GDP_2026_Q3_FIRST_DUE,
+            checked_at=GDP_2026_Q3_FIRST_DUE.isoformat())['next_due_at'],
+            GDP_2026_Q3_REVISION_DUE.isoformat())
+        q3['source_url'] = BASE + 'qna'
+        with self.assertRaisesRegex(ValueError, 'ONS_RELEASE_IDENTITY_INVALID'):
+            ons_live_release_metadata('GDP', q3, now=GDP_2026_Q3_FIRST_DUE)
+
+
 class ONSFallbackTests(unittest.TestCase):
     def response(self, payload=None, status=200):
         response = requests.Response()
@@ -226,7 +383,9 @@ class ONSFallbackTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 session = self.session(failure, self.response(fixture()), self.response(fixture('QNA')))
                 result = fetch_ons_gdp(now=NOW, session=session)
-                self.assertEqual(result, dict(parse_ons_gdp(fixture(), 'PN2', now=NOW), source_url=PN2_FALLBACK_URL))
+                expected = dict(parse_ons_gdp(fixture(), 'PN2', now=NOW), source_url=PN2_FALLBACK_URL)
+                expected.update(ons_live_release_metadata('GDP', expected, now=NOW, checked_at=expected['checked_at']))
+                self.assertEqual(result, expected)
                 self.assertEqual(session.get.call_args_list, [call(BASE+'pn2/data', timeout=20),
                     call(PN2_FALLBACK_URL, timeout=20), call(BASE+'qna/data', timeout=20)])
 
@@ -275,11 +434,13 @@ class ONSFallbackTests(unittest.TestCase):
         empty = fixture('QNA'); empty['quarters'] = []
         session = self.session(requests.Timeout(), self.response(old), self.response(empty))
         result = fetch_ons_gdp(now=NOW, session=session)
-        self.assertEqual(result, dict(parse_ons_gdp(old, 'PN2', now=NOW), source_url=PN2_FALLBACK_URL))
+        expected = dict(parse_ons_gdp(old, 'PN2', now=NOW), source_url=PN2_FALLBACK_URL)
+        expected.update(ons_live_release_metadata('GDP', expected, now=NOW, checked_at=expected['checked_at']))
+        self.assertEqual(result, expected)
         self.assertEqual(result['date'], '2025-06-30')
         self.assertEqual(result['release_date_known'], '2025-08-13')
         self.assertIsNone(result['published_at'])
-        self.assertNotIn('next_due_at', result)
+        self.assertEqual(result['next_due_at'], '2026-09-30T06:00:00+00:00')
         pn2_empty = fixture(); pn2_empty['quarters'] = []
         session = self.session(requests.Timeout(), self.response(pn2_empty), self.response(empty))
         self.assertIsNone(fetch_ons_gdp(now=NOW, session=session))
