@@ -57,25 +57,26 @@ def parse_hicp(payload, *, now=None, geo="EA21"):
             'checked_at': checked.isoformat(), 'published_at': None,
             'provider_status': status, 'is_estimate': estimate}
     if geo == 'EA21':
-        from source_contracts import SCHEDULED_RELEASES
-        schedule = SCHEDULED_RELEASES[('EUR', 'Inflation')]
-        due = datetime.fromisoformat(schedule['due_at'])
-        if period == schedule['previous_period']:
-            result['next_due_at'] = due.isoformat()
-            result['next_due_precision'] = schedule['next_due_precision']
-            result['needs_hourly_check'] = True
-            if checked >= due:
-                result['_validation'] = 'UNVERIFIED'
-                result['_reason'] = 'Eurostat-September-Flash fällig; API liefert noch August'
-        elif period == schedule['minimum_period_start'][:7]:
-            result['release_date_known'] = schedule['release_date_known']
-            # The date-only announcement is not evidence of the hour. After
-            # the September reading, later release dates remain unknown.
-            result['next_due_at'] = None
-            result['needs_hourly_check'] = True
-            if checked < due:
-                result['_validation'] = 'UNVERIFIED'
-                result['_reason'] = 'Eurostat-September-Flash noch nicht fällig'
+        from source_contracts import scheduled_releases
+        for schedule in scheduled_releases('EUR', 'Inflation'):
+            due = datetime.fromisoformat(schedule['due_at'])
+            minimum_period = schedule['minimum_period_start'][:7]
+            if period == schedule['previous_period']:
+                result['next_due_at'] = due.isoformat()
+                result['next_due_precision'] = schedule['next_due_precision']
+                result['needs_hourly_check'] = True
+                if checked >= due:
+                    result['_validation'] = 'UNVERIFIED'
+                    result['_reason'] = 'Eurostat-Flash für ' + minimum_period + ' fällig; API liefert noch ' + period
+            elif period == minimum_period:
+                result['release_date_known'] = schedule['release_date_known']
+                # After the last confirmed transition the later date is
+                # unknown. Estimates remain allowed with hourly checks.
+                result['next_due_at'] = None
+                result['needs_hourly_check'] = True
+                if checked < due:
+                    result['_validation'] = 'UNVERIFIED'
+                    result['_reason'] = 'Eurostat-Flash für ' + minimum_period + ' noch nicht fällig'
     return result
 
 

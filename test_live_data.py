@@ -529,6 +529,9 @@ class LiveDataTests(unittest.TestCase):
 
     def test_40_factor_gate_uses_values_not_reported_coverage(self):
         records={factor:live.build_record(factor,20,{'value':1.8,'policy_rate':3.6,'yield_2y':3.6,'date':'2026-09-04'},'FRESH',NOW.isoformat()) for factor in live.FACTORS}
+        # September HICP is not published at this fixture's September 7 clock.
+        records['Inflation'] = live.build_record('Inflation', 20,
+            {'value': 1.8, 'date': '2026-08-31'}, 'FRESH', NOW.isoformat())
         data={'completed_at':NOW.isoformat(),'currencies':{'EUR':records}}
         self.assertEqual(live.details('EUR',NOW,data)['_completeness'],100)
         records['PMI']['validation']='UNVERIFIED'

@@ -11,6 +11,67 @@ def fixture():
                           'time': {'category': {'index': {'2026-07': 0, '2026-08': 1}}}},
             'value': {'0': 3.0, '1': 3.2}, 'status': {'1': 'e'}}
 class HICPTests(unittest.TestCase):
+    def period_fixture(self, period):
+        data = fixture()
+        data['size'][-1] = 1
+        data['dimension']['time']['category']['index'] = {period: 0}
+        data['value'] = {'0': 3.2}
+        data['status'] = {'0': 'e'}
+        return data
+
+    def test_next_flash_deadline_uses_luxembourg_winter_day(self):
+        result = parse_hicp(self.period_fixture('2026-09'),
+                            now=datetime(2026, 10, 13, tzinfo=timezone.utc))
+        due = datetime(2026, 11, 4, tzinfo=ZoneInfo('Europe/Luxembourg')).astimezone(timezone.utc)
+        self.assertEqual(due.isoformat(), '2026-11-03T23:00:00+00:00')
+        self.assertEqual(result['next_due_at'], due.isoformat())
+        self.assertEqual(result['next_due_precision'], 'date_only_start_of_EU_day')
+        self.assertTrue(result['needs_hourly_check'])
+
+    def test_fresh_september_api_lag_is_blocked_at_october_flash_deadline(self):
+        due = datetime(2026, 11, 3, 23, tzinfo=timezone.utc)
+        before = parse_hicp(self.period_fixture('2026-09'), now=due.replace(hour=22, minute=59, second=59))
+        self.assertNotIn('_validation', before)
+        lag = parse_hicp(self.period_fixture('2026-09'), now=due)
+        self.assertEqual(lag['_validation'], 'UNVERIFIED')
+        self.assertIn('2026-10', lag['_reason'])
+
+    def test_october_api_before_flash_is_blocked_then_estimates_remain_allowed(self):
+        due = datetime(2026, 11, 3, 23, tzinfo=timezone.utc)
+        before = parse_hicp(self.period_fixture('2026-10'), now=due.replace(hour=22, minute=59, second=59))
+        self.assertEqual(before['_validation'], 'UNVERIFIED')
+        released = parse_hicp(self.period_fixture('2026-10'), now=due)
+        self.assertNotIn('_validation', released)
+        self.assertTrue(released['is_estimate'])
+        self.assertEqual(released['release_date_known'], '2026-11-04')
+        self.assertIsNone(released['next_due_at'])
+        self.assertTrue(released['needs_hourly_check'])
+
+    def test_reader_deadlines_survive_legacy_cache_and_new_successful_checks(self):
+        from live_data import build_record, eligible
+        for period, at, expected in (
+                ('2026-08', datetime(2026, 10, 13, tzinfo=timezone.utc), False),
+                ('2026-09', datetime(2026, 11, 3, 22, 59, 59, tzinfo=timezone.utc), True),
+                ('2026-09', datetime(2026, 11, 3, 23, tzinfo=timezone.utc), False),
+                ('2026-10', datetime(2026, 11, 3, 22, 59, 59, tzinfo=timezone.utc), False),
+                ('2026-10', datetime(2026, 11, 3, 23, tzinfo=timezone.utc), True)):
+            with self.subTest(period=period, at=at):
+                observation = parse_hicp(self.period_fixture(period), now=at)
+                # A legacy cache has no newly added deadline fields. A new
+                # successful HTTP check must not revive its old reference month.
+                observation.pop('next_due_at', None)
+                record = build_record('Inflation', 0, observation, 'FRESH', at.isoformat())
+                self.assertEqual(eligible(record, at, factor='Inflation', currency='EUR')[0], expected)
+
+    def test_full_september_release_does_not_impose_final_only_data(self):
+        for flag in ('e', 'p'):
+            data = self.period_fixture('2026-09')
+            data['status']['0'] = flag
+            result = parse_hicp(data, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
+            self.assertNotIn('_validation', result)
+            self.assertEqual(result['provider_status'], flag)
+            self.assertEqual(result['next_due_at'], '2026-11-03T23:00:00+00:00')
+
     def test_estimate_label_preserved(self):
         result = parse_hicp(fixture(), now=NOW)
         self.assertEqual(result['value'], 3.2)
@@ -31,9 +92,9 @@ class HICPTests(unittest.TestCase):
         late = parse_hicp(fixture(), now=due)
         self.assertEqual(late['reference_period'], '2026-08')
         self.assertEqual(late['_validation'], 'UNVERIFIED')
-        self.assertIn('September-Flash', late['_reason'])
+        self.assertIn('2026-09', late['_reason'])
 
-    def test_september_reading_resumes_hourly_checks_without_old_deadline(self):
+    def test_september_reading_keeps_hourly_checks_and_next_flash_deadline(self):
         data = fixture()
         data['size'][-1] = 3
         data['dimension']['time']['category']['index']['2026-09'] = 2
@@ -45,7 +106,7 @@ class HICPTests(unittest.TestCase):
         self.assertEqual(released['reference_period'], '2026-09')
         self.assertEqual(released['value'], 3.4)
         self.assertNotIn('_validation', released)
-        self.assertIsNone(released['next_due_at'])
+        self.assertEqual(released['next_due_at'], '2026-11-03T23:00:00+00:00')
         self.assertTrue(released['needs_hourly_check'])
         self.assertEqual(released['release_date_known'], '2026-10-02')
     def test_wrong_unit_geography_status_and_values(self):
