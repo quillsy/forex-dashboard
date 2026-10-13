@@ -655,7 +655,8 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
                                next_due_precision=frontier["next_due_precision"],
                                needs_hourly_check=True)
                 record.update(observation=current, next_due_at=frontier["next_due_at"])
-            elif due is not None and (known is None or due < known):
+            elif (due is not None and (known is None or due < known)
+                  and (valid or identity not in _PERIOD_ONLY_FRONTIER_SERIES)):
                 latest = frontier["latest_date"]
                 frontier = _release_frontier(factor, current)
                 frontier["latest_date"] = max(latest, frontier["latest_date"])

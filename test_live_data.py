@@ -102,6 +102,21 @@ class LiveDataTests(unittest.TestCase):
         self.assertTrue(live.eligible(outage,now+timedelta(minutes=1),'GDP','EUR')[0])
         self.assertFalse(live.eligible(outage,now+timedelta(hours=1),'GDP','EUR')[0])
 
+    def test_eurostat_gdp_unqualified_successor_with_deadline_cannot_poison_floor(self):
+        now=datetime(2027,1,15,12,tzinfo=timezone.utc)
+        obs=self.eurostat_gdp_period()
+        prior=live.build_record('GDP',25,obs,'FRESH',now.isoformat())
+        self.assertTrue(live.eligible(prior,now,'GDP','EUR')[0])
+        bad=dict(obs,date='2026-12-31',reference_period='2026-Q4',
+                 source_url='https://unverified.example/data',next_due_at='2027-02-01T12:00:00+00:00')
+        failed=live.build_record('GDP',30,bad,'FRESH',now.isoformat(),prior)
+        self.assertFalse(live.eligible(failed,now,'GDP','EUR')[0])
+        self.assertEqual(failed['release_frontier'],prior['release_frontier'])
+        recovered=live.build_record('GDP',25,obs,'FRESH',now.isoformat(),json.loads(json.dumps(failed)))
+        self.assertTrue(live.eligible(recovered,now,'GDP','EUR')[0])
+        self.assertEqual(recovered['release_frontier']['latest_date'],'2026-09-30')
+        self.assertIsNone(recovered['next_due_at'])
+
     def test_abs_statsnz_known_deadline_survives_missing_and_shifted_calendar(self):
         cases = (
             ('AUD', 'Arbeitsmarkt', 'ABS', 'LF:M13.3.1599.20.AUS.M', '2026-08-31', '2026-10-15T00:30:00+00:00'),
