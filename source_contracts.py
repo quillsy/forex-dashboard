@@ -136,6 +136,19 @@ KNOWN_RELEASES[("CHF", "Inflation")] = {
 # would let a lagging old API period become eligible before the new deadline.
 # https://ec.europa.eu/eurostat/en/web/products-euro-indicators/w/2-17092026-ap
 SCHEDULED_RELEASES = {
+    # BFS confirmed the planned SAKE Q3 release and this table on 12 October.
+    # 08:30 Europe/Zurich = 07:30 UTC in November. This is a publication
+    # deadline, not a promise of simultaneous CSV availability or a grace period.
+    ("CHF", "Arbeitsmarkt"): {
+        "previous_period": "2026-Q2",
+        "minimum_period_start": "2026-07-01",
+        "minimum_period_label": "2026-Q3",
+        "requires_post_release_check": True,
+        "release_date_known": "2026-11-12",
+        "due_at": "2026-11-12T07:30:00+00:00",
+        "next_due_precision": "publisher_correspondence_planned_time",
+        "source": "https://www.bfs.admin.ch/asset/de/ts-x-03.03.01.03b",
+    },
     ("EUR", "Inflation"): {
         "previous_period": "2026-08",
         "minimum_period_start": "2026-09-01",

@@ -347,9 +347,13 @@ def eligible(record, now=None, factor=None, currency=None):
         minimum = datetime.strptime(scheduled["minimum_period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if now >= scheduled_due:
             if reference < minimum:
-                return False, "Neuere amtliche Referenzperiode fällig: " + scheduled["minimum_period_start"][:7]
+                return False, "Neuere amtliche Referenzperiode fällig: " + scheduled.get("minimum_period_label", scheduled["minimum_period_start"][:7])
+            if scheduled.get("requires_post_release_check"):
+                release_check = timestamp(record.get("checked_at"))
+                if release_check is None or release_check < scheduled_due:
+                    return False, "Aktueller Stand seit dem amtlichen Veröffentlichungstermin nicht bestätigt"
         elif reference >= minimum:
-            return False, "Amtliche Referenzperiode noch nicht fällig: " + scheduled["minimum_period_start"][:7]
+            return False, "Amtliche Referenzperiode noch nicht fällig: " + scheduled.get("minimum_period_label", scheduled["minimum_period_start"][:7])
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
     if any(record.get(field) is not None and timestamp(record[field]) is None

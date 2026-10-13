@@ -5,7 +5,7 @@ import io
 import json
 import math
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from official_quarterly_labour import (
     CH_RIGHTS, CH_TITLE, fetch_ch_labour, fetch_nz_labour, fetch_quarterly_labour,
@@ -121,7 +121,31 @@ class QuarterlyLabourTests(unittest.TestCase):
     def test_ch_total_sa_value(self):
         row = parse_ch_labour(ch_csv(), published_at=ISSUED, source_url=URL, now=NOW)
         self.assertEqual(row['reference_period'], '2026-Q2'); self.assertAlmostEqual(row['value'], 5.11906217648145)
-        self.assertEqual(row['published_at'], ISSUED); self.assertIsNone(row['next_due_at'])
+        self.assertEqual(row['published_at'], ISSUED)
+        self.assertEqual(row['next_due_at'], '2026-11-12T07:30:00+00:00')
+        self.assertEqual(row['next_due_precision'], 'publisher_correspondence_planned_time')
+        self.assertTrue(row['needs_hourly_check'])
+
+    def test_ch_lagging_q2_csv_cannot_survive_planned_q3_release(self):
+        due = datetime(2026, 11, 12, 7, 30, tzinfo=timezone.utc)
+        row = parse_ch_labour(ch_csv(), published_at=ISSUED, source_url=URL,
+                              now=due - timedelta(seconds=1))
+        self.assertEqual(row['value'], 5.11906217648145)
+        for checked in (due, due + timedelta(hours=3)):
+            with self.subTest(checked=checked), self.assertRaisesRegex(ValueError, 'CH_LABOUR_RELEASE_DUE'):
+                parse_ch_labour(ch_csv(), published_at=ISSUED, source_url=URL, now=checked)
+
+    def test_ch_new_q3_requires_release_and_keeps_unknown_next_calendar_hourly(self):
+        due = datetime(2026, 11, 12, 7, 30, tzinfo=timezone.utc)
+        synthetic_q3 = ch_csv().replace(b'2026-Q2', b'2026-Q3')
+        with self.assertRaisesRegex(ValueError, 'CH_LABOUR_BEFORE_PLANNED_RELEASE'):
+            parse_ch_labour(synthetic_q3, published_at='2026-10-12T07:30:00Z',
+                           source_url=URL, now=due - timedelta(seconds=1))
+        row = parse_ch_labour(synthetic_q3, published_at=due.isoformat(), source_url=URL, now=due)
+        self.assertEqual(row['reference_period'], '2026-Q3')
+        self.assertIsNone(row['next_due_at'])
+        self.assertIsNone(row['next_due_precision'])
+        self.assertTrue(row['needs_hourly_check'])
 
     def test_ch_rejects_bad_metadata_future_nan_conflicts(self):
         original = ['P', 'TOTAL', 'saisonbereinigte', 'Total', '2026-Q2', 'Q', 'Durchschnittliche Quartalswerte', '5.1', 'A']
