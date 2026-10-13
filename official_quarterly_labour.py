@@ -242,11 +242,26 @@ def parse_ch_labour(content, *, published_at, source_url, now=None):
     if not values:
         raise ValueError('CH_LABOUR_TOTAL_MISSING')
     end = max(values)
+    from source_contracts import scheduled_releases
+    next_due = None
+    precision = None
+    for release in scheduled_releases('CHF', 'Arbeitsmarkt'):
+        due = _timestamp(release['due_at'])
+        minimum = datetime.fromisoformat(release['minimum_period_start']).date()
+        if checked >= due and end < minimum:
+            raise ValueError('CH_LABOUR_RELEASE_DUE')
+        if checked < due:
+            if end >= minimum:
+                raise ValueError('CH_LABOUR_BEFORE_PLANNED_RELEASE')
+            if next_due is None or due < next_due:
+                next_due, precision = due, release['next_due_precision']
     return {'value': values[end], 'date': end.isoformat(), 'reference_period': f'{end.year}-Q{end.month // 3}',
             'unit': 'percent of labour force', 'frequency': 'quarterly', 'seasonal_adjustment': 'SA',
             'source': 'BFS (Swiss Labour Force Survey, ILO)', 'source_url': source_url,
             'series_id': 'BFS:ts-x-03.03.01.03b:P:SA:Q', 'checked_at': checked.isoformat(),
-            'published_at': published.isoformat(), 'next_due_at': None, 'reuse_terms': CH_RIGHTS}
+            'published_at': published.isoformat(),
+            'next_due_at': next_due.isoformat() if next_due else None,
+            'next_due_precision': precision, 'needs_hourly_check': True, 'reuse_terms': CH_RIGHTS}
 
 
 def fetch_ch_labour(*, now=None, session=None):

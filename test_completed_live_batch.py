@@ -44,6 +44,11 @@ def batch(completed_at):
                        'frequency': 'quarterly' if factor == 'GDP' else 'monthly'}
         if factor == 'Geldpolitik':
             observation.update(policy_rate=2.5, yield_2y=2.5)
+        elif factor == 'Arbeitsmarkt':
+            # CHF's known pre-November SAKE period is Q2, not an invented
+            # monthly August observation. Keep all completeness assertions.
+            observation.update(date='2026-06-30', reference_period='2026-Q2',
+                               frequency='quarterly', seasonal_adjustment='SA')
         records[factor] = live_data.build_record(factor, 20.0, observation, 'FRESH', NOW.isoformat())
     records['PMI'] = {'validation': 'UNVERIFIED', 'reason': 'Nutzungsrecht ungeklärt'}
     return {'model_version': live_data.MODEL, 'completed_at': completed_at,

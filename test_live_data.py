@@ -313,6 +313,64 @@ class LiveDataTests(unittest.TestCase):
         self.assertFalse(live.eligible(september, due + timedelta(hours=1, minutes=1),
                                        factor='Inflation', currency='EUR')[0])
 
+    def test_chf_planned_labour_release_blocks_rechecked_q2_and_legacy_cache(self):
+        due = datetime(2026, 11, 12, 7, 30, tzinfo=timezone.utc)
+        before = due - timedelta(seconds=1)
+        row = live.build_record('Arbeitsmarkt', 20, {
+            'value': 5.1, 'date': '2026-06-30', 'reference_period': '2026-Q2',
+            'source': 'BFS (Swiss Labour Force Survey, ILO)',
+            'series_id': 'BFS:ts-x-03.03.01.03b:P:SA:Q',
+            'frequency': 'quarterly', 'needs_hourly_check': True,
+        }, 'AGING', before.isoformat())
+        self.assertIsNone(row['next_due_at'])
+        self.assertTrue(live.eligible(row, before, currency='CHF')[0])
+        self.assertFalse(live.eligible(row, due, currency='CHF')[0])
+        row['checked_at'] = (due + timedelta(minutes=1)).isoformat()
+        allowed, reason = live.eligible(row, due + timedelta(minutes=1), currency='CHF')
+        self.assertFalse(allowed)
+        self.assertIn('2026-Q3', reason)
+        postponed = copy.deepcopy(row)
+        postponed['next_due_at'] = (due + timedelta(days=7)).isoformat()
+        self.assertFalse(live.eligible(postponed, due + timedelta(minutes=1), currency='CHF')[0])
+        data = {'model_version': live.MODEL, 'completed_at': row['checked_at'],
+                'currencies': {'CHF': {'Arbeitsmarkt': row}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save(data, path)
+            restored = live.load(path)
+        details = live.details('CHF', due + timedelta(minutes=1), restored)
+        self.assertIsNone(details['Arbeitsmarkt'])
+        self.assertIn('2026-Q3', details['_blocking_reasons']['Arbeitsmarkt'])
+        st = MagicMock()
+        with patch.object(live, 'load', return_value=restored), patch.object(live, 'now_utc', return_value=due + timedelta(minutes=1)):
+            live.render_status(st)
+        rows = st.dataframe.call_args_list[1].args[0]
+        chf = next(r for r in rows if r['Währung'] == 'CHF' and r['Faktor'] == 'Arbeitsmarkt')
+        self.assertEqual(chf['Status'], 'Gesperrt')
+        self.assertIn('2026-Q3', chf['Grund'])
+
+    def test_chf_new_quarter_needs_post_release_check_then_hourly_freshness(self):
+        due = datetime(2026, 11, 12, 7, 30, tzinfo=timezone.utc)
+        before = due - timedelta(seconds=1)
+        q3 = live.build_record('Arbeitsmarkt', 20, {
+            'value': 5.2, 'date': '2026-09-30', 'reference_period': '2026-Q3',
+            'source': 'BFS (Swiss Labour Force Survey, ILO)',
+            'series_id': 'BFS:ts-x-03.03.01.03b:P:SA:Q',
+            'frequency': 'quarterly', 'needs_hourly_check': True,
+        }, 'FRESH', before.isoformat())
+        self.assertFalse(live.eligible(q3, before, currency='CHF')[0])
+        self.assertFalse(live.eligible(q3, due, currency='CHF')[0])
+        data = {'model_version': live.MODEL, 'completed_at': before.isoformat(),
+                'currencies': {'CHF': {'Arbeitsmarkt': q3}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'live.json'
+            live.save(data, path)
+            restored = live.load(path)
+        self.assertIsNone(live.details('CHF', due, restored)['Arbeitsmarkt'])
+        q3['checked_at'] = due.isoformat()
+        self.assertTrue(live.eligible(q3, due, currency='CHF')[0])
+        self.assertFalse(live.eligible(q3, due + timedelta(hours=1), currency='CHF')[0])
+
     def test_official_same_period_conflict_blocks_either_selected_value(self):
         import source_contracts
         now = datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc)
