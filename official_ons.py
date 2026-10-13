@@ -155,6 +155,11 @@ def fetch_ons_gdp(*, now=None, session=None):
 
 
 LABOUR_URL = "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/timeseries/mgsx/lms/data"
+# Confirmed LMS release, not a promise of API delivery or a new rolling period.
+# https://www.ons.gov.uk/releases/labourmarketstatisticstimeseriesoctober2026
+# The official iCalendar gives 06:00 UTC, matching 07:00 Europe/London.
+LABOUR_2026_OCTOBER_DUE = datetime(2026, 10, 20, 6, tzinfo=timezone.utc)
+LABOUR_2026_OCTOBER_DATE = "2026-10-20"
 MONTHS = {name: pos for pos, name in enumerate(('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'), 1)}
 
 CPI_TITLE = 'CPI ANNUAL RATE 00: ALL ITEMS 2015=100'
@@ -245,6 +250,8 @@ def parse_ons_labour(payload, *, now=None):
     release_day = release.astimezone(ZoneInfo('Europe/London')).date()
     if release_day > checked.astimezone(ZoneInfo('Europe/London')).date():
         raise ValueError('ONS_FUTURE_RELEASE')
+    if release_day.isoformat() >= LABOUR_2026_OCTOBER_DATE and checked < LABOUR_2026_OCTOBER_DUE:
+        raise ValueError('ONS_FUTURE_RELEASE')
     rows = payload.get('months')
     if not isinstance(rows, list):
         raise ValueError('ONS_MONTHS_MISSING')
@@ -283,11 +290,18 @@ def parse_ons_labour(payload, *, now=None):
         return None
     end = max(values)
     value, start = values[end]
-    return {'value': value, 'date': end.isoformat(), 'reference_period': f'{start.isoformat()}/{end.isoformat()}',
+    result = {'value': value, 'date': end.isoformat(), 'reference_period': f'{start.isoformat()}/{end.isoformat()}',
             'source': 'ONS', 'source_url': LABOUR_URL, 'series_id': 'MGSX/LMS',
             'frequency': 'rolling_three_month_monthly_release', 'unit': 'percent labour force age 16+',
             'seasonal_adjustment': 'SA', 'checked_at': checked.isoformat(), 'published_at': None,
-            'release_date_known': release_day.isoformat()}
+            'release_date_known': release_day.isoformat(), 'needs_hourly_check': True,
+            'next_due_at': None}
+    if release_day.isoformat() < LABOUR_2026_OCTOBER_DATE:
+        result['next_due_at'] = LABOUR_2026_OCTOBER_DUE.isoformat()
+        if checked >= LABOUR_2026_OCTOBER_DUE:
+            result['_validation'] = 'UNVERIFIED'
+            result['_reason'] = 'ONS-Arbeitsmarkt-Veröffentlichung fällig; aktueller LMS-Stand nicht bestätigt'
+    return result
 
 
 def fetch_ons_labour(*, now=None, session=None):

@@ -319,4 +319,83 @@ class LabourTests(unittest.TestCase):
         from official_ons import parse_ons_labour
         with self.assertRaises(ValueError):parse_ons_labour(self.fixture(label='2026 MAY'),now=NOW)
 
+    def release_fixture(self, release='2026-09-14T23:00:00Z'):
+        data = self.fixture('2026 JUN', '2026 MAY-JUL')
+        data['description']['releaseDate'] = release
+        return data
+
+    def test_labour_calendar_deadline_and_hourly_checks(self):
+        from official_ons import parse_ons_labour
+        from zoneinfo import ZoneInfo
+        due = datetime(2026, 10, 20, 7, tzinfo=ZoneInfo('Europe/London')).astimezone(timezone.utc)
+        result = parse_ons_labour(self.release_fixture(), now=datetime(2026, 10, 13, tzinfo=timezone.utc))
+        self.assertEqual(due.isoformat(), '2026-10-20T06:00:00+00:00')
+        self.assertEqual(result['next_due_at'], due.isoformat())
+        self.assertTrue(result['needs_hourly_check'])
+
+    def test_old_labour_vintage_blocks_at_confirmed_release_even_after_new_fetch(self):
+        from official_ons import parse_ons_labour
+        before = datetime(2026, 10, 20, 5, 59, 59, tzinfo=timezone.utc)
+        self.assertNotIn('_validation', parse_ons_labour(self.release_fixture(), now=before))
+        for minute in (0, 30):
+            result = parse_ons_labour(self.release_fixture(), now=datetime(2026, 10, 20, 6, minute, tzinfo=timezone.utc))
+            self.assertEqual(result['_validation'], 'UNVERIFIED')
+            self.assertIn('ONS', result['_reason'])
+
+    def test_new_labour_vintage_cannot_be_used_before_scheduled_hour(self):
+        from official_ons import parse_ons_labour
+        before = datetime(2026, 10, 20, 5, 59, 59, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, 'ONS_FUTURE_RELEASE'):
+            parse_ons_labour(self.release_fixture('2026-10-19T23:00:00Z'), now=before)
+
+    def test_new_labour_vintage_can_preserve_values_and_reference(self):
+        from official_ons import parse_ons_labour
+        result = parse_ons_labour(self.release_fixture('2026-10-19T23:00:00Z'),
+                                 now=datetime(2026, 10, 20, 6, tzinfo=timezone.utc))
+        self.assertNotIn('_validation', result)
+        self.assertEqual(result['release_date_known'], '2026-10-20')
+        self.assertEqual(result['reference_period'], '2026-05-01/2026-07-31')
+        self.assertEqual(result['value'], 4.9)
+        self.assertIsNone(result['next_due_at'])
+        self.assertTrue(result['needs_hourly_check'])
+
+    def test_labour_reader_cannot_revive_old_or_early_vintage_without_cache_deadline(self):
+        from official_ons import parse_ons_labour
+        from live_data import build_record, eligible
+        at = datetime(2026, 10, 20, 6, tzinfo=timezone.utc)
+        before = at.replace(hour=5, minute=59, second=59)
+        for vintage, check, expected in (('2026-09-15', before, True),
+                                         ('2026-09-15', at, False),
+                                         ('2026-10-20', before, False),
+                                         ('2026-10-20', at, True),
+                                         (None, at, False), ('2026-99-20', at, False)):
+            with self.subTest(vintage=vintage, check=check):
+                observation = parse_ons_labour(self.release_fixture(), now=datetime(2026, 10, 13, tzinfo=timezone.utc))
+                observation.pop('next_due_at', None)
+                observation['release_date_known'] = vintage
+                record = build_record('Arbeitsmarkt', 10, observation, 'FRESH', check.isoformat())
+                self.assertEqual(eligible(record, check, factor='Arbeitsmarkt', currency='GBP')[0], expected)
+
+    def test_labour_reader_requires_exact_source_and_check_after_release(self):
+        from official_ons import parse_ons_labour
+        from live_data import build_record, eligible
+        at = datetime(2026, 10, 20, 6, tzinfo=timezone.utc)
+        obs = parse_ons_labour(self.release_fixture('2026-10-19T23:00:00Z'), now=at)
+        for key, value in (('source', 'Mirror'), ('series_id', 'OTHER/LMS'), ('source_url', 'https://example.com')):
+            with self.subTest(key=key):
+                altered = dict(obs, **{key: value})
+                record = build_record('Arbeitsmarkt', 10, altered, 'FRESH', at.isoformat())
+                self.assertFalse(eligible(record, at, factor='Arbeitsmarkt', currency='GBP')[0])
+        record = build_record('Arbeitsmarkt', 10, obs, 'FRESH', '2026-10-20T05:59:59+00:00')
+        self.assertFalse(eligible(record, at, factor='Arbeitsmarkt', currency='GBP')[0])
+
+    def test_labour_reader_rejects_future_vintage_even_after_confirmed_release(self):
+        from official_ons import parse_ons_labour
+        from live_data import build_record, eligible
+        at = datetime(2026, 10, 20, 6, tzinfo=timezone.utc)
+        obs = parse_ons_labour(self.release_fixture('2026-10-19T23:00:00Z'), now=at)
+        obs['release_date_known'] = '2026-10-21'
+        record = build_record('Arbeitsmarkt', 10, obs, 'FRESH', at.isoformat())
+        self.assertFalse(eligible(record, at, factor='Arbeitsmarkt', currency='GBP')[0])
+
 if __name__ == '__main__': unittest.main()
