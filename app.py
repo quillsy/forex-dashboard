@@ -6779,6 +6779,54 @@ def format_score(value, digits=1):
     return f"{number:+.{digits}f}" if number is not None else "N/A"
 
 
+def currency_snapshot_history_row(snapshot_id, snapshot):
+    """Display saved currency provenance without requalifying or modifying it."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    meta = snapshot.get("metadata")
+    meta = meta if isinstance(meta, dict) else {}
+    factors = snapshot.get("factors")
+    if not isinstance(factors, dict) or not factors:
+        factors = snapshot.get("factor_scores")
+    factors = factors if isinstance(factors, dict) else {}
+
+    def text(value):
+        return value.strip() if isinstance(value, str) and value.strip() else "Unbekannt"
+
+    quality = finite_number(snapshot.get("data_quality"))
+    quality = quality if quality is not None and 0 <= quality <= 100 else None
+    missing = snapshot.get("missing_factors")
+    missing_known = isinstance(missing, list) and all(
+        isinstance(factor, str) and factor.strip() for factor in missing)
+    observations = snapshot.get("observations")
+    observations = observations if isinstance(observations, dict) else {}
+    reasons = []
+    if missing_known:
+        for factor in missing:
+            observation = observations.get(factor)
+            reason = observation.get("_display_status") if isinstance(observation, dict) else None
+            reasons.append(f"{factor}: {text(reason) if reason else 'Grund nicht gespeichert'}")
+
+    score = snapshot.get("core_score") if "core_score" in snapshot else snapshot.get("score")
+    row = {
+        "Snapshot ID": snapshot_id,
+        "Datum": text(meta.get("date") or snapshot.get("date")),
+        "Währung": text(meta.get("currency") or snapshot.get("currency")),
+        "BASE CORE": format_score(score),
+        "CORE-Abdeckung (gespeichert)": f"{quality:g}%" if quality is not None else "Unbekannt",
+        "Einzelstatus (gespeichert)": text(snapshot.get("core_status")),
+        "Fehlende Faktoren": ", ".join(missing) if missing_known and missing else "Keine laut Aufzeichnung" if missing_known else "Unbekannt",
+        "Sperrhinweise (gespeichert)": "; ".join(reasons) if reasons else "Keine laut Aufzeichnung" if missing_known else "Unbekannt",
+        "Modellversion": text(snapshot.get("model_version") or meta.get("model_version")),
+        "Collectorabschluss (gespeichert)": text(snapshot.get("collector_completed_at")),
+        "Freigabeprüfung (gespeichert)": text(snapshot.get("eligibility_checked_at")),
+        "Regime": text(snapshot.get("regime")),
+    }
+    for factor, weight in (("Geldpolitik", 35), ("Inflation", 20),
+                           ("Arbeitsmarkt", 20), ("PMI", 20), ("GDP", 5)):
+        row[f"{factor} ({weight}%)"] = format_score(factors.get(factor))
+    return row
+
+
 def render_metric_card(title, val_str, source_text, is_live):
     live_class = "source-tag-live" if is_live else ""
     card_html = f"""
@@ -8896,32 +8944,10 @@ if not getattr(st, "_mock_mode", False):
             
             with hist_sub1:
                 st.subheader("🏆 Protokollierte Einzelwährungs-Snapshots")
+                st.caption("Gespeicherte Beobachtungen, keine aktuellen Paar-Signale. VALID bezeichnet den damaligen Einzelwährungsstatus; Teil-Scores können ab 50% CORE-Abdeckung vorliegen. Paar-Signale verlangen weiterhin 100% auf beiden Seiten. Abdeckung ist keine Trefferwahrscheinlichkeit. Unbekannt bedeutet: nicht oder nicht gültig gespeichert. Zeitangaben und Modellversionen stammen aus dem jeweiligen Snapshot; ältere Einträge werden nicht nachträglich als aktuell geprüft.")
                 if curr_snapshots:
-                    c_rows = []
-                    for s_id, s in curr_snapshots.items():
-                        meta = s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {}
-                        factors = s.get("factors", {}) if isinstance(s.get("factors"), dict) else {}
-                        
-                        s_date = meta.get("date") if meta.get("date") else s.get("date", "N/A")
-                        s_curr = meta.get("currency") if meta.get("currency") else s.get("currency", "N/A")
-                        
-                        # Preserve explicit missing CORE; never substitute a context total.
-                        score_val = s.get("core_score") if "core_score" in s else s.get("score")
-                            
-                        s_factors = factors if factors else s.get("factor_scores", {})
-                        
-                        c_rows.append({
-                            "Snapshot ID": s_id,
-                            "Datum": s_date,
-                            "Währung": s_curr,
-                            "BASE CORE": format_score(score_val),
-                            "Regime": s.get("regime", "Neutral"),
-                            "Geldpolitik (35%)": f"{s_factors.get('Geldpolitik', 0.0):+.1f}" if s_factors.get('Geldpolitik') is not None else "N/A",
-                            "Inflation (20%)": f"{s_factors.get('Inflation', 0.0):+.1f}" if s_factors.get('Inflation') is not None else "N/A",
-                            "Arbeitsmarkt (20%)": f"{s_factors.get('Arbeitsmarkt', 0.0):+.1f}" if s_factors.get('Arbeitsmarkt') is not None else "N/A",
-                            "PMI (20%)": f"{s_factors.get('PMI', 0.0):+.1f}" if s_factors.get('PMI') is not None else "N/A",
-                            "GDP (5%)": f"{s_factors.get('GDP', 0.0):+.1f}" if s_factors.get('GDP') is not None else "N/A"
-                        })
+                    c_rows = [currency_snapshot_history_row(s_id, s)
+                              for s_id, s in curr_snapshots.items()]
                     df_c_hist = pd.DataFrame(c_rows).sort_values("Datum", ascending=False)
                     st.dataframe(df_c_hist, hide_index=True, use_container_width=True)
                 else:
