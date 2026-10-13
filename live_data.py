@@ -358,6 +358,27 @@ def eligible(record, now=None, factor=None, currency=None):
     checked = timestamp(record.get("checked_at"))
     if checked is None or checked > now:
         return False, "Erfolgreiche Aktualitätsprüfung fehlt"
+    if currency == "GBP" and factor == "Arbeitsmarkt":
+        from official_ons import LABOUR_URL, LABOUR_2026_OCTOBER_DATE, LABOUR_2026_OCTOBER_DUE
+        from zoneinfo import ZoneInfo
+        vintage = observation.get("release_date_known")
+        try:
+            vintage_day = (datetime.strptime(vintage, "%Y-%m-%d").date()
+                           if isinstance(vintage, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", vintage)
+                           else None)
+        except ValueError:
+            vintage_day = None
+        if vintage is not None and vintage_day is None:
+            return False, "ONS-Veröffentlichungsdatum ungültig"
+        if vintage_day is not None and vintage_day > now.astimezone(ZoneInfo("Europe/London")).date():
+            return False, "ONS-Arbeitsmarkt-Veröffentlichung liegt in der Zukunft"
+        new_vintage = vintage_day is not None and vintage_day.isoformat() >= LABOUR_2026_OCTOBER_DATE
+        if now < LABOUR_2026_OCTOBER_DUE and new_vintage:
+            return False, "ONS-Arbeitsmarkt vor dem amtlichen Veröffentlichungstermin"
+        if now >= LABOUR_2026_OCTOBER_DUE and (not new_vintage
+                or observation.get("source") != "ONS" or observation.get("series_id") != "MGSX/LMS"
+                or observation.get("source_url") != LABOUR_URL or checked < LABOUR_2026_OCTOBER_DUE):
+            return False, "ONS-Arbeitsmarkt-Veröffentlichung fällig; aktueller LMS-Stand nicht bestätigt"
     if currency == "GBP" and factor == "GDP":
         from official_ons import Q2_2026_END, Q2_2026_REVISION_DATE, Q2_2026_REVISION_DUE
         if reference.date().isoformat() <= Q2_2026_END:
