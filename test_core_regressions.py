@@ -195,6 +195,9 @@ class CoreRegressionTests(unittest.TestCase):
                          'observation': {'date': '2026-09-12', 'value': 2.0,
                                          'policy_rate': 2.0, 'yield_2y': 2.0}}
                 for factor in live.FACTORS}
+        # September HICP was not published at this fixture's September 12
+        # clock. Use the preceding reference month; pair arithmetic is unchanged.
+        dataset['currencies']['EUR']['Inflation']['observation']['date'] = '2026-08-01'
         # USD CPI and labor need actual release-period proof, even in the
         # synthetic pair arithmetic fixture. Their factor scores stay frozen.
         for factor, series, published, due, url in (

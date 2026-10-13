@@ -328,7 +328,7 @@ def eligible(record, now=None, factor=None, currency=None):
         elif (observation.get("bls_proof_source") not in (None, "DOL_PDF")
               or embargo != published or proof_url != _pdf_url(factor, embargo)):
             return False, "Amtlicher BLS-Veröffentlichungsstand oder nächste Fälligkeit fehlt"
-    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, SCHEDULED_RELEASES
+    from source_contracts import KNOWN_RELEASES, KNOWN_SOURCE_CONFLICTS, scheduled_releases
     rights_hold = PUBLIC_RIGHTS_HOLDS.get((currency, factor))
     if rights_hold:
         return False, rights_hold
@@ -340,15 +340,16 @@ def eligible(record, now=None, factor=None, currency=None):
         minimum = datetime.strptime(release["period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if reference < minimum:
             return False, "Neuere amtliche Referenzperiode veröffentlicht: " + release["label"]
-    scheduled = SCHEDULED_RELEASES.get((currency, factor))
-    if scheduled:
+    for scheduled in scheduled_releases(currency, factor):
         scheduled_due = timestamp(scheduled.get("due_at"))
         if scheduled_due is None:
             return False, "Amtlicher Veröffentlichungstermin nicht bestätigt"
+        minimum = datetime.strptime(scheduled["minimum_period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         if now >= scheduled_due:
-            minimum = datetime.strptime(scheduled["minimum_period_start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
             if reference < minimum:
                 return False, "Neuere amtliche Referenzperiode fällig: " + scheduled["minimum_period_start"][:7]
+        elif reference >= minimum:
+            return False, "Amtliche Referenzperiode noch nicht fällig: " + scheduled["minimum_period_start"][:7]
     if reference > now or record.get("freshness") not in ("FRESH", "AGING"):
         return False, "Referenzperiode oder Altersprüfung ungültig"
     if any(record.get(field) is not None and timestamp(record[field]) is None

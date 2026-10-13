@@ -132,8 +132,8 @@ KNOWN_RELEASES[("CHF", "Inflation")] = {
 # Eurostat confirms the *date*, not a publication hour, of the September 2026
 # EA21 flash HICP. Midnight in Europe/Luxembourg is the conservative deadline:
 # an August reading must not be requalified by a lagging API after that point.
-# This transition applies only to the August -> September reference period;
-# September data resume hourly checks until a later official date is verified.
+# Keep earlier transitions when adding later dates: replacing the old floor
+# would let a lagging old API period become eligible before the new deadline.
 # https://ec.europa.eu/eurostat/en/web/products-euro-indicators/w/2-17092026-ap
 SCHEDULED_RELEASES = {
     ("EUR", "Inflation"): {
@@ -142,5 +142,22 @@ SCHEDULED_RELEASES = {
         "release_date_known": "2026-10-02",
         "due_at": "2026-10-01T22:00:00+00:00",
         "next_due_precision": "date_only_start_of_EU_day",
+        "following_releases": [{
+            "previous_period": "2026-09",
+            "minimum_period_start": "2026-10-01",
+            "release_date_known": "2026-11-04",
+            # Luxembourg is back on CET. This is a conservative local-day
+            # deadline, not an evidenced publication hour or API delivery SLA.
+            "due_at": "2026-11-03T23:00:00+00:00",
+            "next_due_precision": "date_only_start_of_EU_day",
+            "source": "https://ec.europa.eu/eurostat/en/web/products-euro-indicators/w/2-02102026-ap",
+            "calendar_source": "https://ec.europa.eu/eurostat/news/release-calendar?start=1793574000000&type=dayGridWeek",
+        }],
     },
 }
+
+
+def scheduled_releases(currency, factor):
+    """Return every confirmed transition without discarding earlier floors."""
+    first = SCHEDULED_RELEASES.get((currency, factor))
+    return (first, *first.get("following_releases", ())) if first else ()
