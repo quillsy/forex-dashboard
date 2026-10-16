@@ -2,7 +2,8 @@
 import argparse
 import fcntl
 import json
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -10,12 +11,52 @@ import requests
 
 from collect_niche_context import _atomic_csv, _digest, _pack_snapshot, _unpack_snapshot
 from collect_research import atomic_json, read_archive_status
-from mof_context import fetch, validate_artifact
+from mof_context import _time, fetch, validate_artifact
 
 DATA_NAME = 'mof_context.json'
 RAW_NAME = 'mof_week.csv'
 JOURNAL_NAME = 'mof_context_vintages.json'
 STATUS_NAME = 'mof_context_status.json'
+
+
+def validate_status(status, *, now):
+    if (not isinstance(status, dict) or set(status) !=
+            {'schema', 'mode', 'core_eligible', 'signal', 'status', 'last_attempt_at',
+             'next_allowed_at', 'last_success_at', 'archive_head', 'archive_event_count',
+             'source_sha256', 'error_code'}
+            or status.get('schema') != 'fx-mof-collection-v1'
+            or status.get('mode') != 'research_only' or status.get('core_eligible') is not False
+            or status.get('signal') is not None
+            or status.get('status') not in ('success', 'failed', 'attempt_started')):
+        raise ValueError('Invalid MoF status')
+    count = status['archive_event_count']
+    anchor = status['archive_head']
+    source_hash = status['source_sha256']
+    if (type(count) is not int or count < 0
+            or (count == 0 and anchor is not None)
+            or (count > 0 and (not isinstance(anchor, str) or not re.fullmatch('[0-9a-f]{64}', anchor)))
+            or (source_hash is not None and (count == 0 or not isinstance(source_hash, str)
+                                            or not re.fullmatch('[0-9a-f]{64}', source_hash)))):
+        raise ValueError('Invalid MoF status archive metadata')
+    attempted = _time(status['last_attempt_at'])
+    deadline = _time(status['next_allowed_at'])
+    successful = _time(status['last_success_at']) if status['last_success_at'] is not None else None
+    if (attempted > now or deadline < attempted + timedelta(hours=20)
+            or successful is not None and successful > now):
+        raise ValueError('Invalid MoF status chronology')
+    if status['status'] == 'success':
+        if (successful is None or successful < attempted
+                or deadline < successful + timedelta(hours=20)
+                or count == 0 or source_hash is None):
+            raise ValueError('Invalid MoF success status')
+    elif successful is not None and successful > attempted:
+        raise ValueError('Invalid MoF previous success time')
+    if status['status'] == 'failed':
+        if status['error_code'] not in ('MOF_REQUEST_FAILED', 'MOF_RESPONSE_OR_ARCHIVE_INVALID'):
+            raise ValueError('Invalid MoF failure code')
+    elif status['error_code'] is not None:
+        raise ValueError('Unexpected MoF failure code')
+    return attempted, deadline
 
 
 def _retry_after_at(error, now):
@@ -38,6 +79,9 @@ def _retry_after_at(error, now):
 def _changes(previous, current):
     if previous is None:
         return [], [item['week_end'] for item in current['observations']]
+    if (date.fromisoformat(current['observations'][-1]['week_end'])
+            < date.fromisoformat(previous['observations'][-1]['week_end'])):
+        raise ValueError('MoF source period moved backwards')
     old = {item['week_end']: item['values'] for item in previous['observations']}
     new = {item['week_end']: item['values'] for item in current['observations']}
     revisions = sorted(week for week in old.keys() & new.keys() if old[week] != new[week])
@@ -107,32 +151,17 @@ def collect(output_dir, *, now=None, session=None):
         status_path = directory / STATUS_NAME
         try:
             previous_status = read_archive_status(status_path)
-            if previous_status and (previous_status.get('schema') != 'fx-mof-collection-v1'
-                                    or previous_status.get('mode') != 'research_only'
-                                    or previous_status.get('core_eligible') is not False
-                                    or previous_status.get('signal') is not None
-                                    or previous_status.get('status') not in
-                                    ('success', 'failed', 'attempt_started')):
-                raise ValueError('Invalid previous MoF status')
+            attempted, deadline = (validate_status(previous_status, now=now)
+                                   if previous_status or status_path.exists() else (None, None))
             events = _history(directory / JOURNAL_NAME, previous_status.get('archive_head'),
                               now=now, allow_tail=True)
             anchor = events[-1]['event_hash'] if events else None
-            last_attempt = previous_status.get('last_attempt_at')
-            if last_attempt:
-                attempted = datetime.fromisoformat(last_attempt)
-                if attempted.tzinfo is None or attempted > now:
-                    raise ValueError('Invalid MoF attempt time')
-                deadline_text = previous_status.get('next_allowed_at')
-                deadline = (datetime.fromisoformat(deadline_text) if deadline_text
-                            else attempted + timedelta(hours=20))
-                if deadline.tzinfo is None or deadline < attempted:
-                    raise ValueError('Invalid MoF cooldown')
-                if now < deadline:
-                    if previous_status.get('status') == 'attempt_started':
-                        return {**previous_status, 'status': 'failed',
-                                'error_code': 'MOF_PRIOR_ATTEMPT_INCOMPLETE',
-                                'collection_action': 'not_due'}
-                    return {**previous_status, 'collection_action': 'not_due'}
+            if attempted is not None and now < deadline:
+                if previous_status.get('status') == 'attempt_started':
+                    return {**previous_status, 'status': 'failed',
+                            'error_code': 'MOF_PRIOR_ATTEMPT_INCOMPLETE',
+                            'collection_action': 'not_due'}
+                return {**previous_status, 'collection_action': 'not_due'}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return {'status': 'failed', 'error_code': 'MOF_ARCHIVE_INVALID'}
         state = {'schema': 'fx-mof-collection-v1', 'mode': 'research_only',

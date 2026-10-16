@@ -4,7 +4,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from collect_mof_context import DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME, _history
+from collect_mof_context import DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME, _history, validate_status
 from collect_niche_context import _digest
 from collect_research import read_archive_status
 from mof_context import parse_mof, validate_artifact
@@ -17,9 +17,8 @@ def load_context(directory, *, now=None):
     now = now.astimezone(timezone.utc)
     directory = Path(directory)
     status = read_archive_status(directory / STATUS_NAME)
-    if (status.get('schema') != 'fx-mof-collection-v1' or status.get('status') != 'success'
-            or status.get('mode') != 'research_only' or status.get('core_eligible') is not False
-            or status.get('signal') is not None or status.get('error_code') is not None):
+    validate_status(status, now=now)
+    if status['status'] != 'success':
         raise ValueError('MoF collection not successful')
     events = _history(directory / JOURNAL_NAME, status.get('archive_head'), now=now)
     if not events or len(events) != status.get('archive_event_count'):

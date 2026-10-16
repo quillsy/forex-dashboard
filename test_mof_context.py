@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 import requests
 
-from collect_mof_context import DATA_NAME, JOURNAL_NAME, STATUS_NAME, collect
+from collect_mof_context import DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME, collect
+from collect_niche_context import _digest, _pack_snapshot
 from mof_context import SOURCE_TITLE, parse_mof
 from mof_context_panel import load_context, render_mof_context
 
@@ -224,6 +225,128 @@ class MofContextTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_context(temp, now=NOW + timedelta(days=2))
 
+    def test_period_rollback_preserves_validated_files_and_hides_values(self):
+        for update in ('September 17 , 2026', 'September 18 , 2026'):
+            with self.subTest(update=update), tempfile.TemporaryDirectory() as temp:
+                collect(temp, now=NOW, session=Session())
+                originals = {name: Path(temp, name).read_bytes()
+                             for name in (DATA_NAME, RAW_NAME, JOURNAL_NAME)}
+                later = NOW + timedelta(days=1)
+                regressed = collect(temp, now=later, session=Session(sample(
+                    first_week=date(2025, 9, 7), update=update)))
+                self.assertEqual(regressed['status'], 'failed')
+                self.assertEqual(regressed['error_code'], 'MOF_RESPONSE_OR_ARCHIVE_INVALID')
+                for name, original in originals.items():
+                    self.assertEqual(Path(temp, name).read_bytes(), original)
+                with self.assertRaises(ValueError):
+                    load_context(temp, now=later)
+                recovered_at = NOW + timedelta(days=2)
+                recovered = collect(temp, now=recovered_at, session=Session(sample(
+                    first_week=date(2025, 9, 21), update='September 24 , 2026')))
+                self.assertEqual(recovered['status'], 'success')
+                self.assertEqual(load_context(temp, now=recovered_at)[0]['observations'][-1]['week_end'],
+                                 '2026-09-19')
+
+    def test_rehashed_period_rollback_in_history_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status = collect(temp, now=NOW, session=Session())
+            later = NOW + timedelta(days=1)
+            raw = sample(first_week=date(2025, 9, 7), update='September 18 , 2026')
+            artifact = parse_mof(raw, later.isoformat())
+            journal = json.loads(Path(temp, JOURNAL_NAME).read_text())
+            event = {'sequence': 2, 'previous_hash': status['archive_head'],
+                     'first_observed_at': later.isoformat(), 'published_at': None,
+                     'mode': 'research_only', 'core_eligible': False, 'signal': None,
+                     'state_hash': _digest(artifact), 'snapshot': _pack_snapshot(artifact),
+                     'revision_week_ends': [], 'added_week_ends': ['2025-09-13']}
+            event['event_hash'] = _digest(event)
+            journal['events'].append(event)
+            status.update(archive_head=event['event_hash'], archive_event_count=2,
+                          last_attempt_at=later.isoformat(), last_success_at=later.isoformat(),
+                          next_allowed_at=(later + timedelta(hours=20)).isoformat(),
+                          source_sha256=artifact['source_sha256'])
+            Path(temp, RAW_NAME).write_bytes(raw)
+            for name, content in ((DATA_NAME, artifact), (JOURNAL_NAME, journal),
+                                  (STATUS_NAME, status)):
+                Path(temp, name).write_text(json.dumps(content))
+            with self.assertRaisesRegex(ValueError, 'period moved backwards'):
+                load_context(temp, now=later)
+            client = Session()
+            result = collect(temp, now=later + timedelta(days=1), session=client)
+            self.assertEqual(result['error_code'], 'MOF_ARCHIVE_INVALID')
+            self.assertEqual(client.calls, [])
+
+    def test_corrupt_status_blocks_collection_and_display_without_erasing_evidence(self):
+        corruptions = (
+            {'next_allowed_at': 'damaged-timestamp'},
+            {'next_allowed_at': None},
+            {'next_allowed_at': (NOW + timedelta(hours=1)).isoformat()},
+            {'last_attempt_at': (NOW + timedelta(days=2)).isoformat()},
+            {'last_attempt_at': NOW.replace(tzinfo=None).isoformat()},
+            {'last_success_at': None},
+            {'last_success_at': (NOW + timedelta(days=2)).isoformat()},
+        )
+        for corruption in corruptions:
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temp:
+                status = collect(temp, now=NOW, session=Session())
+                status.update(corruption)
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                originals = {name: Path(temp, name).read_bytes()
+                             for name in (DATA_NAME, RAW_NAME, JOURNAL_NAME, STATUS_NAME)}
+                later = NOW + timedelta(days=1)
+                client = Session()
+                result = collect(temp, now=later, session=client)
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error_code'], 'MOF_ARCHIVE_INVALID')
+                self.assertEqual(client.calls, [])
+                for name, original in originals.items():
+                    self.assertEqual(Path(temp, name).read_bytes(), original)
+                with self.assertRaises(ValueError):
+                    load_context(temp, now=later)
+                st = Streamlit()
+                with patch('mof_context_panel.load_context',
+                           side_effect=lambda directory: load_context(directory, now=later)):
+                    render_mof_context(st, temp)
+                self.assertTrue(any(method == 'warning' for method, unused in st.messages))
+                self.assertFalse(any(method == 'write' for method, unused in st.messages))
+
+    def test_post_fetch_success_time_remains_valid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            completed = NOW + timedelta(seconds=10)
+            with patch('collect_mof_context.datetime', wraps=datetime) as clock:
+                clock.now.side_effect = [NOW, completed]
+                result = collect(temp, session=Session())
+            self.assertEqual(result['status'], 'success')
+            self.assertEqual(result['last_attempt_at'], NOW.isoformat())
+            self.assertEqual(result['last_success_at'], completed.isoformat())
+            self.assertEqual(load_context(temp, now=completed)[1]['status'], 'success')
+            client = Session()
+            blocked = collect(temp, now=completed + timedelta(hours=1), session=client)
+            self.assertEqual(blocked['collection_action'], 'not_due')
+            self.assertEqual(client.calls, [])
+
+    def test_interrupted_publish_preserves_history_and_recovers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch('collect_mof_context._atomic_csv', side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    collect(temp, now=NOW, session=Session())
+            status = json.loads(Path(temp, STATUS_NAME).read_text())
+            self.assertEqual(status['status'], 'attempt_started')
+            self.assertIsNone(status['archive_head'])
+            original_journal = Path(temp, JOURNAL_NAME).read_bytes()
+            client = Session()
+            blocked = collect(temp, now=NOW + timedelta(hours=1), session=client)
+            self.assertEqual(blocked['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
+            self.assertEqual(client.calls, [])
+            with self.assertRaises(ValueError):
+                load_context(temp, now=NOW + timedelta(hours=1))
+            recovered_at = NOW + timedelta(hours=20, seconds=1)
+            recovered = collect(temp, now=recovered_at, session=Session())
+            self.assertEqual(recovered['status'], 'success')
+            self.assertEqual(recovered['archive_event_count'], 1)
+            self.assertEqual(Path(temp, JOURNAL_NAME).read_bytes(), original_journal)
+            self.assertEqual(load_context(temp, now=recovered_at)[1]['status'], 'success')
+
     def test_failed_request_has_cooldown_without_reattempt(self):
         with tempfile.TemporaryDirectory() as temp:
             failed = collect(temp, now=NOW, session=Session(fail=True))
@@ -252,6 +375,7 @@ class MofContextTests(unittest.TestCase):
             status_path = Path(temp, STATUS_NAME)
             status = json.loads(status_path.read_text())
             status['status'] = 'attempt_started'
+            status['error_code'] = None
             status_path.write_text(json.dumps(status))
             incomplete_session = Session()
             incomplete = collect(temp, now=NOW + timedelta(hours=25),
