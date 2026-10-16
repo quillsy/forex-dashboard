@@ -286,8 +286,13 @@ def eligible(record, now=None, factor=None, currency=None):
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
     identity = (factor, observation.get("source"), observation.get("series_id"))
-    if identity in _PERIOD_ONLY_FRONTIER_SERIES and not _ea21_gdp_observation(observation):
-        return False, "Eurostat-GDP: Originalreihe oder Quartalsdefinition widersprüchlich"
+    if identity in _PERIOD_ONLY_FRONTIER_SERIES:
+        if not _ea21_gdp_observation(observation):
+            return False, "Eurostat-GDP: Originalreihe oder Quartalsdefinition widersprüchlich"
+        if (record.get("next_due_at") is not None
+                or observation.get("next_due_at") is not None
+                or observation.get("next_due_precision") is not None):
+            return False, "Eurostat-GDP: Veröffentlichungstermin nicht belegt"
     if currency == "USD" and factor in ("Inflation", "Arbeitsmarkt"):
         from official_bls import PINNED_DUES, _api_url, _bls_pdf_url, _pdf_url, _raw_decimal, _successor, BlsInvalid
         series = "CPIAUCNS" if factor == "Inflation" else "UNRATE"
@@ -448,7 +453,8 @@ def eligible(record, now=None, factor=None, currency=None):
     if due is not None:
         if now >= due:
             return False, "Neue Veröffentlichung oder Prüfung fällig"
-    if (due is None or observation.get("needs_hourly_check") is True) and now - checked >= timedelta(hours=1):
+    if (identity in _PERIOD_ONLY_FRONTIER_SERIES or due is None
+            or observation.get("needs_hourly_check") is True) and now - checked >= timedelta(hours=1):
         return False, "Aktualität seit über einer Stunde unbestätigt"
     return True, "Geprüft" if not record.get("last_error") else "Gespeicherte Daten gültig; Quelle gestört"
 
@@ -597,7 +603,7 @@ def _release_frontier(factor, candidate):
         import calendar
         if (any(day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
                 for day in (reference, latest))
-                or (due is None and precision is not None)):
+                or candidate.get("next_due_at") is not None or precision is not None):
             return None
     return {"source": identity[1], "series_id": identity[2], "date": reference.isoformat(),
             "latest_date": latest.isoformat(),

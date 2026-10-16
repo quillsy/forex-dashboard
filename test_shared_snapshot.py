@@ -80,6 +80,8 @@ class SharedSnapshotTests(unittest.TestCase):
         self.assertEqual(shared._validate(docs,NOW),shared._time(docs[shared.FILES[0]]['completed_at']))
         changes=({'date':'2025-12-30'}, {'latest_date':'2026-01-01'},
                  {'next_due_precision':'official_scheduled_time'}, {'series_id':'other'},
+                 {'next_due_at':'2026-02-01T00:00:00+00:00'},
+                 {'next_due_at':'2026-02-01T00:00:00+00:00','next_due_precision':'official_scheduled_time'},
                  {'next_due_at':'invalid'}, {'private_key':'secret'})
         for change in changes:
             with self.subTest(change=change):
@@ -90,6 +92,26 @@ class SharedSnapshotTests(unittest.TestCase):
             bad=fixture(); f=frontier(currency,factor); f.update(next_due_at=None,next_due_precision=None)
             bad[shared.FILES[0]]['currencies'][currency][factor]['release_frontier']=f
             with self.assertRaises((shared.Invalid,ValueError)): shared._validate(bad,NOW)
+
+    def test_eurostat_record_and_observation_reject_invented_calendar_in_both_transports(self):
+        for layer,fields in (('record',{'next_due_at':'2026-02-01T00:00:00+00:00'}),
+                ('observation',{'next_due_at':'2026-02-01T00:00:00+00:00'}),
+                ('observation',{'next_due_precision':'official_scheduled_time'}),
+                ('observation',{'next_due_at':'2026-02-01T00:00:00+00:00',
+                                'next_due_precision':'official_scheduled_time'})):
+            with self.subTest(layer=layer,fields=fields):
+                docs=fixture(); row=docs[shared.FILES[0]]['currencies']['EUR']['GDP']
+                (row if layer=='record' else row['observation']).update(fields)
+                # No valid observation is needed to reject invented public metadata.
+                with self.assertRaises(shared.Invalid): shared._validate(docs,NOW)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root=Path(tmp)
+                    for name,document in docs.items():
+                        (root/name).write_text(json.dumps(document))
+                    self.assertIsNone(shared.bundled_snapshot_directory(root,root/'runtime'))
+                with tempfile.TemporaryDirectory() as tmp:
+                    result=shared.refresh_shared_snapshot(now=NOW,root=Path(tmp),client=Client(docs))
+                    self.assertNotEqual(result['outcome'],'UPDATED')
 
     def test_release_frontiers_survive_public_and_bundled_invalid_records(self):
         docs = fixture()

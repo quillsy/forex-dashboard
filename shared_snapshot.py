@@ -155,8 +155,10 @@ def _validate_frontier(frontier, currency, factor, completed):
         raise Invalid()
     if (currency, factor) == ('EUR', 'GDP'):
         import calendar
-        if any(day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
-               for day in (reference, latest)):
+        if (frontier['next_due_at'] is not None or frontier['next_due_precision'] is not None
+                or any(day.month not in (3, 6, 9, 12)
+                       or day.day != calendar.monthrange(day.year, day.month)[1]
+                       for day in (reference, latest))):
             raise Invalid()
     if frontier['next_due_at'] is None:
         if (currency, factor) != ('EUR', 'GDP') or frontier['next_due_precision'] is not None:
@@ -195,6 +197,11 @@ def _validate(documents, now):
             observation = record['observation']
             _keys(observation, live_data.OBS_FIELDS)
             if any(isinstance(v, (dict, list)) for v in observation.values()):
+                raise Invalid()
+            if ((currency, factor) == ('EUR', 'GDP')
+                    and (record.get('next_due_at') is not None
+                         or observation.get('next_due_at') is not None
+                         or observation.get('next_due_precision') is not None)):
                 raise Invalid()
             for field in ('checked_at', 'last_attempt_at', 'published_at'):
                 if record.get(field) is not None and _time(record[field]) > completed:

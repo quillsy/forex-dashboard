@@ -47,6 +47,59 @@ class LiveDataTests(unittest.TestCase):
             view=live.details('EUR',now,{'model_version':live.MODEL,'completed_at':now.isoformat(),'currencies':{'EUR':{'GDP':prior}}})
             self.assertIsNone(view['GDP']); self.assertIn('Ältere Referenzperiode',view['_blocking_reasons']['GDP'])
 
+    def test_eurostat_gdp_rejects_invented_release_metadata_in_every_reader_path(self):
+        now = datetime(2026,11,1,12,tzinfo=timezone.utc)
+        prior = live.build_record('GDP',25,self.eurostat_gdp_period(),'FRESH',now.isoformat())
+        due = (now + timedelta(days=10)).isoformat()
+        changes = (('record',{'next_due_at':due}),
+                   ('observation',{'next_due_at':due}),
+                   ('observation',{'next_due_precision':'official_scheduled_time'}),
+                   ('observation',{'next_due_at':due,'next_due_precision':'official_scheduled_time'}),
+                   ('release_frontier',{'next_due_at':due}),
+                   ('release_frontier',{'next_due_at':due,'next_due_precision':'official_scheduled_time'}))
+        for layer,change in changes:
+            with self.subTest(layer=layer,change=change):
+                row = copy.deepcopy(prior)
+                (row if layer == 'record' else row[layer]).update(change)
+                row = json.loads(json.dumps(row))
+                for minutes in (0,60,120):
+                    at = now + timedelta(minutes=minutes)
+                    self.assertFalse(live.eligible(row,at,'GDP','EUR')[0])
+                    self.assertFalse(live.record_not_due(row,'EUR','GDP',at))
+                    view = live.details('EUR',at,{'completed_at':now.isoformat(),
+                        'currencies':{'EUR':{'GDP':row}}})
+                    self.assertIsNone(view['GDP'])
+                    self.assertIsNotNone(view['_blocking_reasons']['GDP'])
+        for legacy in (False,True):
+            row = copy.deepcopy(prior)
+            if legacy:
+                row.pop('release_frontier'); row.pop('next_due_at')
+                row['observation'].pop('next_due_at',None)
+                row['observation'].pop('next_due_precision',None)
+            self.assertTrue(live.eligible(row,now+timedelta(minutes=59),'GDP','EUR')[0])
+            self.assertFalse(live.eligible(row,now+timedelta(hours=1),'GDP','EUR')[0])
+
+    def test_eurostat_gdp_invented_deadline_cannot_advance_a_qualified_floor(self):
+        now = datetime(2027,1,15,12,tzinfo=timezone.utc)
+        obs = self.eurostat_gdp_period()
+        prior = live.build_record('GDP',25,obs,'FRESH',now.isoformat())
+        successor = dict(obs,date='2026-12-31',reference_period='2026-Q4',value=1.4)
+        due = (now + timedelta(days=10)).isoformat()
+        for fields in ({'next_due_at':due},{'next_due_precision':'official_scheduled_time'},
+                       {'next_due_at':due,'next_due_precision':'official_scheduled_time'}):
+            with self.subTest(fields=fields):
+                failed = live.build_record('GDP',30,dict(successor,**fields),'FRESH',now.isoformat(),prior)
+                self.assertFalse(live.eligible(failed,now,'GDP','EUR')[0])
+                self.assertEqual(failed['release_frontier'],prior['release_frontier'])
+                failed = json.loads(json.dumps(failed))
+                recovered = live.build_record('GDP',25,obs,'FRESH',now.isoformat(),failed)
+                self.assertTrue(live.eligible(recovered,now,'GDP','EUR')[0])
+                self.assertEqual(recovered['release_frontier'],prior['release_frontier'])
+                outage = live.build_record('GDP',None,{},'UNAVAILABLE',
+                    (now+timedelta(minutes=1)).isoformat(),recovered,'SOURCE_UNAVAILABLE')
+                self.assertEqual(outage['checked_at'],recovered['checked_at'])
+                self.assertFalse(live.eligible(outage,now+timedelta(hours=1),'GDP','EUR')[0])
+
     def test_eurostat_gdp_floor_survives_invalid_answers_and_recovers_same_quarter(self):
         now=datetime(2026,11,1,12,tzinfo=timezone.utc)
         obs=self.eurostat_gdp_period()
