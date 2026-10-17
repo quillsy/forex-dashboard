@@ -3,6 +3,8 @@ import argparse
 import fcntl
 import json
 import re
+import subprocess
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -19,11 +21,74 @@ JOURNAL_NAME = 'mof_context_vintages.json'
 STATUS_NAME = 'mof_context_status.json'
 
 
+class PersistenceError(RuntimeError):
+    """A durable Git transition was rejected or could not be confirmed."""
+
+
+class GitPublisher:
+    """Publish one reservation and completion without force or conflict retries."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve()
+        self.repository = self.directory.parent
+        self.parent = None
+        self.reservation = None
+        if self.directory.name != 'research_data':
+            raise PersistenceError('Publishing requires repository/research_data')
+
+    def _git(self, *args):
+        try:
+            return subprocess.run(['git', *args], cwd=self.repository, check=True,
+                                  capture_output=True, text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PersistenceError('MoF Git persistence failed') from error
+
+    def refresh(self):
+        if (Path(self._git('rev-parse', '--show-toplevel')).resolve() != self.repository
+                or self._git('symbolic-ref', '--short', 'HEAD') != 'main'
+                or self._git('status', '--porcelain', '--untracked-files=all')):
+            raise PersistenceError('Publishing requires a clean main checkout')
+        self._git('fetch', '--no-tags', 'origin', 'refs/heads/main')
+        self._git('merge', '--ff-only', 'FETCH_HEAD')
+        self.parent = self._git('rev-parse', 'HEAD')
+        if self.parent != self._git('rev-parse', 'FETCH_HEAD'):
+            raise PersistenceError('Local main contains unpublished commits')
+
+    def _publish(self, names, message):
+        if self.parent is None or self._git('rev-parse', 'HEAD') != self.parent:
+            raise PersistenceError('MoF local parent changed')
+        paths = [f'research_data/{name}' for name in names
+                 if (self.directory / name).exists()]
+        self._git('add', '--', *paths)
+        staged = {path for path in self._git('diff', '--cached', '--name-only', '-z').split('\0')
+                  if path}
+        if not staged or not staged <= set(paths):
+            raise PersistenceError('Unexpected MoF publication paths')
+        self._git('commit', '-m', message)
+        commit = self._git('rev-parse', 'HEAD')
+        self._git('push', 'origin', f'{commit}:refs/heads/main')
+        self.parent = commit
+
+    def reserve(self, state):
+        self._publish([STATUS_NAME], 'Reserve MoF research attempt [skip ci]')
+        self.reservation = dict(state)
+
+    def finish(self, state):
+        persisted = json.loads(self._git('show', f'{self.parent}:research_data/{STATUS_NAME}'))
+        if (self.reservation is None or persisted != self.reservation
+                or state.get('attempt_id') != self.reservation['attempt_id']):
+            raise PersistenceError('MoF reservation changed')
+        self._publish([RAW_NAME, DATA_NAME, JOURNAL_NAME, STATUS_NAME],
+                      'Complete MoF research attempt [skip ci]')
+
+
 def validate_status(status, *, now):
-    if (not isinstance(status, dict) or set(status) !=
-            {'schema', 'mode', 'core_eligible', 'signal', 'status', 'last_attempt_at',
-             'next_allowed_at', 'last_success_at', 'archive_head', 'archive_event_count',
-             'source_sha256', 'error_code'}
+    required_fields = {'schema', 'mode', 'core_eligible', 'signal', 'status', 'last_attempt_at',
+                       'next_allowed_at', 'last_success_at', 'archive_head', 'archive_event_count',
+                       'source_sha256', 'error_code'}
+    if (not isinstance(status, dict)
+            or set(status) not in (required_fields,
+                                   required_fields | {'attempt_id', 'attempt_completed_at'})
             or status.get('schema') != 'fx-mof-collection-v1'
             or status.get('mode') != 'research_only' or status.get('core_eligible') is not False
             or status.get('signal') is not None
@@ -44,6 +109,17 @@ def validate_status(status, *, now):
     if (attempted > now or deadline < attempted + timedelta(hours=20)
             or successful is not None and successful > now):
         raise ValueError('Invalid MoF status chronology')
+    if 'attempt_id' in status:
+        completed = (_time(status['attempt_completed_at'])
+                     if status['attempt_completed_at'] is not None else None)
+        if (not isinstance(status['attempt_id'], str)
+                or not re.fullmatch('[0-9a-f]{32}', status['attempt_id'])
+                or status['status'] == 'attempt_started' and completed is not None
+                or status['status'] != 'attempt_started' and completed is None
+                or completed is not None and (completed < attempted or completed > now
+                                               or deadline < completed + timedelta(hours=20)
+                                               or successful is not None and successful > completed)):
+            raise ValueError('Invalid MoF attempt metadata')
     if status['status'] == 'success':
         if (successful is None or successful < attempted
                 or deadline < successful + timedelta(hours=20)
@@ -135,7 +211,8 @@ def _history(path, anchor, *, now, allow_tail=False):
     return events
 
 
-def collect(output_dir, *, now=None, session=None):
+def collect(output_dir, *, now=None, session=None, publisher=None):
+    """Only the process that confirms a new reservation may perform its GET."""
     injected_clock = now is not None
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None or now.utcoffset() is None:
@@ -148,6 +225,11 @@ def collect(output_dir, *, now=None, session=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return {'status': 'already_running'}
+        if publisher is not None:
+            try:
+                publisher.refresh()
+            except PersistenceError:
+                return {'status': 'failed', 'error_code': 'MOF_PERSISTENCE_FAILED'}
         status_path = directory / STATUS_NAME
         try:
             previous_status = read_archive_status(status_path)
@@ -156,22 +238,30 @@ def collect(output_dir, *, now=None, session=None):
             events = _history(directory / JOURNAL_NAME, previous_status.get('archive_head'),
                               now=now, allow_tail=True)
             anchor = events[-1]['event_hash'] if events else None
+            if previous_status.get('status') == 'attempt_started':
+                return {**previous_status, 'status': 'failed',
+                        'error_code': 'MOF_PRIOR_ATTEMPT_INCOMPLETE',
+                        'collection_action': 'blocked_incomplete'}
             if attempted is not None and now < deadline:
-                if previous_status.get('status') == 'attempt_started':
-                    return {**previous_status, 'status': 'failed',
-                            'error_code': 'MOF_PRIOR_ATTEMPT_INCOMPLETE',
-                            'collection_action': 'not_due'}
                 return {**previous_status, 'collection_action': 'not_due'}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return {'status': 'failed', 'error_code': 'MOF_ARCHIVE_INVALID'}
         state = {'schema': 'fx-mof-collection-v1', 'mode': 'research_only',
                  'core_eligible': False, 'signal': None, 'status': 'attempt_started',
+                 'attempt_id': uuid.uuid4().hex, 'attempt_completed_at': None,
                  'last_attempt_at': now.isoformat(),
                  'next_allowed_at': (now + timedelta(hours=20)).isoformat(),
                  'last_success_at': previous_status.get('last_success_at'),
                  'archive_head': anchor, 'archive_event_count': len(events),
                  'source_sha256': previous_status.get('source_sha256'), 'error_code': None}
         atomic_json(status_path, state)
+        reservation = dict(state)
+        if publisher is not None:
+            try:
+                publisher.reserve(state)
+            except PersistenceError:
+                return {**state, 'status': 'failed', 'error_code': 'MOF_PERSISTENCE_FAILED'}
+        retry_after = None
         try:
             artifact, raw = fetch(session=session, now=now)
             observed = now if injected_clock else max(now, datetime.now(timezone.utc))
@@ -200,27 +290,38 @@ def collect(output_dir, *, now=None, session=None):
             _atomic_csv(directory / RAW_NAME, raw)
             atomic_json(directory / DATA_NAME, artifact)
             state.update(status='success', last_success_at=observed.isoformat(),
-                         next_allowed_at=(observed + timedelta(hours=20)).isoformat(),
                          source_sha256=artifact['source_sha256'])
         except requests.RequestException as error:
             state.update(status='failed', error_code='MOF_REQUEST_FAILED')
             failed_at = now if injected_clock else max(now, datetime.now(timezone.utc))
             retry_after = _retry_after_at(error, failed_at)
-            state['next_allowed_at'] = max(
-                failed_at + timedelta(hours=20), retry_after or failed_at).isoformat()
         except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, UnicodeError):
             state.update(status='failed', error_code='MOF_RESPONSE_OR_ARCHIVE_INVALID')
-            failed_at = now if injected_clock else max(now, datetime.now(timezone.utc))
-            state['next_allowed_at'] = (failed_at + timedelta(hours=20)).isoformat()
+        completed = now if injected_clock else max(now, datetime.now(timezone.utc))
+        state['attempt_completed_at'] = completed.isoformat()
+        state['next_allowed_at'] = max(
+            _time(reservation['next_allowed_at']),
+            completed + timedelta(hours=20), retry_after or completed).isoformat()
+        validate_status(state, now=completed)
         atomic_json(status_path, state)
+        if publisher is not None:
+            try:
+                publisher.finish(state)
+            except PersistenceError:
+                atomic_json(status_path, reservation)
+                return {**reservation, 'status': 'failed',
+                        'error_code': 'MOF_PERSISTENCE_FAILED'}
         return state
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=Path(__file__).parent / 'research_data')
+    parser.add_argument('--publish', action='store_true',
+                        help='Confirm reservation on origin/main before GET, then publish completion')
     args = parser.parse_args()
-    result = collect(args.output_dir)
+    publisher = GitPublisher(args.output_dir) if args.publish else None
+    result = collect(args.output_dir, publisher=publisher)
     print(json.dumps({key: result.get(key) for key in ('status', 'collection_action',
                                                        'last_attempt_at', 'error_code')}))
     return int(result['status'] == 'failed')

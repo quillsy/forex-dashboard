@@ -2,6 +2,10 @@ import csv
 import copy
 import io
 import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -11,7 +15,8 @@ from unittest.mock import patch
 
 import requests
 
-from collect_mof_context import DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME, collect
+from collect_mof_context import (DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME,
+                                 GitPublisher, PersistenceError, collect)
 from collect_niche_context import _digest, _pack_snapshot
 from mof_context import SOURCE_TITLE, parse_mof
 from mof_context_panel import load_context, render_mof_context
@@ -263,6 +268,7 @@ class MofContextTests(unittest.TestCase):
             journal['events'].append(event)
             status.update(archive_head=event['event_hash'], archive_event_count=2,
                           last_attempt_at=later.isoformat(), last_success_at=later.isoformat(),
+                          attempt_completed_at=later.isoformat(),
                           next_allowed_at=(later + timedelta(hours=20)).isoformat(),
                           source_sha256=artifact['source_sha256'])
             Path(temp, RAW_NAME).write_bytes(raw)
@@ -314,7 +320,7 @@ class MofContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             completed = NOW + timedelta(seconds=10)
             with patch('collect_mof_context.datetime', wraps=datetime) as clock:
-                clock.now.side_effect = [NOW, completed]
+                clock.now.side_effect = [NOW, completed, completed]
                 result = collect(temp, session=Session())
             self.assertEqual(result['status'], 'success')
             self.assertEqual(result['last_attempt_at'], NOW.isoformat())
@@ -325,7 +331,7 @@ class MofContextTests(unittest.TestCase):
             self.assertEqual(blocked['collection_action'], 'not_due')
             self.assertEqual(client.calls, [])
 
-    def test_interrupted_publish_preserves_history_and_recovers(self):
+    def test_interrupted_publish_preserves_history_and_stays_blocked(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch('collect_mof_context._atomic_csv', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
@@ -340,12 +346,18 @@ class MofContextTests(unittest.TestCase):
             self.assertEqual(client.calls, [])
             with self.assertRaises(ValueError):
                 load_context(temp, now=NOW + timedelta(hours=1))
-            recovered_at = NOW + timedelta(hours=20, seconds=1)
-            recovered = collect(temp, now=recovered_at, session=Session())
-            self.assertEqual(recovered['status'], 'success')
-            self.assertEqual(recovered['archive_event_count'], 1)
-            self.assertEqual(Path(temp, JOURNAL_NAME).read_bytes(), original_journal)
-            self.assertEqual(load_context(temp, now=recovered_at)[1]['status'], 'success')
+            original_status = Path(temp, STATUS_NAME).read_bytes()
+            for later in (NOW + timedelta(hours=20, seconds=1), NOW + timedelta(days=60)):
+                with self.subTest(later=later):
+                    client = Session()
+                    blocked = collect(temp, now=later, session=client)
+                    self.assertEqual(blocked['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
+                    self.assertEqual(blocked['collection_action'], 'blocked_incomplete')
+                    self.assertEqual(client.calls, [])
+                    self.assertEqual(Path(temp, STATUS_NAME).read_bytes(), original_status)
+                    self.assertEqual(Path(temp, JOURNAL_NAME).read_bytes(), original_journal)
+                    with self.assertRaises(ValueError):
+                        load_context(temp, now=later)
 
     def test_failed_request_has_cooldown_without_reattempt(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -376,15 +388,21 @@ class MofContextTests(unittest.TestCase):
             status = json.loads(status_path.read_text())
             status['status'] = 'attempt_started'
             status['error_code'] = None
+            if 'attempt_completed_at' in status:
+                status['attempt_completed_at'] = None
             status_path.write_text(json.dumps(status))
             incomplete_session = Session()
             incomplete = collect(temp, now=NOW + timedelta(hours=25),
                                  session=incomplete_session)
             self.assertEqual(incomplete['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
             self.assertEqual(incomplete_session.calls, [])
-            recovered = collect(temp, now=NOW + timedelta(hours=48, seconds=1),
-                                session=Session())
-            self.assertEqual(recovered['status'], 'success')
+            original = status_path.read_bytes()
+            late_session = Session()
+            blocked = collect(temp, now=NOW + timedelta(days=60), session=late_session)
+            self.assertEqual(blocked['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
+            self.assertEqual(blocked['collection_action'], 'blocked_incomplete')
+            self.assertEqual(late_session.calls, [])
+            self.assertEqual(status_path.read_bytes(), original)
         with tempfile.TemporaryDirectory() as temp:
             date_header = format_datetime(NOW + timedelta(hours=72))
             failed = collect(temp, now=NOW, session=Session(retry_after=date_header))
@@ -398,6 +416,34 @@ class MofContextTests(unittest.TestCase):
             failed = collect(temp, now=NOW, session=Session(retry_after='0'))
             self.assertEqual(failed['next_allowed_at'],
                              (NOW + timedelta(hours=20)).isoformat())
+
+    def test_legacy_open_attempt_without_id_never_expires(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = collect(temp, now=NOW, session=Session())
+            state['status'] = 'attempt_started'
+            state.pop('attempt_id', None)
+            state.pop('attempt_completed_at', None)
+            path = Path(temp, STATUS_NAME)
+            path.write_text(json.dumps(state))
+            original = path.read_bytes()
+            client = Session()
+            result = collect(temp, now=NOW + timedelta(days=60), session=client)
+            self.assertEqual(result['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
+            self.assertEqual(result['collection_action'], 'blocked_incomplete')
+            self.assertEqual(client.calls, [])
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_cooldown_starts_after_processing_finishes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            observed = NOW + timedelta(hours=1)
+            completed = NOW + timedelta(hours=2)
+            with patch('collect_mof_context.datetime', wraps=datetime) as clock:
+                clock.now.side_effect = [NOW, observed, completed]
+                result = collect(temp, session=Session())
+            self.assertEqual(result['attempt_completed_at'], completed.isoformat())
+            self.assertEqual(result['next_allowed_at'],
+                             (completed + timedelta(hours=20)).isoformat())
+            self.assertEqual(load_context(temp, now=completed)[1]['status'], 'success')
 
     def test_stale_source_and_bounded_network(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -422,6 +468,483 @@ class MofContextTests(unittest.TestCase):
             result = collect(temp, now=NOW, session=redirect)
             self.assertEqual(result['status'], 'failed')
             self.assertFalse(redirect.calls[0][1]['allow_redirects'])
+
+    def test_invalid_attempt_metadata_blocks_collection_and_display(self):
+        corruptions = (
+            {'attempt_id': None},
+            {'attempt_id': 'not-an-attempt-id'},
+            {'attempt_completed_at': None},
+            {'attempt_completed_at': 'damaged-timestamp'},
+            {'attempt_completed_at': (NOW - timedelta(seconds=1)).isoformat()},
+            {'attempt_completed_at': (NOW + timedelta(days=3)).isoformat()},
+            {'attempt_completed_at': (NOW + timedelta(hours=1)).isoformat()},
+            {'status': 'attempt_started'},
+        )
+        for corruption in corruptions:
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temp:
+                status = collect(temp, now=NOW, session=Session())
+                status.update(corruption)
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                originals = {name: Path(temp, name).read_bytes()
+                             for name in (STATUS_NAME, DATA_NAME, RAW_NAME, JOURNAL_NAME)}
+                later = NOW + timedelta(days=2)
+                client = Session()
+                result = collect(temp, now=later, session=client)
+                self.assertEqual(result['error_code'], 'MOF_ARCHIVE_INVALID')
+                self.assertEqual(client.calls, [])
+                with self.assertRaises(ValueError):
+                    load_context(temp, now=later)
+                for name, original in originals.items():
+                    self.assertEqual(Path(temp, name).read_bytes(), original)
+        for missing in ('attempt_id', 'attempt_completed_at'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                status = collect(temp, now=NOW, session=Session())
+                del status[missing]
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                client = Session()
+                result = collect(temp, now=NOW + timedelta(days=1), session=client)
+                self.assertEqual(result['error_code'], 'MOF_ARCHIVE_INVALID')
+                self.assertEqual(client.calls, [])
+
+    def test_valid_legacy_terminal_statuses_migrate_without_losing_history(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as temp:
+                status = collect(temp, now=NOW, session=Session(fail=fail))
+                del status['attempt_id']
+                del status['attempt_completed_at']
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                if not fail:
+                    self.assertEqual(load_context(temp, now=NOW)[1], status)
+                client = Session()
+                later = NOW + timedelta(days=1)
+                result = collect(temp, now=later, session=client)
+                self.assertEqual(result['status'], 'success')
+                self.assertEqual(len(client.calls), 1)
+                self.assertRegex(result['attempt_id'], '^[0-9a-f]{32}$')
+                self.assertEqual(result['attempt_completed_at'], later.isoformat())
+                self.assertEqual(result['archive_event_count'], 1)
+                self.assertEqual(load_context(temp, now=later)[1], result)
+
+    def test_workflow_uses_durable_publication_without_later_push(self):
+        workflow = Path(__file__).with_name('.github') / 'workflows' / 'mof_context.yml'
+        source = workflow.read_text()
+        self.assertIn('python collect_mof_context.py --publish', source)
+        self.assertIn('fetch-depth: 0', source)
+        self.assertIn('group: g10-live-data-collection', source)
+        self.assertNotIn('continue-on-error:', source)
+        self.assertNotIn('git push', source)
+
+
+class MofDurableAttemptTests(unittest.TestCase):
+    """Exercise real Git transitions against temporary local bare remotes only."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.environment = patch.dict(os.environ, {
+            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_TERMINAL_PROMPT': '0'})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.remote = self.root / 'remote.git'
+        self.git(self.root, 'init', '--bare', '--initial-branch=main', str(self.remote))
+        seed = self.runner()
+        (seed / '.gitignore').write_text('research_data/.mof_context.lock\n')
+        (seed / 'README.md').write_text('Local-only MoF persistence test.\n')
+        self.git(seed, 'add', '.')
+        self.git(seed, 'commit', '-m', 'Seed local test repository')
+        self.git(seed, 'push', 'origin', 'HEAD:refs/heads/main')
+        self.base = self.git(seed, 'rev-parse', 'HEAD')
+
+    def git(self, directory, *args):
+        return subprocess.run(['git', *args], cwd=directory, check=True,
+                              capture_output=True, text=True, timeout=15).stdout.strip()
+
+    def runner(self):
+        path = self.root / f'runner-{len(list(self.root.glob("runner-*")))}'
+        self.git(self.root, 'clone', str(self.remote), str(path))
+        self.git(path, 'config', 'user.name', 'Local MoF test')
+        self.git(path, 'config', 'user.email', 'mof-test@example.invalid')
+        return path
+
+    def remote_status(self):
+        return json.loads(self.git(self.remote, 'show', f'main:research_data/{STATUS_NAME}'))
+
+    def advance_main(self):
+        other = self.runner()
+        (other / 'unrelated.txt').write_text('Concurrent main update\n')
+        self.git(other, 'add', 'unrelated.txt')
+        self.git(other, 'commit', '-m', 'Concurrent local test update')
+        self.git(other, 'push', 'origin', 'HEAD:refs/heads/main')
+
+    def assert_fresh_runner_blocked(self, *, now=NOW + timedelta(days=60)):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        before = (directory / STATUS_NAME).read_bytes()
+        session = Session()
+        result = collect(directory, now=now, session=session,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PRIOR_ATTEMPT_INCOMPLETE')
+        self.assertEqual(result['collection_action'], 'blocked_incomplete')
+        self.assertEqual(session.calls, [])
+        self.assertEqual((directory / STATUS_NAME).read_bytes(), before)
+        self.assertEqual(self.remote_status()['status'], 'attempt_started')
+
+    def test_get_sees_published_reservation_and_completion_survives_fresh_runner(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        test = self
+
+        class InspectSession(Session):
+            def get(self, *args, **kwargs):
+                state = test.remote_status()
+                test.assertEqual(state['status'], 'attempt_started')
+                test.assertTrue(state['attempt_id'])
+                changed = test.git(test.remote, 'diff', '--name-only', test.base, 'main')
+                test.assertEqual(changed, f'research_data/{STATUS_NAME}')
+                return super().get(*args, **kwargs)
+
+        session = InspectSession()
+        result = collect(directory, now=NOW, session=session,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(self.remote_status(), result)
+        self.assertEqual(int(self.git(self.remote, 'rev-list', '--count',
+                                     f'{self.base}..main')), 2)
+        fresh = self.runner()
+        load_context(fresh / 'research_data', now=NOW)
+        blocked_session = Session()
+        blocked = collect(fresh / 'research_data', now=NOW + timedelta(hours=19),
+                          session=blocked_session,
+                          publisher=GitPublisher(fresh / 'research_data'))
+        self.assertEqual(blocked['collection_action'], 'not_due')
+        self.assertEqual(blocked_session.calls, [])
+        due_session = Session()
+        due = collect(fresh / 'research_data', now=NOW + timedelta(hours=20),
+                      session=due_session,
+                      publisher=GitPublisher(fresh / 'research_data'))
+        self.assertEqual(due['status'], 'success')
+        self.assertNotEqual(due['attempt_id'], result['attempt_id'])
+        self.assertEqual(len(due_session.calls), 1)
+
+    def test_sigkill_after_reservation_and_after_get_survives_runner_loss(self):
+        script = '''
+import os
+import signal
+import sys
+import socket
+import requests
+from pathlib import Path
+
+def forbidden(*args, **kwargs):
+    raise AssertionError('CHILD_OFFLINE_NETWORK_ATTEMPT')
+
+requests.adapters.HTTPAdapter.send = forbidden
+socket.create_connection = forbidden
+socket.socket.connect = forbidden
+socket.socket.connect_ex = forbidden
+socket.getaddrinfo = forbidden
+from collect_mof_context import GitPublisher, collect
+from test_mof_context import NOW, Session
+directory, phase, calls = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+class KillPublisher(GitPublisher):
+    def reserve(self, state):
+        if phase == 'before_publish':
+            os.kill(os.getpid(), signal.SIGKILL)
+        super().reserve(state)
+        if phase == 'before_get':
+            os.kill(os.getpid(), signal.SIGKILL)
+class KillSession(Session):
+    def get(self, *args, **kwargs):
+        response = super().get(*args, **kwargs)
+        calls.write_text('1')
+        os.kill(os.getpid(), signal.SIGKILL)
+collect(directory, now=NOW, session=KillSession(), publisher=KillPublisher(directory))
+'''
+        for phase in ('before_publish', 'before_get', 'after_get'):
+            with self.subTest(phase=phase):
+                if phase != 'before_publish':
+                    self.remote = self.root / f'{phase}-remote.git'
+                    self.git(self.root, 'clone', '--bare', str(self.root / 'remote.git'),
+                             str(self.remote))
+                    self.git(self.remote, 'update-ref', 'refs/heads/main', self.base)
+                runner = self.runner()
+                calls = self.root / f'{phase}-calls'
+                process = subprocess.run(
+                    [sys.executable, '-B', '-c', script, str(runner / 'research_data'),
+                     phase, str(calls)], cwd=Path(__file__).parent,
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual(process.returncode, -signal.SIGKILL, process.stderr)
+                self.assertEqual(calls.exists(), phase == 'after_get')
+                if phase == 'before_publish':
+                    self.assertNotIn(STATUS_NAME, self.git(
+                        self.remote, 'ls-tree', '-r', '--name-only', 'main'))
+                    fresh = self.runner()
+                    session = Session()
+                    result = collect(fresh / 'research_data', now=NOW, session=session,
+                                     publisher=GitPublisher(fresh / 'research_data'))
+                    self.assertEqual(result['status'], 'success')
+                    self.assertEqual(len(session.calls), 1)
+                    continue
+                self.assertEqual(self.remote_status()['status'], 'attempt_started')
+                self.assert_fresh_runner_blocked(now=NOW + timedelta(minutes=5))
+                self.assert_fresh_runner_blocked()
+
+    def test_reservation_push_conflict_prevents_get(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        test = self
+
+        class ConflictPublisher(GitPublisher):
+            def reserve(self, state):
+                test.advance_main()
+                super().reserve(state)
+
+        session = Session()
+        result = collect(directory, now=NOW, session=session,
+                         publisher=ConflictPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(session.calls, [])
+        files = self.git(self.remote, 'ls-tree', '-r', '--name-only', 'main')
+        self.assertNotIn(f'research_data/{STATUS_NAME}', files)
+        self.assertIn('unrelated.txt', files)
+
+    def test_unconfirmed_successful_reservation_does_not_start_get(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+
+        class UnconfirmedPublisher(GitPublisher):
+            def reserve(self, state):
+                super().reserve(state)
+                raise PersistenceError('Push acknowledgement lost')
+
+        session = Session()
+        result = collect(directory, now=NOW, session=session,
+                         publisher=UnconfirmedPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(session.calls, [])
+        self.assert_fresh_runner_blocked()
+
+    def test_competing_runner_reserves_first_and_only_one_get_is_made(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        other = self.runner()
+        other_session = Session()
+        test = self
+
+        class LosingPublisher(GitPublisher):
+            def reserve(self, state):
+                winner = collect(other / 'research_data', now=NOW, session=other_session,
+                                 publisher=GitPublisher(other / 'research_data'))
+                test.assertEqual(winner['status'], 'success')
+                super().reserve(state)
+
+        session = Session()
+        result = collect(directory, now=NOW, session=session,
+                         publisher=LosingPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(session.calls, [])
+        self.assertEqual(len(other_session.calls), 1)
+        self.assertEqual(self.remote_status()['status'], 'success')
+
+    def test_completion_push_conflict_keeps_remote_and_local_attempt_open(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        test = self
+
+        class ConflictSession(Session):
+            def get(self, *args, **kwargs):
+                response = super().get(*args, **kwargs)
+                test.advance_main()
+                return response
+
+        session = ConflictSession()
+        result = collect(directory, now=NOW, session=session,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(json.loads((directory / STATUS_NAME).read_text())['status'],
+                         'attempt_started')
+        self.assertIn('unrelated.txt', self.git(self.remote, 'ls-tree', '-r',
+                                              '--name-only', 'main'))
+        self.assert_fresh_runner_blocked()
+
+    def check_durable_retry_after(self, header, hours):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        result = collect(directory, now=NOW, session=Session(retry_after=header),
+                         publisher=GitPublisher(directory))
+        deadline = NOW + timedelta(hours=hours)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(self.remote_status()['next_allowed_at'], deadline.isoformat())
+        fresh = self.runner()
+        session = Session()
+        blocked = collect(fresh / 'research_data', now=deadline - timedelta(seconds=1),
+                          session=session, publisher=GitPublisher(fresh / 'research_data'))
+        self.assertEqual(blocked['collection_action'], 'not_due')
+        self.assertEqual(session.calls, [])
+        result = collect(fresh / 'research_data', now=deadline, session=session,
+                         publisher=GitPublisher(fresh / 'research_data'))
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(len(session.calls), 1)
+
+    def test_retry_after_seconds_survives_fresh_runner(self):
+        self.check_durable_retry_after('172800', 48)
+
+    def test_retry_after_http_date_survives_fresh_runner(self):
+        self.check_durable_retry_after(format_datetime(NOW + timedelta(hours=72)), 72)
+
+    def test_interruption_before_429_completion_publish_does_not_expire(self):
+        class Interrupted(BaseException):
+            pass
+
+        class InterruptedPublisher(GitPublisher):
+            def finish(self, state):
+                raise Interrupted()
+
+        runner = self.runner()
+        directory = runner / 'research_data'
+        session = Session(retry_after='172800')
+        with self.assertRaises(Interrupted):
+            collect(directory, now=NOW, session=session,
+                    publisher=InterruptedPublisher(directory))
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(session.response.closed)
+        self.assertEqual(json.loads((directory / STATUS_NAME).read_text())['next_allowed_at'],
+                         (NOW + timedelta(hours=48)).isoformat())
+        self.assert_fresh_runner_blocked()
+
+    def test_unpublished_local_completion_cannot_bypass_remote_open_attempt(self):
+        class Interrupted(BaseException):
+            pass
+
+        class InterruptedPublisher(GitPublisher):
+            def _git(self, *args):
+                if args[:1] == ('push',) and self.reservation is not None:
+                    raise Interrupted()
+                return super()._git(*args)
+
+        runner = self.runner()
+        directory = runner / 'research_data'
+        with self.assertRaises(Interrupted):
+            collect(directory, now=NOW, session=Session(),
+                    publisher=InterruptedPublisher(directory))
+        self.assertEqual(json.loads((directory / STATUS_NAME).read_text())['status'], 'success')
+        self.assertEqual(self.git(runner, 'status', '--porcelain'), '')
+        session = Session()
+        result = collect(directory, now=NOW + timedelta(days=30), session=session,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(session.calls, [])
+        self.assert_fresh_runner_blocked()
+
+    def test_429_completion_push_conflict_keeps_unknown_attempt_blocked(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        test = self
+
+        class ConflictSession(Session):
+            def get(self, *args, **kwargs):
+                response = super().get(*args, **kwargs)
+                test.advance_main()
+                return response
+
+        client = ConflictSession(retry_after='172800')
+        result = collect(directory, now=NOW, session=client,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(client.response.closed)
+        self.assertEqual(self.remote_status()['status'], 'attempt_started')
+        self.assertEqual(json.loads((directory / STATUS_NAME).read_text())['status'],
+                         'attempt_started')
+        self.assert_fresh_runner_blocked(now=NOW + timedelta(hours=24))
+        self.assert_fresh_runner_blocked()
+
+    def test_unconfirmed_completion_preserves_remote_cooldown(self):
+        class UnconfirmedPublisher(GitPublisher):
+            def finish(self, state):
+                super().finish(state)
+                raise PersistenceError('Completion acknowledgement lost')
+
+        runner = self.runner()
+        directory = runner / 'research_data'
+        client = Session(retry_after='172800')
+        result = collect(directory, now=NOW, session=client,
+                         publisher=UnconfirmedPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(json.loads((directory / STATUS_NAME).read_text())['status'],
+                         'attempt_started')
+        self.assertEqual(self.remote_status()['status'], 'failed')
+        self.assertEqual(self.remote_status()['next_allowed_at'],
+                         (NOW + timedelta(hours=48)).isoformat())
+        fresh = self.runner()
+        client = Session()
+        blocked = collect(fresh / 'research_data', now=NOW + timedelta(hours=24),
+                          session=client, publisher=GitPublisher(fresh / 'research_data'))
+        self.assertEqual(blocked['collection_action'], 'not_due')
+        self.assertEqual(client.calls, [])
+
+    def test_unexpected_staged_files_prevent_reservation_and_get(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        test = self
+
+        class StagedPublisher(GitPublisher):
+            def reserve(self, state):
+                (runner / 'unrelated.txt').write_text('Must not be published\n')
+                test.git(runner, 'add', '--', 'unrelated.txt')
+                super().reserve(state)
+
+        client = Session()
+        result = collect(directory, now=NOW, session=client,
+                         publisher=StagedPublisher(directory))
+        self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+        self.assertEqual(client.calls, [])
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), self.base)
+
+    def test_dirty_or_detached_checkout_prevents_get(self):
+        for condition in ('dirty', 'detached'):
+            with self.subTest(condition=condition):
+                runner = self.runner()
+                if condition == 'dirty':
+                    (runner / 'README.md').write_text('Uncommitted operator changes\n')
+                else:
+                    self.git(runner, 'checkout', '--detach')
+                directory = runner / 'research_data'
+                client = Session()
+                result = collect(directory, now=NOW, session=client,
+                                 publisher=GitPublisher(directory))
+                self.assertEqual(result['error_code'], 'MOF_PERSISTENCE_FAILED')
+                self.assertEqual(client.calls, [])
+                self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), self.base)
+
+    def test_published_open_attempt_hides_previous_valid_values(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        initial = collect(directory, now=NOW, session=Session(),
+                          publisher=GitPublisher(directory))
+        self.assertEqual(initial['status'], 'success')
+        test = self
+        later = NOW + timedelta(days=1)
+
+        class InspectSession(Session):
+            def get(self, *args, **kwargs):
+                fresh = test.runner()
+                with test.assertRaisesRegex(ValueError, 'not successful'):
+                    load_context(fresh / 'research_data', now=later)
+                return super().get(*args, **kwargs)
+
+        client = InspectSession()
+        result = collect(directory, now=later, session=client,
+                         publisher=GitPublisher(directory))
+        self.assertEqual(result['status'], 'success')
+        self.assertNotEqual(initial['attempt_id'], result['attempt_id'])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(load_context(directory, now=later)[1], result)
 
 
 if __name__ == '__main__':
