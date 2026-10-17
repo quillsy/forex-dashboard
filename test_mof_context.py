@@ -14,11 +14,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import requests
+import urllib3
 
 from collect_mof_context import (DATA_NAME, JOURNAL_NAME, RAW_NAME, STATUS_NAME,
                                  GitPublisher, PersistenceError, collect)
 from collect_niche_context import _digest, _pack_snapshot
-from mof_context import SOURCE_TITLE, parse_mof
+from mof_context import SOURCE_TITLE, fetch, parse_mof
 from mof_context_panel import load_context, render_mof_context
 
 NOW = datetime(2026, 9, 22, 22, 30, tzinfo=timezone.utc)
@@ -117,6 +118,39 @@ class Session:
         return self.response
 
 
+class CloseFailureBody(io.BytesIO):
+    def __init__(self, close_error):
+        super().__init__(b'')
+        self.close_error = close_error
+        self.close_attempts = 0
+
+    def close(self):
+        self.close_attempts += 1
+        super().close()
+        if self.close_error is not None:
+            error = self.close_error
+            self.close_error = None
+            raise error
+
+
+class RateLimitCloseSession:
+    def __init__(self, header, close_error):
+        self.body = CloseFailureBody(close_error)
+        raw = urllib3.response.HTTPResponse(
+            body=self.body, status=429, headers={'Retry-After': header}, preload_content=False)
+        self.response = requests.Response()
+        self.response.raw = raw
+        self.response.status_code = 429
+        self.response.headers = requests.structures.CaseInsensitiveDict(raw.headers)
+        self.response.url = 'https://www.mof.go.jp/policy/international_policy/reference/itn_transactions_in_securities/week.csv'
+        self.response.reason = 'Too Many Requests'
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+
 class Streamlit:
     def __init__(self):
         self.messages = []
@@ -187,6 +221,38 @@ class MofContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_mof(sample(), datetime(2026, 9, 16, 23, 30,
                                          tzinfo=timezone.utc).isoformat())
+
+    def test_fetch_preserves_http_error_despite_close_failure(self):
+        for close_error in (OSError('Close I/O failure'), RuntimeError('Close failure'),
+                            requests.ConnectionError('Close connection failure')):
+            with self.subTest(close_error=type(close_error).__name__):
+                client = RateLimitCloseSession('172800', close_error)
+                with self.assertRaises(requests.HTTPError) as raised:
+                    fetch(session=client, now=NOW)
+                self.assertIs(raised.exception.response, client.response)
+                self.assertEqual(raised.exception.response.headers['Retry-After'], '172800')
+                self.assertEqual(client.body.close_attempts, 1)
+                self.assertEqual(len(client.calls), 1)
+
+    def test_fetch_preserves_parse_error_despite_close_failure(self):
+        response = Response(b'not a MoF CSV')
+        client = Session()
+        with patch.object(client, 'get', return_value=response) as request:
+            with patch.object(response, 'close', side_effect=OSError('Close I/O failure')) as close:
+                with self.assertRaisesRegex(ValueError, 'MoF'):
+                    fetch(session=client, now=NOW)
+        request.assert_called_once()
+        close.assert_called_once()
+
+    def test_fetch_does_not_hide_close_failure_after_success(self):
+        response = Response(sample())
+        client = Session()
+        with patch.object(client, 'get', return_value=response) as request:
+            with patch.object(response, 'close', side_effect=OSError('Close I/O failure')) as close:
+                with self.assertRaisesRegex(OSError, 'Close I/O failure'):
+                    fetch(session=client, now=NOW)
+        request.assert_called_once()
+        close.assert_called_once()
 
     def test_prospective_revision_and_point_in_time(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -771,23 +837,37 @@ collect(directory, now=NOW, session=KillSession(), publisher=KillPublisher(direc
                                               '--name-only', 'main'))
         self.assert_fresh_runner_blocked()
 
-    def check_durable_retry_after(self, header, hours):
+    def check_durable_retry_after(self, header, hours, close_error=None):
         runner = self.runner()
         directory = runner / 'research_data'
-        result = collect(directory, now=NOW, session=Session(retry_after=header),
+        client = (RateLimitCloseSession(header, close_error) if close_error is not None
+                  else Session(retry_after=header))
+        result = collect(directory, now=NOW, session=client,
                          publisher=GitPublisher(directory))
         deadline = NOW + timedelta(hours=hours)
         self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['error_code'], 'MOF_REQUEST_FAILED')
+        self.assertEqual(len(client.calls), 1)
+        if close_error is not None:
+            self.assertEqual(client.body.close_attempts, 1)
+        self.assertEqual(self.remote_status(), result)
         self.assertEqual(self.remote_status()['next_allowed_at'], deadline.isoformat())
+        initial_attempt_id = result['attempt_id']
         fresh = self.runner()
+        original = (fresh / 'research_data' / STATUS_NAME).read_bytes()
         session = Session()
-        blocked = collect(fresh / 'research_data', now=deadline - timedelta(seconds=1),
-                          session=session, publisher=GitPublisher(fresh / 'research_data'))
-        self.assertEqual(blocked['collection_action'], 'not_due')
-        self.assertEqual(session.calls, [])
+        for observed in (NOW + timedelta(hours=24), deadline - timedelta(seconds=1)):
+            with self.subTest(observed=observed):
+                blocked = collect(fresh / 'research_data', now=observed,
+                                  session=session, publisher=GitPublisher(fresh / 'research_data'))
+                self.assertEqual(blocked['collection_action'], 'not_due')
+                self.assertEqual(blocked['next_allowed_at'], deadline.isoformat())
+                self.assertEqual(session.calls, [])
+                self.assertEqual((fresh / 'research_data' / STATUS_NAME).read_bytes(), original)
         result = collect(fresh / 'research_data', now=deadline, session=session,
                          publisher=GitPublisher(fresh / 'research_data'))
         self.assertEqual(result['status'], 'success')
+        self.assertNotEqual(result['attempt_id'], initial_attempt_id)
         self.assertEqual(len(session.calls), 1)
 
     def test_retry_after_seconds_survives_fresh_runner(self):
@@ -795,6 +875,29 @@ collect(directory, now=NOW, session=KillSession(), publisher=KillPublisher(direc
 
     def test_retry_after_http_date_survives_fresh_runner(self):
         self.check_durable_retry_after(format_datetime(NOW + timedelta(hours=72)), 72)
+
+    def test_retry_after_48h_survives_close_failure_and_fresh_runner(self):
+        self.check_durable_retry_after('172800', 48, OSError('Close I/O failure'))
+
+    def test_retry_after_http_date_survives_close_failure_and_fresh_runner(self):
+        self.check_durable_retry_after(format_datetime(NOW + timedelta(hours=72)), 72,
+                                       RuntimeError('Close failure'))
+
+    def test_interrupted_response_with_close_failure_keeps_attempt_open(self):
+        runner = self.runner()
+        directory = runner / 'research_data'
+        response = Response(sample())
+        client = Session()
+        with patch.object(client, 'get', return_value=response) as request:
+            with patch.object(response, 'iter_content', side_effect=KeyboardInterrupt):
+                with patch.object(response, 'close', side_effect=OSError('Close I/O failure')) as close:
+                    with self.assertRaises(KeyboardInterrupt):
+                        collect(directory, now=NOW, session=client,
+                                publisher=GitPublisher(directory))
+        request.assert_called_once()
+        close.assert_called_once()
+        self.assertEqual(self.remote_status()['status'], 'attempt_started')
+        self.assert_fresh_runner_blocked()
 
     def test_interruption_before_429_completion_publish_does_not_expire(self):
         class Interrupted(BaseException):

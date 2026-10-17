@@ -180,6 +180,7 @@ def validate_artifact(artifact, *, now=None):
 
 
 def fetch(session=None, *, now=None):
+    """Fetch once without replacing a primary exception with a cleanup failure."""
     session = session or requests.Session()
     now = now or datetime.now(timezone.utc)
     response = session.get(SOURCE_URL, timeout=(10, 30), stream=True,
@@ -200,6 +201,11 @@ def fetch(session=None, *, now=None):
                 raise ValueError('Oversize MoF response')
         raw = bytes(content)
         artifact = parse_mof(raw, now.isoformat())
-        return artifact, raw
-    finally:
-        response.close()
+    except BaseException:
+        try:
+            response.close()
+        except Exception:
+            pass
+        raise
+    response.close()
+    return artifact, raw
