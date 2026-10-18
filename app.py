@@ -8862,8 +8862,10 @@ if not getattr(st, "_mock_mode", False):
             col_pb1, col_pb2 = st.columns(2)
             with col_pb1:
                 st.subheader(f"{CURRENCIES[base_sel]['flag']} {base_sel} Faktoren")
-                st.metric("BASE CORE Score", f"{b_core:+.1f}" if b_core is not None else "N/A", delta=f"Regime: {b_reg}")
-                st.write(f"- Gesamt/Kontext-Score: `{b_score_str}`")
+                st.metric("BASE CORE Score", f"{b_core:+.1f}" if b_core is not None else "N/A",
+                          delta=None if b_details.get("_context_status") == "NOT_COLLECTED" else f"Regime: {b_reg}")
+                b_score_label = "Score (nur CORE; Context nicht geprüft)" if b_details.get("_context_status") == "NOT_COLLECTED" else "Gesamt/Kontext-Score"
+                st.write(f"- {b_score_label}: `{b_score_str}`")
                 st.write(f"- Geldpolitik: `{format_score(b_details.get('Geldpolitik', 0.0))}`")
                 st.write(f"- Inflation: `{format_score(b_details.get('Inflation', 0.0))}`")
                 st.write(f"- Arbeitsmarkt: `{format_score(b_details.get('Arbeitsmarkt', 0.0))}`")
@@ -8871,8 +8873,10 @@ if not getattr(st, "_mock_mode", False):
                 st.write(f"- GDP: `{format_score(b_details.get('GDP', 0.0))}`")
             with col_pb2:
                 st.subheader(f"{CURRENCIES[quote_sel]['flag']} {quote_sel} Faktoren")
-                st.metric("BASE CORE Score", f"{q_core:+.1f}" if q_core is not None else "N/A", delta=f"Regime: {q_reg}")
-                st.write(f"- Gesamt/Kontext-Score: `{q_score_str}`")
+                st.metric("BASE CORE Score", f"{q_core:+.1f}" if q_core is not None else "N/A",
+                          delta=None if q_details.get("_context_status") == "NOT_COLLECTED" else f"Regime: {q_reg}")
+                q_score_label = "Score (nur CORE; Context nicht geprüft)" if q_details.get("_context_status") == "NOT_COLLECTED" else "Gesamt/Kontext-Score"
+                st.write(f"- {q_score_label}: `{q_score_str}`")
                 st.write(f"- Geldpolitik: `{format_score(q_details.get('Geldpolitik', 0.0))}`")
                 st.write(f"- Inflation: `{format_score(q_details.get('Inflation', 0.0))}`")
                 st.write(f"- Arbeitsmarkt: `{format_score(q_details.get('Arbeitsmarkt', 0.0))}`")
