@@ -20,7 +20,8 @@ class UIRegressions(unittest.TestCase):
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory(prefix='fx-ui-test-') as temporary:
             for file in root.iterdir():
-                if file.name == 'app.py' or file.suffix == '.json':
+                # Keep local app imports available even in an isolated test run.
+                if file.is_file() and file.suffix in {'.py', '.json'}:
                     shutil.copy2(file, Path(temporary, file.name))
             try:
                 os.chdir(temporary)
@@ -32,6 +33,12 @@ class UIRegressions(unittest.TestCase):
                     self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
                     self.assertEqual(len(app.tabs), 22)  # 13 main tabs and 9 sub-tabs.
                     self.assertGreater(len(app.dataframe), 10)
+                    pair_metrics = [metric for metric in app.metric if metric.label == 'BASE CORE Score']
+                    self.assertEqual(len(pair_metrics), 2)
+                    self.assertTrue(all(metric.delta == '' for metric in pair_metrics))
+                    core_only_labels = [element.value for element in app.markdown
+                                        if element.value.startswith('- Score (nur CORE; Context nicht geprüft):')]
+                    self.assertEqual(len(core_only_labels), 2)
                     history = next(e.value for e in app.dataframe
                                    if 'Einzelstatus (gespeichert)' in e.value.columns)
                     self.assertIn('CORE-Abdeckung (gespeichert)', history.columns)
