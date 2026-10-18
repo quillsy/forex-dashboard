@@ -1149,6 +1149,28 @@ class OperatorRequestStateDisplayTests(unittest.TestCase):
         self.assertIn("gespeichertes Ende eines Abrufversuchs, auch bei Fehlern", captions)
         self.assertIn("kein erfolgreicher Datenabruf und kein bestätigter Verbrauch beim Anbieter", captions)
 
+    def test_content_notice_has_its_own_historical_time_despite_http_success(self):
+        content_at = (self.AT - timedelta(hours=3)).isoformat()
+        st = self.render(provider=self.provider(status='SUCCESS',
+                         data_status='OFFICIAL_OUTAGE_PAGE', data_status_at=content_at))
+        row = st.dataframe.call_args_list[-1].args[0][0]
+        self.assertEqual(row['Letzter Abrufstatus'], 'SUCCESS')
+        self.assertEqual(row['Letzte Inhaltsmeldung'], 'OFFICIAL_OUTAGE_PAGE')
+        self.assertEqual(row['Zeitpunkt der Inhaltsmeldung'], content_at)
+        self.assertNotIn('Datenprüfung', row)
+        captions = ' '.join(str(call.args[0]) for call in st.caption.call_args_list)
+        self.assertIn('früheren Lauf', captions)
+        self.assertIn('HTTP-Abruf bestätigt keine gültigen Fachdaten', captions)
+
+    def test_legacy_content_notice_does_not_borrow_current_request_time(self):
+        for notice_at in (None, 'invalid', '2026-10-02T12:00:00'):
+            with self.subTest(notice_at=notice_at):
+                row = self.row(status='SUCCESS', data_status='OFFICIAL_OUTAGE_PAGE',
+                               data_status_at=notice_at, last_checked_at=self.AT.isoformat())
+                self.assertEqual(row['Letzte Inhaltsmeldung'], 'OFFICIAL_OUTAGE_PAGE')
+                self.assertEqual(row['Zeitpunkt der Inhaltsmeldung'], 'Unbekannt')
+                self.assertEqual(row['Letzter Abrufstatus'], 'SUCCESS')
+
     def test_interrupted_reservation_remains_visible_and_incomplete(self):
         row = self.row(requests_observed_utc_day=0, requests_reserved_utc_day=1,
                        requests_uncertain_utc_day=1, usage_complete=False)
