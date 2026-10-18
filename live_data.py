@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1119,6 +1120,41 @@ def _freshness_check_label(record, observation, now):
     return prefix + deadline.isoformat() + " (" + reasons + ")"
 
 
+def checkout_revision():
+    """Read local checkout metadata only; never certify loaded code or data."""
+    unknown = {"head": None, "tracked_sources_match": None}
+    try:
+        root = Path(__file__).resolve().parent
+        if not (root / ".git").exists():
+            return unknown
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "core.fsmonitor=false", *args], cwd=root, env=env,
+                shell=False, capture_output=True, text=True, timeout=2,
+            )
+
+        top = git("rev-parse", "--show-toplevel")
+        top_path = Path(top.stdout.strip())
+        if top.returncode != 0 or not top_path.is_absolute() or top_path.resolve() != root:
+            return unknown
+        first = git("rev-parse", "--verify", "HEAD^{commit}")
+        head = first.stdout.strip()
+        if first.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", head):
+            return unknown
+        diff = git("diff", "--quiet", "--no-ext-diff", "--no-textconv", head,
+                   "--", "*.py", "requirements.txt")
+        last = git("rev-parse", "--verify", "HEAD^{commit}")
+        if last.returncode != 0 or last.stdout.strip() != head:
+            return unknown
+        return {"head": head, "tracked_sources_match":
+                True if diff.returncode == 0 else False if diff.returncode == 1 else None}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return unknown
+
+
 def render_status(st, authorized=False):
     data = load()
     checked = timestamp(data.get("completed_at"))
@@ -1219,6 +1255,14 @@ def render_status(st, authorized=False):
     st.dataframe(overview, hide_index=True, use_container_width=True)
     st.caption("Wert · Referenzperiode. Einzelne geprüfte Daten bleiben unabhängig von der Paar-Freigabe sichtbar. — bedeutet fehlend, ungeprüft oder aktuell nicht freigegeben. Arbeitsmarkt-Messzeiträume und Quellen stehen unten; die britische Quote misst drei Monate, CHF und NZD ein Quartal. Keine Handelssignale aus dieser Tabelle ableiten.")
     with st.expander("Datenstatus und Quellen · alle 40 CORE-Faktoren", expanded=False):
+        revision = checkout_revision()
+        source_match = revision["tracked_sources_match"]
+        match_label = "übereinstimmend" if source_match is True else "abweichend" if source_match is False else "unbekannt"
+        st.caption("Git-HEAD des Quellcheckouts: " + (revision["head"] or "unbekannt")
+                   + " · Versionierte Python-Dateien und requirements.txt: " + match_label + ".")
+        st.caption("Lokaler Git-Abgleich zum Anzeigezeitpunkt; kein Nachweis des bereits geladenen "
+                   "Prozesscodes, zusätzlicher Dateien oder installierter Pakete. Die Datencharge steht oben; "
+                   "dieser Abgleich ändert keine Daten- oder Signal-Freigabe.")
         st.caption("Quellentermine können neue Veröffentlichungen oder bereits angekündigte wirksame Änderungen betreffen. "
                    "Die Aktualitätsprüfung kann früher fällig sein.")
         st.dataframe(rows, hide_index=True, use_container_width=True)
