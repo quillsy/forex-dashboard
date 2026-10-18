@@ -205,7 +205,8 @@ class CollectorTransport:
             # validated content status shown to the operator.
             usage["status"] = "SOURCE_UNAVAILABLE"
             usage["data_status"] = "OFFICIAL_OUTAGE_PAGE"
-            usage["last_failure_at"] = self.clock().isoformat()
+            usage["data_status_at"] = self.clock().isoformat()
+            usage["last_failure_at"] = usage["data_status_at"]
             self._persist_usage(host)
 
     def get(self, url, **kwargs):

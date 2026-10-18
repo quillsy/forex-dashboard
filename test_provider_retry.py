@@ -25,8 +25,26 @@ class ProviderRetryTests(unittest.TestCase):
         self.assertEqual(usage['outcomes_this_run'], {'SUCCESS': 1})  # HTTP transport did succeed.
         self.assertEqual(usage['status'], 'SOURCE_UNAVAILABLE')
         self.assertEqual(usage['data_status'], 'OFFICIAL_OUTAGE_PAGE')
+        self.assertEqual(usage['data_status_at'], self.now.isoformat())
         self.assertEqual(usage['last_failure_at'], self.now.isoformat())
         self.assertNotIn('private-detail', json.dumps(usage))
+
+    def test_content_notice_keeps_its_own_time_after_restart_and_http_success(self):
+        host = 'www150.statcan.gc.ca'
+        self.response(200, '')
+        first = self.transport(durable=True)
+        first.get('https://' + host + '/failed-content')
+        first.note_official_outage(host)
+        content_at = self.now.isoformat()
+        self.now += timedelta(minutes=30)
+        self.transport(durable=True).get('https://' + host + '/other-response')
+        saved = json.loads(self.path.read_text())['providers'][host]
+        self.assertEqual(saved['status'], 'SUCCESS')
+        self.assertEqual(saved['data_status'], 'OFFICIAL_OUTAGE_PAGE')
+        self.assertEqual(saved['data_status_at'], content_at)
+        self.assertEqual(saved['last_checked_at'], self.now.isoformat())
+        self.assertEqual(saved['requests_observed_utc_day'], 2)
+        self.assertIsNone(saved['remaining'])
 
     def test_ons_fallback_through_actual_collector_transport(self):
         from official_ons import fetch_ons_gdp, PN2_FALLBACK_URL

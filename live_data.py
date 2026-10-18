@@ -1296,11 +1296,14 @@ def render_status(st, authorized=False):
                     completeness = "Vollständig (lokal)"
                 else:
                     completeness = "Unbekannt"
+                content_at = timestamp(item.get("data_status_at"))
                 provider_rows.append({"Anbieter": host, "Letzter Abrufstatus": item.get("status"),
                                       "Ergebnisse im letzten Lauf": json.dumps(item.get("outcomes_this_run", {}), sort_keys=True),
                                       "Letzter Versuch": item.get("last_attempt_at") or "Unbekannt",
                                       "Fehlerzeit im letzten Lauf": item.get("last_failure_at") or "Keiner dokumentiert",
-                                      "Datenprüfung": item.get("data_status", "Nicht separat gemeldet"),
+                                      "Letzte Inhaltsmeldung": item.get("data_status") or "Keine dokumentiert",
+                                      "Zeitpunkt der Inhaltsmeldung": (content_at.isoformat() if content_at else
+                                                                       "Unbekannt" if item.get("data_status") else "—"),
                                       "Anbieter-Wartezeit bis": item.get("retry_after_at") or "Keine bestätigt",
                                       "Anfragen im letzten Lauf": item.get("requests_this_run"),
                                       "Zählertag (UTC)": day if valid_day else "Unbekannt",
@@ -1315,6 +1318,8 @@ def render_status(st, authorized=False):
                                       "Rücksetzung": "Unbekannt",
                                       "Nachweis": "BLS API FAQ; Restbudget nicht bestätigt" if host == "api.bls.gov" else "Lokal gezählte Abrufe; kein bestätigtes Anbieter-Restbudget"})
             st.dataframe(provider_rows, hide_index=True, use_container_width=True)
+            st.caption("Die letzte Inhaltsmeldung kann aus einem früheren Lauf stammen und bezieht sich auf einen einzelnen Abruf. "
+                       "Ohne gespeicherten Zeitpunkt bleibt ihr Alter unbekannt. Ein erfolgreicher HTTP-Abruf bestätigt keine gültigen Fachdaten.")
             st.caption("Anbieter-Reservierungen sind kumulativ und enthalten abgeschlossene sowie unbestätigte Versuche; "
                        "die drei Zähler werden nicht addiert. Lokal abgeschlossen bezeichnet ein gespeichertes Ende eines Abrufversuchs, "
                        "auch bei Fehlern; kein erfolgreicher Datenabruf und kein bestätigter Verbrauch beim Anbieter. "
