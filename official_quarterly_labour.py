@@ -124,6 +124,8 @@ def parse_nz_labour(page, *, year, quarter, now=None, source_url=None):
             if end > period_end:
                 raise ValueError('NZ_LABOUR_FUTURE_GRAPH_PERIOD')
             periods.append(end)
+        if len(periods) != len(set(periods)):
+            raise ValueError('NZ_LABOUR_DUPLICATE_PERIOD')
         if not periods or max(periods) != period_end:
             raise ValueError('NZ_LABOUR_LATEST_PERIOD_MISSING')
         totals = [row for row in rows[1:] if row and row[0] == 'Total']

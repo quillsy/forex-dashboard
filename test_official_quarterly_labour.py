@@ -57,6 +57,48 @@ class Session:
         self.calls.append((url, kwargs)); return self.responses.pop(0)
 
 
+class NZDCanonicalQuarterTests(unittest.TestCase):
+    def parse_graph(self, graph):
+        document = nz_document()
+        document['Title'] = 'Labour market statistics: September 2026 quarter'
+        document['DateTaxonomyTerm']['PublicationDate'] = '2026-11-04 10:45:00'
+        document['FeaturedMedia']['GraphHeading'] = (
+            'Unemployment rate by sex, seasonally adjusted, June 2012–September 2026 quarters')
+        document['FeaturedMedia']['SeriesData'] = [{'GraphCsvData': graph}]
+        document['Blocks'] = []
+        return parse_nz_labour(page(document), year=2026, quarter=3,
+                               now=datetime(2026, 12, 1, tzinfo=timezone.utc))
+
+    def test_conflicting_aliases_are_rejected_in_both_orders(self):
+        for graph in ('Quarter,Sep-26,Sept-26\nTotal,5.6,9.9\n',
+                      'Quarter,Sept-26,Sep-26\nTotal,9.9,5.6\n'):
+            with self.subTest(graph=graph), self.assertRaisesRegex(
+                    ValueError, '^NZ_LABOUR_DUPLICATE_PERIOD$'):
+                self.parse_graph(graph)
+
+    def test_equal_value_alias_duplicates_are_rejected(self):
+        for labels in ('Sep-26,Sept-26', 'Sept-26,Sep-26'):
+            with self.subTest(labels=labels), self.assertRaisesRegex(
+                    ValueError, '^NZ_LABOUR_DUPLICATE_PERIOD$'):
+                self.parse_graph('Quarter,' + labels + '\nTotal,5.6,5.6\n')
+
+    def test_alias_duplicates_in_older_quarters_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, '^NZ_LABOUR_DUPLICATE_PERIOD$'):
+            self.parse_graph('Quarter,Sep-25,Sept-25,Sep-26\nTotal,5.1,5.2,5.6\n')
+
+    def test_valid_aliases_years_and_column_orders_are_preserved(self):
+        for graph in ('Quarter,Sep-26\nTotal,5.6\n',
+                      'Quarter,Sept-26\nTotal,5.6\n',
+                      'Quarter,Jun-26,Sep-26\nTotal,5.4,5.6\n',
+                      'Quarter,Sept-26,Jun-26\nTotal,5.6,5.4\n',
+                      'Quarter,Sep-25,Sept-26\nTotal,5.1,5.6\n'):
+            with self.subTest(graph=graph):
+                observation = self.parse_graph(graph)
+                self.assertEqual(observation['value'], 5.6)
+                self.assertEqual(observation['reference_period'], '2026-Q3')
+                self.assertEqual(observation['seasonal_adjustment'], 'SA')
+
+
 class QuarterlyLabourTests(unittest.TestCase):
     def test_common_entrypoint_and_currency_guard(self):
         session = Session([Response(text=page(nz_document()))])
