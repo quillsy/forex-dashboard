@@ -1,16 +1,11 @@
 {
-  "last_run_timestamp": "2026-10-20T06:01:42Z",
+  "last_run_timestamp": "2026-10-20T06:36:34Z",
   "last_run_status": "PARTIAL",
   "last_run_error": "One or more collection components are incomplete; see components.",
   "total_successful_runs": 45,
-  "total_partial_runs": 554,
+  "total_partial_runs": 555,
   "total_failed_runs": 0,
   "history": [
-    {
-      "timestamp": "2026-10-19T01:30:57Z",
-      "status": "PARTIAL",
-      "error": "One or more collection components are incomplete; see components."
-    },
     {
       "timestamp": "2026-10-19T02:06:11Z",
       "status": "PARTIAL",
@@ -255,6 +250,11 @@
       "timestamp": "2026-10-20T06:01:42Z",
       "status": "PARTIAL",
       "error": "One or more collection components are incomplete; see components."
+    },
+    {
+      "timestamp": "2026-10-20T06:36:34Z",
+      "status": "PARTIAL",
+      "error": "One or more collection components are incomplete; see components."
     }
   ],
   "components": {
@@ -262,7 +262,7 @@
       "status": "PARTIAL",
       "currencies": {
         "USD": "🟢 VERIFIED_UNCHANGED",
-        "EUR": "🟢 VERIFIED_UNCHANGED",
+        "EUR": "🟡 LAST VERIFIED",
         "GBP": "🟢 VERIFIED_UNCHANGED",
         "CAD": "🟢 VERIFIED_UNCHANGED",
         "CHF": "🟢 VERIFIED_UNCHANGED",
@@ -275,7 +275,7 @@
       "status": "PARTIAL",
       "eligible_factors": 27,
       "total_factors": 40,
-      "completed_at": "2026-10-20T06:02:48.601605+00:00"
+      "completed_at": "2026-10-20T06:37:51.199459+00:00"
     }
   },
   "mode": "live",
@@ -290,11 +290,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:01:43.563117+00:00",
-      "last_checked_at": "2026-10-20T06:01:52.664124+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:36:36.014575+00:00",
+      "last_checked_at": "2026-10-20T06:36:36.305678+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -310,46 +310,44 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-10-20T06:01:57.145927+00:00",
-      "last_checked_at": "2026-10-20T06:01:57.198182+00:00",
-      "requests_observed_utc_day": 22,
+      "last_attempt_at": "2026-10-20T06:36:40.728945+00:00",
+      "last_checked_at": "2026-10-20T06:36:40.836864+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 22,
+      "requests_reserved_utc_day": 24,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
     },
     "data-api.ecb.europa.eu": {
       "requests_this_run": 1,
-      "status": "SUCCESS",
+      "status": "HTTP_504",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
       "outcomes_this_run": {
-        "SUCCESS": 1
+        "HTTP_504": 1
       },
-      "last_attempt_at": "2026-10-20T06:01:57.263473+00:00",
-      "last_checked_at": "2026-10-20T06:01:58.389481+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:36:40.894339+00:00",
+      "last_checked_at": "2026-10-20T06:36:51.486248+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "last_failure_at": null,
-      "requests_reserved_utc_day": 11,
+      "last_failure_at": "2026-10-20T06:36:51.486268+00:00",
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
     },
     "www.ecb.europa.eu": {
-      "requests_this_run": 4,
-      "status": "SUCCESS",
+      "requests_this_run": 0,
+      "status": "NOT_REQUESTED",
       "remaining": null,
       "limit": null,
       "reset_at": null,
       "budget_evidence": "unknown",
-      "outcomes_this_run": {
-        "SUCCESS": 4
-      },
+      "outcomes_this_run": {},
       "last_attempt_at": "2026-10-20T06:02:00.252436+00:00",
       "last_checked_at": "2026-10-20T06:02:00.859644+00:00",
       "requests_observed_utc_day": 32,
@@ -370,12 +368,12 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-10-20T06:02:01.878874+00:00",
-      "last_checked_at": "2026-10-20T06:02:02.079442+00:00",
-      "requests_observed_utc_day": 22,
+      "last_attempt_at": "2026-10-20T06:36:52.316571+00:00",
+      "last_checked_at": "2026-10-20T06:36:52.912751+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 22,
+      "requests_reserved_utc_day": 24,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
@@ -390,12 +388,12 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-10-20T06:02:05.353617+00:00",
-      "last_checked_at": "2026-10-20T06:02:05.402844+00:00",
-      "requests_observed_utc_day": 33,
+      "last_attempt_at": "2026-10-20T06:36:56.271036+00:00",
+      "last_checked_at": "2026-10-20T06:36:56.345324+00:00",
+      "requests_observed_utc_day": 36,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 33,
+      "requests_reserved_utc_day": 36,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
@@ -410,12 +408,12 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-10-20T06:02:08.259771+00:00",
-      "last_checked_at": "2026-10-20T06:02:09.023243+00:00",
-      "requests_observed_utc_day": 33,
+      "last_attempt_at": "2026-10-20T06:36:58.312028+00:00",
+      "last_checked_at": "2026-10-20T06:36:59.130599+00:00",
+      "requests_observed_utc_day": 36,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 33,
+      "requests_reserved_utc_day": 36,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
@@ -430,12 +428,12 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-10-20T06:02:10.251920+00:00",
-      "last_checked_at": "2026-10-20T06:02:10.495777+00:00",
-      "requests_observed_utc_day": 22,
+      "last_attempt_at": "2026-10-20T06:37:00.642738+00:00",
+      "last_checked_at": "2026-10-20T06:37:00.970128+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 22,
+      "requests_reserved_utc_day": 24,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
@@ -467,12 +465,12 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-10-20T06:02:11.957042+00:00",
-      "last_checked_at": "2026-10-20T06:02:12.441190+00:00",
-      "requests_observed_utc_day": 33,
+      "last_attempt_at": "2026-10-20T06:37:02.096913+00:00",
+      "last_checked_at": "2026-10-20T06:37:02.381941+00:00",
+      "requests_observed_utc_day": 36,
       "counted_day_utc": "2026-10-20",
       "last_failure_at": null,
-      "requests_reserved_utc_day": 33,
+      "requests_reserved_utc_day": 36,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true
@@ -487,11 +485,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:31.875430+00:00",
-      "last_checked_at": "2026-10-20T06:02:32.754521+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:22.410185+00:00",
+      "last_checked_at": "2026-10-20T06:37:24.542855+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -507,11 +505,11 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-10-20T06:02:43.296211+00:00",
-      "last_checked_at": "2026-10-20T06:02:43.637317+00:00",
-      "requests_observed_utc_day": 44,
+      "last_attempt_at": "2026-10-20T06:37:45.193677+00:00",
+      "last_checked_at": "2026-10-20T06:37:45.600865+00:00",
+      "requests_observed_utc_day": 48,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 44,
+      "requests_reserved_utc_day": 48,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -527,11 +525,11 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-10-20T06:02:34.585806+00:00",
-      "last_checked_at": "2026-10-20T06:02:34.634771+00:00",
-      "requests_observed_utc_day": 44,
+      "last_attempt_at": "2026-10-20T06:37:26.827494+00:00",
+      "last_checked_at": "2026-10-20T06:37:26.942410+00:00",
+      "requests_observed_utc_day": 48,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 44,
+      "requests_reserved_utc_day": 48,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -547,11 +545,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:34.660405+00:00",
-      "last_checked_at": "2026-10-20T06:02:35.143382+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:26.963698+00:00",
+      "last_checked_at": "2026-10-20T06:37:27.421270+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -587,11 +585,11 @@
       "outcomes_this_run": {
         "SUCCESS": 6
       },
-      "last_attempt_at": "2026-10-20T06:02:45.541235+00:00",
-      "last_checked_at": "2026-10-20T06:02:45.810314+00:00",
-      "requests_observed_utc_day": 66,
+      "last_attempt_at": "2026-10-20T06:37:47.748798+00:00",
+      "last_checked_at": "2026-10-20T06:37:48.036449+00:00",
+      "requests_observed_utc_day": 72,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 66,
+      "requests_reserved_utc_day": 72,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -608,11 +606,11 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-10-20T06:02:47.367670+00:00",
-      "last_checked_at": "2026-10-20T06:02:47.649101+00:00",
-      "requests_observed_utc_day": 22,
+      "last_attempt_at": "2026-10-20T06:37:49.900333+00:00",
+      "last_checked_at": "2026-10-20T06:37:50.197963+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 22,
+      "requests_reserved_utc_day": 24,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -646,11 +644,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:40.839825+00:00",
-      "last_checked_at": "2026-10-20T06:02:42.436290+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:37.259336+00:00",
+      "last_checked_at": "2026-10-20T06:37:39.487264+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -666,11 +664,11 @@
       "outcomes_this_run": {
         "SUCCESS": 3
       },
-      "last_attempt_at": "2026-10-20T06:02:42.441344+00:00",
-      "last_checked_at": "2026-10-20T06:02:43.277991+00:00",
-      "requests_observed_utc_day": 33,
+      "last_attempt_at": "2026-10-20T06:37:39.490872+00:00",
+      "last_checked_at": "2026-10-20T06:37:45.173533+00:00",
+      "requests_observed_utc_day": 36,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 33,
+      "requests_reserved_utc_day": 36,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -722,11 +720,11 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-10-20T06:02:47.921095+00:00",
-      "last_checked_at": "2026-10-20T06:02:48.182595+00:00",
-      "requests_observed_utc_day": 44,
+      "last_attempt_at": "2026-10-20T06:37:50.490708+00:00",
+      "last_checked_at": "2026-10-20T06:37:50.768966+00:00",
+      "requests_observed_utc_day": 48,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 44,
+      "requests_reserved_utc_day": 48,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -742,11 +740,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:12.809165+00:00",
-      "last_checked_at": "2026-10-20T06:02:30.962889+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:02.793012+00:00",
+      "last_checked_at": "2026-10-20T06:37:21.000570+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -762,11 +760,11 @@
       "outcomes_this_run": {
         "SUCCESS": 4
       },
-      "last_attempt_at": "2026-10-20T06:02:37.363366+00:00",
-      "last_checked_at": "2026-10-20T06:02:38.044987+00:00",
-      "requests_observed_utc_day": 44,
+      "last_attempt_at": "2026-10-20T06:37:29.629384+00:00",
+      "last_checked_at": "2026-10-20T06:37:30.285070+00:00",
+      "requests_observed_utc_day": 48,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 44,
+      "requests_reserved_utc_day": 48,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -782,11 +780,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:38.070839+00:00",
-      "last_checked_at": "2026-10-20T06:02:39.252278+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:30.316697+00:00",
+      "last_checked_at": "2026-10-20T06:37:33.748388+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -802,11 +800,11 @@
       "outcomes_this_run": {
         "SUCCESS": 2
       },
-      "last_attempt_at": "2026-10-20T06:02:31.177795+00:00",
-      "last_checked_at": "2026-10-20T06:02:31.254472+00:00",
-      "requests_observed_utc_day": 22,
+      "last_attempt_at": "2026-10-20T06:37:21.453039+00:00",
+      "last_checked_at": "2026-10-20T06:37:21.730150+00:00",
+      "requests_observed_utc_day": 24,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 22,
+      "requests_reserved_utc_day": 24,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
@@ -822,11 +820,11 @@
       "outcomes_this_run": {
         "SUCCESS": 1
       },
-      "last_attempt_at": "2026-10-20T06:02:31.272029+00:00",
-      "last_checked_at": "2026-10-20T06:02:31.422533+00:00",
-      "requests_observed_utc_day": 11,
+      "last_attempt_at": "2026-10-20T06:37:21.744319+00:00",
+      "last_checked_at": "2026-10-20T06:37:22.196681+00:00",
+      "requests_observed_utc_day": 12,
       "counted_day_utc": "2026-10-20",
-      "requests_reserved_utc_day": 11,
+      "requests_reserved_utc_day": 12,
       "requests_uncertain_utc_day": 0,
       "prior_usage_uncertain": false,
       "usage_complete": true,
