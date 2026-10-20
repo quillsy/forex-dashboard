@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 import requests
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from official_macro import EUROSTAT_SPECS, EUROSTAT_OBS_FLAGS, STATCAN_BASE, STATCAN_CPI_COORD, parse_eurostat_observation, fetch_eurostat_observation, validate_statcan_cpi
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
@@ -154,12 +154,14 @@ class StatCanCpiContractTests(unittest.TestCase):
             client.post.assert_not_called()
         for window in (13, 300):
             loader, client = self.loader(self.fixture())
-            self.assertTrue(loader(latest_periods=window)[-1])
+            with patch('official_macro._utc_now', return_value=self.now):
+                self.assertTrue(loader(latest_periods=window)[-1])
             self.assertEqual(client.post.call_args_list[0].kwargs['json'],
                              [{'vectorId': 41690973, 'latestN': window}])
         ps = self.fixture(); del ps[1][0]['object']['vectorDataPoint'][0]
         loader, _ = self.loader(ps)
-        self.assertFalse(loader(latest_periods=13)[-1])
+        with patch('official_macro._utc_now', return_value=self.now):
+            self.assertFalse(loader(latest_periods=13)[-1])
 
     def test_loader_retains_publication_and_symbol_annotations(self):
         import pandas as pd
