@@ -33,8 +33,8 @@
       }
     ],
     "verification_status": "🟡 LAST VERIFIED",
-    "last_attempt_at": "2026-10-21T22:56:14.178442+00:00",
-    "last_attempt_error": "Timeout"
+    "last_attempt_at": "2026-10-21T23:31:21.356041+00:00",
+    "last_attempt_error": "JSONDecodeError"
   },
   "EUR": {
     "currency": "EUR",
@@ -45,7 +45,7 @@
     "central_bank": "European Central Bank",
     "rate_effective_date": "2026-09-16",
     "last_policy_decision_date": "2026-09-10",
-    "verified_at": "2026-10-21T22:56:19.340867+00:00",
+    "verified_at": "2026-10-21T23:31:21.511244+00:00",
     "primary_source": "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV",
     "secondary_source": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html",
     "verification_evidence": [
@@ -54,7 +54,7 @@
         "instrument": "ECB Deposit Facility Rate",
         "source_url": "https://data-api.ecb.europa.eu/service/data/FM/B.U2.EUR.4F.KR.DFR.LEV",
         "rate": 2.5,
-        "retrieved_at": "2026-10-21T22:56:20.192166+00:00",
+        "retrieved_at": "2026-10-21T23:31:22.513028+00:00",
         "rate_effective_date": "2026-09-16",
         "previous_rate": 2.25,
         "observation_date": "2026-09-16"
@@ -64,7 +64,7 @@
         "instrument": "ECB Deposit Facility Rate",
         "source_url": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.en.html",
         "rate": 2.5,
-        "retrieved_at": "2026-10-21T22:56:20.895319+00:00",
+        "retrieved_at": "2026-10-21T23:31:23.627812+00:00",
         "rate_effective_date": "2026-09-16",
         "previous_rate": 2.25,
         "observation_date": "2026-09-16",
@@ -73,7 +73,7 @@
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:19.340867+00:00"
+    "last_attempt_at": "2026-10-21T23:31:21.511244+00:00"
   },
   "GBP": {
     "currency": "GBP",
@@ -84,7 +84,7 @@
     "central_bank": "Bank of England",
     "rate_effective_date": "2025-12-18",
     "last_policy_decision_date": "2026-09-17",
-    "verified_at": "2026-10-21T22:56:22.500356+00:00",
+    "verified_at": "2026-10-21T23:31:26.047804+00:00",
     "primary_source": "https://www.bankofengland.co.uk/boeapps/database/Bank-Rate.asp",
     "secondary_source": "https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate",
     "verification_evidence": [
@@ -93,7 +93,7 @@
         "instrument": "Bank of England Official Bank Rate",
         "source_url": "https://www.bankofengland.co.uk/boeapps/database/Bank-Rate.asp",
         "rate": 3.75,
-        "retrieved_at": "2026-10-21T22:56:23.157858+00:00",
+        "retrieved_at": "2026-10-21T23:31:26.671992+00:00",
         "rate_effective_date": "2025-12-18",
         "previous_rate": 4.0,
         "observation_date": "2025-12-18"
@@ -103,12 +103,12 @@
         "instrument": "Bank of England Official Bank Rate",
         "source_url": "https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate",
         "rate": 3.75,
-        "retrieved_at": "2026-10-21T22:56:23.438145+00:00",
+        "retrieved_at": "2026-10-21T23:31:26.983030+00:00",
         "last_policy_decision_date": "2026-09-17"
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:22.500356+00:00"
+    "last_attempt_at": "2026-10-21T23:31:26.047804+00:00"
   },
   "CAD": {
     "currency": "CAD",
@@ -119,7 +119,7 @@
     "central_bank": "Bank of Canada",
     "rate_effective_date": "2025-10-30",
     "last_policy_decision_date": "2026-09-02",
-    "verified_at": "2026-10-21T22:56:23.447032+00:00",
+    "verified_at": "2026-10-21T23:31:26.991637+00:00",
     "primary_source": "https://www.bankofcanada.ca/valet/observations/V39079/json",
     "secondary_source": "https://www.bankofcanada.ca/2026/09/fad-press-release-2026-09-02/",
     "verification_evidence": [
@@ -128,7 +128,7 @@
         "instrument": "Target for the Overnight Rate",
         "source_url": "https://www.bankofcanada.ca/valet/observations/V39079/json",
         "rate": 2.25,
-        "retrieved_at": "2026-10-21T22:56:26.465752+00:00",
+        "retrieved_at": "2026-10-21T23:31:29.662617+00:00",
         "rate_effective_date": "2025-10-30",
         "previous_rate": 2.5,
         "observation_date": "2026-10-20"
@@ -138,12 +138,12 @@
         "instrument": "Target for the Overnight Rate",
         "source_url": "https://www.bankofcanada.ca/2026/09/fad-press-release-2026-09-02/",
         "rate": 2.25,
-        "retrieved_at": "2026-10-21T22:56:26.691133+00:00",
+        "retrieved_at": "2026-10-21T23:31:29.847087+00:00",
         "last_policy_decision_date": "2026-09-02"
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:23.447032+00:00"
+    "last_attempt_at": "2026-10-21T23:31:26.991637+00:00"
   },
   "CHF": {
     "currency": "CHF",
@@ -154,7 +154,7 @@
     "central_bank": "Swiss National Bank",
     "rate_effective_date": "2025-06-20",
     "last_policy_decision_date": "2026-09-24",
-    "verified_at": "2026-10-21T22:56:26.701030+00:00",
+    "verified_at": "2026-10-21T23:31:29.856122+00:00",
     "primary_source": "https://www.snb.ch/en/the-snb/mandates-goals/statistics/statistics-pub/current_interest_exchange_rates",
     "secondary_source": "https://www.snb.ch/en/publications/communication/press-releases-restricted/pre_20260924",
     "verification_evidence": [
@@ -163,7 +163,7 @@
         "instrument": "SNB Policy Rate",
         "source_url": "https://www.snb.ch/en/the-snb/mandates-goals/statistics/statistics-pub/current_interest_exchange_rates",
         "rate": 0.0,
-        "retrieved_at": "2026-10-21T22:56:27.529534+00:00",
+        "retrieved_at": "2026-10-21T23:31:30.879462+00:00",
         "rate_effective_date": "2025-06-20"
       },
       {
@@ -171,12 +171,12 @@
         "instrument": "SNB Policy Rate",
         "source_url": "https://www.snb.ch/en/publications/communication/press-releases-restricted/pre_20260924",
         "rate": 0.0,
-        "retrieved_at": "2026-10-21T22:56:29.362029+00:00",
+        "retrieved_at": "2026-10-21T23:31:32.988710+00:00",
         "last_policy_decision_date": "2026-09-24"
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:26.701030+00:00"
+    "last_attempt_at": "2026-10-21T23:31:29.856122+00:00"
   },
   "AUD": {
     "currency": "AUD",
@@ -187,7 +187,7 @@
     "central_bank": "Reserve Bank of Australia",
     "rate_effective_date": "2026-09-30",
     "last_policy_decision_date": "2026-09-29",
-    "verified_at": "2026-10-21T22:56:29.371131+00:00",
+    "verified_at": "2026-10-21T23:31:32.996926+00:00",
     "primary_source": "https://www.rba.gov.au/statistics/cash-rate/",
     "secondary_source": "https://www.rba.gov.au/media-releases/2026/mr-26-27.html",
     "verification_evidence": [
@@ -196,7 +196,7 @@
         "instrument": "Cash Rate Target",
         "source_url": "https://www.rba.gov.au/statistics/cash-rate/",
         "rate": 4.6,
-        "retrieved_at": "2026-10-21T22:56:30.471826+00:00",
+        "retrieved_at": "2026-10-21T23:31:34.012906+00:00",
         "rate_effective_date": "2026-09-30",
         "previous_rate": 4.35,
         "observation_date": "2026-09-30"
@@ -206,12 +206,12 @@
         "instrument": "Cash Rate Target",
         "source_url": "https://www.rba.gov.au/media-releases/2026/mr-26-27.html",
         "rate": 4.6,
-        "retrieved_at": "2026-10-21T22:56:30.751622+00:00",
+        "retrieved_at": "2026-10-21T23:31:34.213810+00:00",
         "last_policy_decision_date": "2026-09-29"
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:29.371131+00:00"
+    "last_attempt_at": "2026-10-21T23:31:32.996926+00:00"
   },
   "NZD": {
     "currency": "NZD",
@@ -227,7 +227,7 @@
     "secondary_source": null,
     "verification_evidence": [],
     "verification_status": "🔴 OFFICIAL SOURCE UNAVAILABLE",
-    "last_attempt_at": "2026-10-21T22:56:30.758460+00:00",
+    "last_attempt_at": "2026-10-21T23:31:34.220008+00:00",
     "last_attempt_error": "RequestException"
   },
   "JPY": {
@@ -239,7 +239,7 @@
     "central_bank": "Bank of Japan",
     "rate_effective_date": "2026-09-24",
     "last_policy_decision_date": "2026-09-18",
-    "verified_at": "2026-10-21T22:56:30.765017+00:00",
+    "verified_at": "2026-10-21T23:31:34.234159+00:00",
     "primary_source": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
     "secondary_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
     "verification_evidence": [
@@ -248,7 +248,7 @@
         "instrument": "Short-Term Policy Interest Rate",
         "source_url": "https://www.boj.or.jp/en/mopo/measures/term_cond/yoryo36.htm",
         "rate": 1.25,
-        "retrieved_at": "2026-10-21T22:56:31.163553+00:00",
+        "retrieved_at": "2026-10-21T23:31:34.554384+00:00",
         "rate_effective_date": "2026-09-24",
         "effective_date_source": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf"
       },
@@ -257,11 +257,11 @@
         "instrument": "Short-Term Policy Interest Rate",
         "source_url": "https://www.boj.or.jp/en/mopo/mpmdeci/mpr_2026/k260918a.pdf",
         "rate": 1.25,
-        "retrieved_at": "2026-10-21T22:56:32.135215+00:00",
+        "retrieved_at": "2026-10-21T23:31:35.251383+00:00",
         "last_policy_decision_date": "2026-09-18"
       }
     ],
     "verification_status": "🟢 VERIFIED_UNCHANGED",
-    "last_attempt_at": "2026-10-21T22:56:30.765017+00:00"
+    "last_attempt_at": "2026-10-21T23:31:34.234159+00:00"
   }
 }
