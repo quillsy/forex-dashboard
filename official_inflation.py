@@ -115,8 +115,15 @@ ESTAT_RELEASE_URL = "https://www.stat.go.jp/data/cpi/sokuhou/tsuki/index-z.html"
 ESTAT_CALENDAR_URL = "https://www.stat.go.jp/english/data/cpi/1582.html"
 
 
+def _japan_cpi_scheduled_at(day):
+    # National CPI:08:30 Japan time, FAQ C-1. Dates remain calendar-sourced.
+    # https://www.stat.go.jp/english/data/cpi/1585.html
+    return datetime.strptime(day, "%Y-%m-%d").replace(
+        hour=8, minute=30, tzinfo=ZoneInfo("Asia/Tokyo")).astimezone(timezone.utc)
+
+
 def parse_japan_cpi_release(html, now=None):
-    """National headline only; the source supplies a date, not a publication time."""
+    """National headline; scheduled release time is not actual publication proof."""
     page = BeautifulSoup(html, "html.parser")
     titles = page.select("#section h1")
     if len(titles) != 1:
@@ -133,7 +140,7 @@ def parse_japan_cpi_release(html, now=None):
         released = datetime(ry, rm, rd).date()
     except ValueError as exc:
         raise ValueError("ESTAT_RELEASE_INVALID") from exc
-    if released > _now(now).astimezone(ZoneInfo("Asia/Tokyo")).date() or released < datetime(year + (month == 12), month % 12 + 1, 1).date():
+    if _japan_cpi_scheduled_at(released.isoformat()) > _now(now) or released < datetime(year + (month == 12), month % 12 + 1, 1).date():
         raise ValueError("ESTAT_RELEASE_INVALID")
     labels = [node for node in page.select("#section p strong") if node.get_text(strip=True) == "総合指数"]
     if len(labels) != 1:
@@ -404,10 +411,11 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
             calendar = parse_japan_cpi_calendar(calendar_response.text, release["latest_period"])
             result["release_date_known"] = release["release_date_known"]
             result["next_due_date"] = calendar["next_due_date"]
-            result["next_due_precision"] = "date_only_start_of_JP_day"
             result["published_at"] = None
             due = calendar["next_due_date"]
-            result["next_due_at"] = (datetime.fromisoformat(due).replace(tzinfo=ZoneInfo("Asia/Tokyo")).astimezone(timezone.utc).isoformat() if due else None)
+            due_at = _japan_cpi_scheduled_at(due) if due else None
+            result["next_due_at"] = due_at.isoformat() if due_at else None
+            result["next_due_precision"] = "official_scheduled_time" if due_at else None
             if due is None:
                 result["needs_hourly_check"] = True
             code = None
@@ -415,7 +423,7 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
                 code = "ESTAT_API_RELEASE_LAG"
             elif result["reference_period"] != release["latest_period"] or result["value"] != release["value"] or calendar["current_release_date"] not in (None, release["release_date_known"]):
                 code = "ESTAT_RELEASE_CONFLICT"
-            elif due and _now(now).astimezone(ZoneInfo("Asia/Tokyo")).date().isoformat() >= due:
+            elif due_at and _now(now) >= due_at:
                 code = "ESTAT_DUE_UNCONFIRMED"
             if code:
                 diagnostic["code"] = code

@@ -1,7 +1,10 @@
+import copy
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import requests
+import live_data
 
 from official_inflation import fetch_official_cpi, parse_abs_cpi, parse_abs_release_index, parse_estat_cpi, parse_japan_cpi_release, parse_japan_cpi_calendar
 
@@ -154,17 +157,18 @@ class OfficialInflationTests(unittest.TestCase):
         for html in [japan_release().replace("全国", "東京都区部"), japan_release(date="2026年10月1日"), japan_release().replace("2025年基準", "2020年基準")]:
             with self.assertRaises(ValueError): parse_japan_cpi_release(html, NOW)
 
-    def test_japan_calendar_date_only_and_unknown_next(self):
+    def test_japan_calendar_scheduled_time_and_unknown_next(self):
         self.assertEqual(parse_japan_cpi_calendar(japan_calendar(), "2026-07")["next_due_date"], "2026-09-18")
         row = fetch_official_cpi("JPY", client=japan_client(), estat_key="test-only", now=NOW)
-        self.assertEqual(row["next_due_at"], "2026-09-17T15:00:00+00:00")
+        self.assertEqual(row["next_due_at"], "2026-09-17T23:30:00+00:00")
+        self.assertEqual(row["next_due_precision"], "official_scheduled_time")
         self.assertIsNone(row["published_at"])
         client = japan_client(); responses = list(client.get.side_effect); responses[2].text = japan_calendar(False); client.get.side_effect = responses
         row = fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW)
         self.assertTrue(row["needs_hourly_check"])
 
     def test_japan_due_conflict_and_parser_short_circuit(self):
-        row = fetch_official_cpi("JPY", client=japan_client(), estat_key="test-only", now="2026-09-17T15:00:00Z")
+        row = fetch_official_cpi("JPY", client=japan_client(), estat_key="test-only", now="2026-09-17T23:30:00Z")
         self.assertEqual(row["_validation"], "UNVERIFIED")
         payload = estat(); payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"][0]["$"] = "2.5"
         diagnostic = {}; row = fetch_official_cpi("JPY", client=japan_client(payload), estat_key="test-only", now=NOW, diagnostics=diagnostic)
@@ -464,6 +468,138 @@ class OfficialInflationTests(unittest.TestCase):
         client.get.return_value.json.return_value = payload
         self.assertIsNone(fetch_official_cpi("JPY", client=client, estat_key="test-only", now=NOW, diagnostics=diagnostics))
         self.assertEqual(diagnostics, {"code": "NO_ELIGIBLE_OBSERVATION", "provider_status": 0})
+
+
+DUE = datetime(2026, 10, 22, 23, 30, tzinfo=timezone.utc)
+
+
+def calendar():
+    return ('<section id="section"><table class="datatable">'
+            '<tr><th colspan="2">Japan</th><th colspan="2">Ku-area of Tokyo (preliminary)</th><th>Remarks</th></tr>'
+            '<tr><th>Survey month</th><th>Date of release</th><th>Survey month</th><th>Date of release</th></tr>'
+            '<tr><td>August, 2026</td><td>September 18, 2026</td><td>September</td><td>October 2</td><td></td></tr>'
+            '<tr><td>September</td><td>October 23</td><td>October</td><td>October 30</td><td></td></tr>'
+            '<tr><td>October</td><td>November 20</td><td>November</td><td>November 27</td><td></td></tr>'
+            '</table></section>')
+
+
+def client(month=8, value='1.9', release_month=None, release_value=None, page=None):
+    payload = copy.deepcopy(estat())
+    data = payload['GET_STATS_DATA']['STATISTICAL_DATA']
+    code = f'202600{month:02d}{month:02d}'
+    data['CLASS_INF']['CLASS_OBJ'][-1]['CLASS']['@code'] = code
+    data['DATA_INF']['VALUE'][0].update({'@time': code, '$': value})
+    release_month = month if release_month is None else release_month
+    release_value = value if release_value is None else release_value
+    html = japan_release(month=release_month, value=str(abs(float(release_value))),
+                         direction='下落' if float(release_value) < 0 else '横ばい' if float(release_value) == 0 else '上昇',
+                         date='2026年9月18日' if release_month == 8 else '2026年10月23日')
+    api = Mock(); api.json.return_value = payload
+    release = Mock(); release.content = html.encode('utf-8')
+    schedule = Mock(); schedule.text = calendar() if page is None else page
+    transport = Mock(); transport.get.side_effect = [api, release, schedule]
+    return transport
+
+
+def fetch(at, **kwargs):
+    transport = client(**kwargs)
+    diagnostic = {}
+    result = fetch_official_cpi('JPY', client=transport, estat_key='fixture-only',
+                                now=at, diagnostics=diagnostic)
+    return result, diagnostic, transport
+
+
+class JapanScheduledClockTests(unittest.TestCase):
+    def test_old_period_remains_verified_at_midnight_and_immediately_before_release(self):
+        for at in (datetime(2026, 10, 22, 15, tzinfo=timezone.utc), DUE - timedelta(seconds=1)):
+            with self.subTest(at=at):
+                row, diagnostic, transport = fetch(at)
+                self.assertEqual(diagnostic['code'], 'OK')
+                self.assertNotIn('_validation', row)
+                self.assertEqual(row['next_due_at'], DUE.isoformat())
+                self.assertEqual(row['next_due_precision'], 'official_scheduled_time')
+                self.assertIsNone(row['published_at'])
+                self.assertEqual(transport.get.call_count, 3)
+
+    def test_old_period_is_blocked_exactly_at_and_after_official_time(self):
+        for at in (DUE, DUE + timedelta(seconds=1)):
+            with self.subTest(at=at):
+                row, diagnostic, _ = fetch(at)
+                self.assertEqual(row['_validation'], 'UNVERIFIED')
+                self.assertEqual(diagnostic['code'], 'ESTAT_DUE_UNCONFIRMED')
+
+    def test_same_day_new_period_is_rejected_before_scheduled_publication(self):
+        for at in (datetime(2026, 10, 22, 15, tzinfo=timezone.utc), DUE - timedelta(seconds=1)):
+            with self.subTest(at=at):
+                row, diagnostic, transport = fetch(at, month=9, value='2.0')
+                self.assertIsNone(row)
+                self.assertEqual(diagnostic['code'], 'ESTAT_RELEASE_INVALID')
+                self.assertEqual(transport.get.call_count, 2)
+
+    def test_matching_new_period_is_verified_only_at_or_after_publication(self):
+        for at in (DUE, DUE + timedelta(seconds=1)):
+            with self.subTest(at=at):
+                row, diagnostic, transport = fetch(at, month=9, value='2.0')
+                self.assertEqual(diagnostic['code'], 'OK')
+                self.assertNotIn('_validation', row)
+                self.assertEqual(row['reference_period'], '2026-09')
+                self.assertEqual(row['next_due_at'], '2026-11-19T23:30:00+00:00')
+                self.assertEqual(row['release_date_known'], '2026-10-23')
+                self.assertIsNone(row['published_at'])
+                self.assertEqual(transport.get.call_count, 3)
+
+    def test_post_release_api_period_lag_still_blocks(self):
+        row, diagnostic, _ = fetch(DUE, release_month=9)
+        self.assertEqual(row['_validation'], 'UNVERIFIED')
+        self.assertEqual(diagnostic['code'], 'ESTAT_API_RELEASE_LAG')
+
+    def test_post_release_value_disagreement_still_blocks(self):
+        row, diagnostic, _ = fetch(DUE, month=9, value='2.0', release_value='2.1')
+        self.assertEqual(row['_validation'], 'UNVERIFIED')
+        self.assertEqual(diagnostic['code'], 'ESTAT_RELEASE_CONFLICT')
+
+    def test_read_side_cache_gate_blocks_at_exact_deadline_without_collecting(self):
+        before = DUE - timedelta(seconds=1)
+        row, _, transport = fetch(before)
+        record = live_data.build_record('Inflation', -5.0, row, 'FRESH', before.isoformat())
+        calls = transport.get.call_count
+        self.assertTrue(live_data.eligible(record, before, factor='Inflation', currency='JPY')[0])
+        self.assertFalse(live_data.eligible(record, DUE, factor='Inflation', currency='JPY')[0])
+        self.assertEqual(transport.get.call_count, calls)
+
+    def test_new_verified_observation_passes_existing_read_side_gate(self):
+        row, _, _ = fetch(DUE, month=9, value='2.0')
+        record = live_data.build_record('Inflation', 0.0, row, 'FRESH', DUE.isoformat())
+        self.assertTrue(live_data.eligible(record, DUE, factor='Inflation', currency='JPY')[0])
+        self.assertIsNone(record['published_at'])
+
+    def test_unknown_next_date_keeps_hourly_requirement(self):
+        page = calendar().replace('<tr><td>September</td><td>October 23</td><td>October</td><td>October 30</td><td></td></tr>', '')
+        page = page.replace('<tr><td>October</td><td>November 20</td><td>November</td><td>November 27</td><td></td></tr>', '')
+        row, diagnostic, _ = fetch(DUE - timedelta(seconds=1), page=page)
+        self.assertEqual(diagnostic['code'], 'OK')
+        self.assertIsNone(row['next_due_at'])
+        self.assertTrue(row['needs_hourly_check'])
+        self.assertIsNone(row['next_due_precision'])
+
+    def test_malformed_calendar_still_blocks(self):
+        row, diagnostic, _ = fetch(DUE, page='<html>changed</html>')
+        self.assertIsNone(row)
+        self.assertEqual(diagnostic['code'], 'ESTAT_CALENDAR_INVALID')
+
+    def test_zero_and_negative_values_remain_real_observations(self):
+        for value in ('0', '-0.4'):
+            with self.subTest(value=value):
+                row, diagnostic, _ = fetch(DUE, month=9, value=value)
+                self.assertEqual(diagnostic['code'], 'OK')
+                self.assertEqual(row['value'], float(value))
+
+    def test_calendar_year_rollover_remains_source_bound(self):
+        page = calendar().replace('August, 2026', 'November, 2026').replace('September 18, 2026', 'December 18, 2026')
+        page = page.replace('<td>September</td><td>October 23', '<td>December</td><td>January 22, 2027')
+        page = page.replace('<td>October</td><td>November 20', '<td>January, 2027</td><td>February 19')
+        self.assertEqual(parse_japan_cpi_calendar(page, '2026-12')['next_due_date'], '2027-02-19')
+
 
 
 if __name__ == "__main__": unittest.main()
