@@ -352,6 +352,45 @@ class SharedSnapshotTests(unittest.TestCase):
                 (result / shared.FILES[1]).write_text('{}')
                 self.assertIsNone(shared.bundled_snapshot_directory(source, self.root))
 
+    def test_official_outage_timestamp_survives_public_and_bundled_snapshots(self):
+        docs = fixture()
+        at = docs[shared.FILES[0]]['completed_at']
+        provider = {'status': 'SOURCE_UNAVAILABLE', 'data_status': 'OFFICIAL_OUTAGE_PAGE',
+                    'data_status_at': at, 'last_failure_at': at,
+                    'outcomes_this_run': {'SUCCESS': 1}}
+        docs[shared.FILES[1]]['providers'] = {'www150.statcan.gc.ca': provider}
+        self.assertEqual(shared._validate(docs, NOW), shared._time(at))
+        self.assertEqual(self.refresh(Client(docs))['outcome'], 'UPDATED')
+        public = shared.current_shared_directory(self.root)
+        published = json.loads((public / shared.FILES[1]).read_text())
+        self.assertEqual(published['providers']['www150.statcan.gc.ca'], provider)
+        self.assertEqual(published['components']['live_core']['eligible_factors'], 0)
+        source = self.root / 'source'; source.mkdir()
+        for name, value in docs.items():
+            (source / name).write_text(json.dumps(value))
+        with patch.object(shared.requests, 'Session', side_effect=AssertionError('NO_HTTP')):
+            bundled = shared.bundled_snapshot_directory(source, self.root)
+        self.assertIsNotNone(bundled)
+        self.assertEqual(json.loads((bundled / shared.FILES[1]).read_text()), published)
+
+    def test_outage_timestamp_is_strict_and_unknown_provider_fields_stay_blocked(self):
+        docs = fixture()
+        at = docs[shared.FILES[0]]['completed_at']
+        docs[shared.FILES[1]]['providers'] = {'www150.statcan.gc.ca': {
+            'data_status': 'OFFICIAL_OUTAGE_PAGE', 'data_status_at': at}}
+        invalid = (None, True, {}, [], 'not-a-time', '2026-01-10T11:59:00',
+                   '2026-01-10T12:59:00+01:00', NOW.isoformat())
+        for value in invalid:
+            with self.subTest(value=value):
+                bad = copy.deepcopy(docs)
+                bad[shared.FILES[1]]['providers']['www150.statcan.gc.ca']['data_status_at'] = value
+                with self.assertRaises((shared.Invalid, ValueError)):
+                    shared._validate(bad, NOW)
+        bad = copy.deepcopy(docs)
+        bad[shared.FILES[1]]['providers']['www150.statcan.gc.ca']['private_key'] = 'synthetic'
+        with self.assertRaises(shared.Invalid):
+            shared._validate(bad, NOW)
+
     def test_local_public_fixture_matches_contract(self):
         docs = {name: shared._decode(Path(name).read_bytes()) for name in shared.FILES}
         completed = shared._time(docs[shared.FILES[0]]['completed_at'])

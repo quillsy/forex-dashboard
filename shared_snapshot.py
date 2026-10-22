@@ -33,7 +33,7 @@ FRONTIER_SERIES = {
 FRONTIER_PRECISIONS = {None, 'official_scheduled_time', 'date_only_start_of_NZ_day', 'date_only_start_of_AU_day'}
 POLICY = set('currency rate previous_rate upper_bound instrument central_bank rate_effective_date last_policy_decision_date verified_at verification_timestamp last_verified_at primary_source secondary_source verification_evidence verification_status last_attempt_at last_attempt_error candidate_rate'.split())
 EVIDENCE = set('currency instrument source_url rate retrieved_at rate_effective_date previous_rate observation_date upper_bound last_policy_decision_date decision_source effective_date_source valid_until announced_rate announced_effective_date deadline_basis superseded_terms_source superseded_terms_rate superseded_terms_revision_date'.split())
-PROVIDER = set('requests_this_run status remaining limit reset_at budget_evidence outcomes_this_run last_attempt_at last_checked_at requests_observed_utc_day counted_day_utc requests_reserved_utc_day requests_uncertain_utc_day prior_usage_uncertain usage_complete last_failure_at data_status provider_response_status retry_after_at'.split())
+PROVIDER = set('requests_this_run status remaining limit reset_at budget_evidence outcomes_this_run last_attempt_at last_checked_at requests_observed_utc_day counted_day_utc requests_reserved_utc_day requests_uncertain_utc_day prior_usage_uncertain usage_complete last_failure_at data_status data_status_at provider_response_status retry_after_at'.split())
 STATES = {'PARTIAL', 'SUCCESS', 'FAILED'}
 
 
@@ -278,6 +278,9 @@ def _validate(documents, now):
         _keys(row, PROVIDER)
         outcomes = row.get('outcomes_this_run', {})
         _scalars(row, {'outcomes_this_run'})
+        # Existing collector telemetry, not a publication or freshness proof.
+        if 'data_status_at' in row and _time(row['data_status_at']) > completed:
+            raise Invalid()
         if not isinstance(outcomes, dict) or any(key not in {'SUCCESS', 'TIMEOUT', 'TLS_ERROR', 'CONNECTION_ERROR', 'NETWORK_ERROR'} and not re.fullmatch(r'HTTP_[1-5][0-9]{2}', key) for key in outcomes):
             raise Invalid()
         if any(type(v) is not int or v < 0 for v in outcomes.values()):
