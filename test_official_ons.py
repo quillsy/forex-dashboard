@@ -3,7 +3,7 @@ import copy
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 import requests
 from official_ons import (BASE, PN2_FALLBACK_URL, TITLE, CPI_TITLE, CPI_URL,
@@ -86,7 +86,10 @@ class ONSCpiContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'FUTURE_MONTH'):
             validate_ons_cpi(payload, now=self.now)
 
-    def test_loader_rejects_bad_contract_and_preserves_existing_pit_dates(self):
+    @patch('official_ons._now')
+    def test_loader_rejects_bad_contract_and_preserves_existing_pit_dates(self, clock):
+        # The August fixture must be evaluated before the next scheduled release.
+        clock.return_value = self.now
         import pandas as pd
         import live_data
         node = next(n for n in ast.parse(Path(__file__).with_name('app.py').read_text()).body
@@ -110,6 +113,38 @@ class ONSCpiContractTests(unittest.TestCase):
         bad = copy.deepcopy(payload); bad['description']['unit'] = 'INDEX'
         response.json.return_value = bad
         self.assertFalse(ns['get_ons_cpi_data'](propagate_transport=True)[-1])
+
+    def test_loader_enforces_release_deadline_with_a_controlled_clock(self):
+        import pandas as pd
+        import live_data
+        node = next(n for n in ast.parse(Path(__file__).with_name('app.py').read_text()).body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'get_ons_cpi_data')
+        node.decorator_list = []
+        response = Mock(status_code=200)
+        client = Mock()
+        client.get.return_value = response
+        ns = {'requests': client, 'pd': pd, 'datetime': datetime,
+              'live_data': live_data, 'check_demo_active': lambda: False}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<ons-loader>', 'exec'), ns)
+        previous = self.fixture()
+        current = copy.deepcopy(previous)
+        current['description'].update(date='2026 SEP', releaseDate='2026-10-20T23:00:00.000Z')
+        current['months'][0].update(date='2026 SEP', label='2026 SEP', month='September',
+                                    updateDate='2026-10-20T23:00:00.000Z')
+        before = CPI_2026_SEPTEMBER_DUE - timedelta(seconds=1)
+        for payload, at, expected in ((previous, before, True),
+                (previous, CPI_2026_SEPTEMBER_DUE, False),
+                (current, before, False), (current, CPI_2026_SEPTEMBER_DUE, True)):
+            with self.subTest(period=payload['description']['date'], at=at):
+                response.json.return_value = payload
+                with patch('official_ons._now', return_value=at):
+                    frame, _, is_live = ns['get_ons_cpi_data'](propagate_transport=True)
+                self.assertIs(is_live, expected)
+                if expected:
+                    self.assertEqual(frame.iloc[0]['value'], 3.1)
+                else:
+                    self.assertIsNone(frame)
+        self.assertEqual(client.get.call_count, 4)
 
 
 def fixture(dataset='PN2', value='1.2', release='2026-08-12T23:00:00.000Z'):
