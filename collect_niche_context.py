@@ -22,6 +22,16 @@ JOURNAL_NAME = 'niche_context_vintages.json'
 STATUS_NAME = 'niche_context_status.json'
 
 
+def _failure_diagnostics(diagnostics):
+    """Publish fixed labels only; never persist provider or exception text."""
+    allowed = {'diagnostic_source': {'ECB_EST', 'STATCAN_DATA_1567083339',
+                                    'STATCAN_INFO_1567083339', 'ARTIFACT', 'UNKNOWN'},
+               'diagnostic_stage': {'HTTP_REQUEST', 'CONTENT_TYPE', 'PARSE',
+                                   'ARTIFACT_VALIDATION', 'UNKNOWN'}}
+    return {key: value if isinstance(value := diagnostics.get(key), str) and value in values
+            else 'UNKNOWN' for key, values in allowed.items()}
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                      allow_nan=False).encode('utf-8')).hexdigest()
@@ -156,13 +166,17 @@ def collect(output_dir, *, now=None, session=None):
                  'last_success_at': previous_status.get('last_success_at'),
                  'archive_head': anchor, 'archive_event_count': len(events), 'error_code': None}
         atomic_json(status_path, state)
+        diagnostics = {}
         try:
-            artifact = fetch(session=session, now=now)
+            artifact = fetch(session=session, now=now, diagnostics=diagnostics)
+            diagnostics.update(diagnostic_source='ARTIFACT', diagnostic_stage='ARTIFACT_VALIDATION')
             validate_artifact(artifact, now=now)
         except requests.RequestException:
-            state.update(status='failed', error_code='NICHE_REQUEST_FAILED')
+            state.update(status='failed', error_code='NICHE_REQUEST_FAILED',
+                         **_failure_diagnostics(diagnostics))
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError, UnicodeError):
-            state.update(status='failed', error_code='NICHE_RESPONSE_INVALID')
+            state.update(status='failed', error_code='NICHE_RESPONSE_INVALID',
+                         **_failure_diagnostics(diagnostics))
         else:
             try:
                 state_hash = _digest(artifact)
@@ -194,7 +208,8 @@ def main():
     args = parser.parse_args()
     result = collect(args.output_dir)
     print(json.dumps({key: result.get(key) for key in ('status', 'collection_action',
-                                                       'last_attempt_at', 'error_code')}))
+                                                       'last_attempt_at', 'error_code',
+                                                       'diagnostic_source', 'diagnostic_stage')}))
     return int(result['status'] == 'failed')
 
 

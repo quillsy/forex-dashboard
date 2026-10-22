@@ -1,13 +1,18 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
+import collect_niche_context as collector
+
 from collect_niche_context import collect, DATA_NAME, JOURNAL_NAME, STATUS_NAME, _pack_snapshot, _unpack_snapshot
-from niche_context import parse_ecb, parse_statcan
+from niche_context import parse_ecb, parse_statcan, ECB_URL, STATCAN_URL, STATCAN_INFO_URL
 from niche_context_panel import load_context, render_niche_context
 
 NOW = datetime(2026, 9, 22, 22, 30, tzinfo=timezone.utc)
@@ -183,6 +188,166 @@ class NicheContextTests(unittest.TestCase):
             self.assertEqual(recovery['status'], 'success')
             self.assertEqual(recovery['archive_event_count'], 3)
             self.assertEqual(load_context(temp, now=later + timedelta(minutes=1))[1], 3)
+
+
+SECRET = 'DO_NOT_PUBLISH_TOKEN_OR_PROVIDER_BODY'
+
+
+class ScriptedSession:
+    def __init__(self, replace_index=None, replacement=None):
+        self.responses = [Response(ECB_CSV, 'text/csv'),
+                          Response(json.dumps(STATCAN).encode(), 'application/json'),
+                          Response(json.dumps(STATCAN_INFO).encode(), 'application/json')]
+        if replace_index is not None:
+            self.responses[replace_index] = replacement
+        self.calls = []
+
+    def _request(self, method, url, kwargs):
+        response = self.responses[len(self.calls)]
+        self.calls.append((method, url, kwargs))
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def get(self, url, **kwargs):
+        return self._request('GET', url, kwargs)
+
+    def post(self, url, **kwargs):
+        return self._request('POST', url, kwargs)
+
+
+class NicheDiagnosticTests(unittest.TestCase):
+    def assert_failure(self, session, source, stage, code='NICHE_RESPONSE_INVALID'):
+        with tempfile.TemporaryDirectory() as temp:
+            result = collector.collect(temp, now=NOW, session=session)
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['error_code'], code)
+            self.assertEqual(result.get('diagnostic_source'), source)
+            self.assertEqual(result.get('diagnostic_stage'), stage)
+            self.assertIsNone(result['last_success_at'])
+            self.assertEqual(result['archive_event_count'], 0)
+            self.assertFalse(Path(temp, collector.DATA_NAME).exists())
+            self.assertFalse(Path(temp, collector.JOURNAL_NAME).exists())
+            self.assertNotIn(SECRET, Path(temp, collector.STATUS_NAME).read_text())
+            self.assertIs(result['core_eligible'], False)
+            self.assertIsNone(result['signal'])
+            with self.assertRaises(ValueError):
+                load_context(temp, now=NOW)
+            return result
+
+    def test_content_type_identifies_each_source_and_stops_without_retry(self):
+        for index, source in enumerate(('ECB_EST', 'STATCAN_DATA_1567083339',
+                                        'STATCAN_INFO_1567083339')):
+            with self.subTest(source=source):
+                session = ScriptedSession(index, Response(SECRET.encode(), 'text/html'))
+                self.assert_failure(session, source, 'CONTENT_TYPE')
+                self.assertEqual(len(session.calls), index + 1)
+
+    def test_malformed_body_identifies_each_parser_and_stops(self):
+        for index, (source, content_type) in enumerate((('ECB_EST', 'text/csv'),
+                ('STATCAN_DATA_1567083339', 'application/json'),
+                ('STATCAN_INFO_1567083339', 'application/json'))):
+            with self.subTest(source=source):
+                session = ScriptedSession(index, Response(SECRET.encode(), content_type))
+                self.assert_failure(session, source, 'PARSE')
+                self.assertEqual(len(session.calls), index + 1)
+
+    def test_metadata_identity_rejection_remains_strict(self):
+        changed = json.loads(json.dumps(STATCAN_INFO))
+        changed[0]['object']['vectorId'] = 1
+        self.assert_failure(ScriptedSession(2, Response(json.dumps(changed).encode(),
+                            'application/json')), 'STATCAN_INFO_1567083339', 'PARSE')
+
+    def test_request_errors_keep_existing_code_for_all_sources(self):
+        for index, source in enumerate(('ECB_EST', 'STATCAN_DATA_1567083339',
+                                        'STATCAN_INFO_1567083339')):
+            with self.subTest(source=source):
+                session = ScriptedSession(index, requests.ConnectionError(SECRET))
+                self.assert_failure(session, source, 'HTTP_REQUEST', 'NICHE_REQUEST_FAILED')
+                self.assertEqual(len(session.calls), index + 1)
+
+    def test_http_status_error_is_attributed_without_logging_response(self):
+        response = Response(SECRET.encode(), 'application/json')
+        response.raise_for_status = lambda: (_ for _ in ()).throw(requests.HTTPError(SECRET))
+        self.assert_failure(ScriptedSession(2, response), 'STATCAN_INFO_1567083339',
+                            'HTTP_REQUEST', 'NICHE_REQUEST_FAILED')
+
+    def test_existing_response_exception_classes_remain_fail_closed(self):
+        for error_type in (ValueError, KeyError, TypeError, AttributeError, OverflowError, UnicodeError):
+            with self.subTest(error_type=error_type.__name__):
+                with patch('niche_context.parse_ecb', side_effect=error_type(SECRET)):
+                    self.assert_failure(ScriptedSession(), 'ECB_EST', 'PARSE')
+
+    def test_artifact_failure_is_not_misattributed_to_last_provider(self):
+        with patch('collect_niche_context.validate_artifact', side_effect=ValueError(SECRET)):
+            session = ScriptedSession()
+            self.assert_failure(session, 'ARTIFACT', 'ARTIFACT_VALIDATION')
+            self.assertEqual(len(session.calls), 3)
+
+    def test_unknown_exception_location_uses_fixed_unknown_labels(self):
+        with patch('collect_niche_context.fetch', side_effect=ValueError(SECRET)):
+            self.assert_failure(ScriptedSession(), 'UNKNOWN', 'UNKNOWN')
+
+    def test_diagnostics_are_allowlisted_not_arbitrary_injected_values(self):
+        def fail(**kwargs):
+            kwargs['diagnostics'].update(diagnostic_source=SECRET, diagnostic_stage=SECRET)
+            raise ValueError(SECRET)
+        with patch('collect_niche_context.fetch', side_effect=fail):
+            self.assert_failure(ScriptedSession(), 'UNKNOWN', 'UNKNOWN')
+
+    def test_failed_refresh_preserves_success_cache_journal_and_cooldown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = collector.collect(temp, now=NOW, session=Session())
+            paths = [Path(temp, name) for name in (collector.DATA_NAME, collector.ECB_CSV_NAME,
+                                                  collector.JOURNAL_NAME)]
+            old = [p.read_bytes() for p in paths]
+            later = NOW + timedelta(days=1)
+            session = ScriptedSession(1, Response(SECRET.encode(), 'application/json'))
+            failure = collector.collect(temp, now=later, session=session)
+            self.assertEqual(failure['last_success_at'], first['last_success_at'])
+            self.assertEqual(failure['archive_head'], first['archive_head'])
+            self.assertEqual(failure['archive_event_count'], 1)
+            self.assertEqual([p.read_bytes() for p in paths], old)
+            self.assertEqual(failure.get('diagnostic_source'), 'STATCAN_DATA_1567083339')
+            blocked = ScriptedSession()
+            again = collector.collect(temp, now=later + timedelta(hours=1), session=blocked)
+            self.assertEqual(again['collection_action'], 'not_due')
+            self.assertEqual(again.get('diagnostic_source'), failure.get('diagnostic_source'))
+            self.assertEqual(blocked.calls, [])
+            with self.assertRaises(ValueError):
+                load_context(temp, now=later)
+            recovery = collector.collect(temp, now=later + timedelta(days=1), session=ScriptedSession())
+            self.assertEqual(recovery['status'], 'success')
+            self.assertNotIn('diagnostic_source', recovery)
+            self.assertNotIn('diagnostic_stage', recovery)
+
+    def test_success_keeps_request_contract_and_has_no_error_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            session = ScriptedSession()
+            result = collector.collect(temp, now=NOW, session=session)
+            self.assertEqual(result['status'], 'success')
+            self.assertEqual([(method, url) for method, url, _ in session.calls],
+                             [('GET', ECB_URL), ('POST', STATCAN_URL), ('POST', STATCAN_INFO_URL)])
+            self.assertEqual([kwargs.get('json') for _, _, kwargs in session.calls],
+                             [None, [{'vectorId': 1567083339, 'latestN': 15}],
+                              [{'vectorId': 1567083339}]])
+            self.assertTrue(all(kwargs['timeout'] == 30 for _, _, kwargs in session.calls))
+            self.assertNotIn('diagnostic_source', result)
+            self.assertNotIn('diagnostic_stage', result)
+            self.assertEqual(load_context(temp, now=NOW)[1], 1)
+
+    def test_cli_prints_fixed_diagnostics_without_provider_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = ['collect_niche_context.py', '--output-dir', temp]
+            output = io.StringIO()
+            with patch('sys.argv', args), patch('collect_niche_context.fetch',
+                    side_effect=ValueError(SECRET)), contextlib.redirect_stdout(output):
+                exit_code = collector.main()
+            self.assertEqual(exit_code, 1)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result.get('diagnostic_source'), 'UNKNOWN')
+            self.assertEqual(result.get('diagnostic_stage'), 'UNKNOWN')
+            self.assertNotIn(SECRET, output.getvalue())
 
 
 if __name__ == '__main__':
