@@ -2047,17 +2047,17 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
         self.assertEqual(transport.get.call_args_list[0].kwargs['params']['statsDataId'], '0004052037')
         return previous, batch['currencies']['JPY']['Inflation'], now
 
-    def test_verified_national_rate_reuses_one_api_check_and_has_date_only_deadline(self):
+    def test_verified_national_rate_reuses_one_api_check_and_has_scheduled_deadline(self):
         _, row, now = self.collect_case()
         self.assertEqual(row['validation'], 'VALID')
         self.assertAlmostEqual(row['score'], -5.0)
         self.assertEqual(row['observation']['value'], 1.9)
         self.assertEqual(row['observation']['release_date_known'], '2026-08-21')
         self.assertIsNone(row['published_at'])
-        self.assertEqual(row['next_due_at'], '2026-09-17T15:00:00+00:00')
-        self.assertEqual(row['observation']['next_due_precision'], 'date_only_start_of_JP_day')
+        self.assertEqual(row['next_due_at'], '2026-09-17T23:30:00+00:00')
+        self.assertEqual(row['observation']['next_due_precision'], 'official_scheduled_time')
         self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
-        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 15, tzinfo=timezone.utc),
+        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 23, 30, tzinfo=timezone.utc),
                                        factor='Inflation', currency='JPY')[0])
 
     def test_invalid_or_conflicting_source_revokes_prior_valid_score(self):
@@ -2100,7 +2100,7 @@ class JapanCpiReleaseCollectorIntegrationTests(unittest.TestCase):
         self.assertEqual(row['observation']['reference_period'], '2026-07')
         self.assertEqual(row['observation']['value'], 1.9)
         self.assertTrue(live.eligible(row, now, factor='Inflation', currency='JPY')[0])
-        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 15, tzinfo=timezone.utc),
+        self.assertFalse(live.eligible(row, datetime(2026, 9, 17, 23, 30, tzinfo=timezone.utc),
                                        factor='Inflation', currency='JPY')[0])
 
     def test_zero_and_negative_headline_rates_are_real_observations(self):
