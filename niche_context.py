@@ -169,26 +169,41 @@ def parse_statcan_info(content):
     return STATCAN_TITLE
 
 
-def fetch(session=None, now=None):
+def _record_diagnostic(diagnostics, source, stage):
+    if diagnostics is not None:
+        diagnostics.update(diagnostic_source=source, diagnostic_stage=stage)
+
+
+def fetch(session=None, now=None, *, diagnostics=None):
     session = session or requests.Session()
     now = now or datetime.now(timezone.utc)
     retrieved_at = now.astimezone(timezone.utc).isoformat()
     headers = {'User-Agent': 'FXContextResearch/1.0 (official data, once daily)'}
+    _record_diagnostic(diagnostics, 'ECB_EST', 'HTTP_REQUEST')
     ecb = session.get(ECB_URL, timeout=30, headers=headers)
     ecb.raise_for_status()
+    _record_diagnostic(diagnostics, 'ECB_EST', 'CONTENT_TYPE')
     if 'csv' not in ecb.headers.get('Content-Type', '').lower():
         raise ValueError('Unexpected ECB content type')
+    _record_diagnostic(diagnostics, 'ECB_EST', 'PARSE')
     ecb_result = parse_ecb(ecb.content, retrieved_at)
+    _record_diagnostic(diagnostics, 'STATCAN_DATA_1567083339', 'HTTP_REQUEST')
     statcan = session.post(STATCAN_URL, json=STATCAN_BODY, timeout=30, headers=headers)
     statcan.raise_for_status()
+    _record_diagnostic(diagnostics, 'STATCAN_DATA_1567083339', 'CONTENT_TYPE')
     if 'json' not in statcan.headers.get('Content-Type', '').lower():
         raise ValueError('Unexpected StatCan content type')
+    _record_diagnostic(diagnostics, 'STATCAN_DATA_1567083339', 'PARSE')
     statcan_result = parse_statcan(statcan.content, retrieved_at)
+    _record_diagnostic(diagnostics, 'STATCAN_INFO_1567083339', 'HTTP_REQUEST')
     statcan_info = session.post(STATCAN_INFO_URL, json=STATCAN_INFO_BODY, timeout=30, headers=headers)
     statcan_info.raise_for_status()
+    _record_diagnostic(diagnostics, 'STATCAN_INFO_1567083339', 'CONTENT_TYPE')
     if 'json' not in statcan_info.headers.get('Content-Type', '').lower():
         raise ValueError('Unexpected StatCan metadata content type')
+    _record_diagnostic(diagnostics, 'STATCAN_INFO_1567083339', 'PARSE')
     statcan_title = parse_statcan_info(statcan_info.content)
+    _record_diagnostic(diagnostics, 'UNKNOWN', 'UNKNOWN')
     reference_date = statcan_result['period']
     return {'schema': 'fx-niche-context-v1', 'mode': 'research_only', 'core_eligible': False,
             'signal': None, 'retrieved_at': retrieved_at, 'ecb': ecb_result,
