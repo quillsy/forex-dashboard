@@ -21,31 +21,26 @@
   "seasonal_adjustment": "seasonally_adjusted_not_calendar_adjusted",
   "geography": "EA21",
   "frequency": "monthly",
-  "retrieved_at": "2026-10-29T09:57:13.503883+00:00",
-  "dataset_updated_at": "2026-09-29T09:00:00+00:00",
+  "retrieved_at": "2026-10-29T11:07:24.817642+00:00",
+  "dataset_updated_at": "2026-10-29T10:00:00+00:00",
   "published_at": null,
-  "reference_period": "2026-09",
-  "value": -3.8,
-  "latest_indexed_period": "2026-09",
+  "reference_period": "2026-10",
+  "value": -3.4,
+  "latest_indexed_period": "2026-10",
   "latest_indexed_period_missing": false,
   "missing_periods": [],
   "absent_calendar_periods": [],
-  "reference_period_age_days": 29,
+  "reference_period_age_days": 0,
   "age_basis": "days since reference month end; current incomplete month is zero; not publication age",
   "observations": [
     {
-      "reference_period": "2025-09",
-      "value": -10.1,
-      "status": null
-    },
-    {
       "reference_period": "2025-10",
-      "value": -8.3,
+      "value": -8.2,
       "status": null
     },
     {
       "reference_period": "2025-11",
-      "value": -9.2,
+      "value": -9.1,
       "status": null
     },
     {
@@ -65,7 +60,7 @@
     },
     {
       "reference_period": "2026-03",
-      "value": -7.0,
+      "value": -6.9,
       "status": null
     },
     {
@@ -75,7 +70,7 @@
     },
     {
       "reference_period": "2026-05",
-      "value": -7.6,
+      "value": -7.7,
       "status": null
     },
     {
@@ -85,21 +80,26 @@
     },
     {
       "reference_period": "2026-07",
-      "value": -5.9,
+      "value": -6.0,
       "status": null
     },
     {
       "reference_period": "2026-08",
-      "value": -5.0,
+      "value": -5.1,
       "status": null
     },
     {
       "reference_period": "2026-09",
-      "value": -3.8,
+      "value": -3.9,
+      "status": null
+    },
+    {
+      "reference_period": "2026-10",
+      "value": -3.4,
       "status": null
     }
   ],
-  "payload_sha256": "05c4125fe7be8e771d0fe008fe6fa7fecfeffe00a12a6d7886d047ecc3a601f7",
+  "payload_sha256": "98884db66172ca972994adcce29bedeed1ed3e18c18ffd664d4e488d51324a41",
   "source_snapshot": {
     "version": "2.0",
     "class": "dataset",
@@ -121,21 +121,21 @@
       13
     ],
     "value": {
-      "0": -10.1,
-      "1": -8.3,
-      "2": -9.2,
-      "3": -8.8,
-      "4": -7.0,
-      "5": -7.3,
-      "6": -7.0,
-      "7": -7.5,
-      "8": -7.6,
-      "9": -7.4,
-      "10": -5.9,
-      "11": -5.0,
-      "12": -3.8
+      "0": -8.2,
+      "1": -9.1,
+      "2": -8.8,
+      "3": -7.0,
+      "4": -7.3,
+      "5": -6.9,
+      "6": -7.5,
+      "7": -7.7,
+      "8": -7.4,
+      "9": -6.0,
+      "10": -5.1,
+      "11": -3.9,
+      "12": -3.4
     },
-    "updated": "2026-09-29T11:00:00+0200",
+    "updated": "2026-10-29T11:00:00+0100",
     "status": {},
     "extension": {
       "id": "EI_BSIN_M_R2",
@@ -180,19 +180,19 @@
       "time": {
         "category": {
           "index": {
-            "2025-09": 0,
-            "2025-10": 1,
-            "2025-11": 2,
-            "2025-12": 3,
-            "2026-01": 4,
-            "2026-02": 5,
-            "2026-03": 6,
-            "2026-04": 7,
-            "2026-05": 8,
-            "2026-06": 9,
-            "2026-07": 10,
-            "2026-08": 11,
-            "2026-09": 12
+            "2025-10": 0,
+            "2025-11": 1,
+            "2025-12": 2,
+            "2026-01": 3,
+            "2026-02": 4,
+            "2026-03": 5,
+            "2026-04": 6,
+            "2026-05": 7,
+            "2026-06": 8,
+            "2026-07": 9,
+            "2026-08": 10,
+            "2026-09": 11,
+            "2026-10": 12
           }
         }
       }
