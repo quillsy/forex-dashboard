@@ -11,12 +11,12 @@
   "observation_frequency": "daily",
   "dissemination_cadence": "weekly, around mid-week",
   "value": 2.75,
-  "observation_date": "2026-10-30",
-  "retrieved_at": "2026-11-11T22:13:03.331151+00:00",
+  "observation_date": "2026-11-06",
+  "retrieved_at": "2026-11-12T22:42:35.725013+00:00",
   "published_at": null,
   "next_publication_at": null,
   "rate_effective_date": null,
-  "observation_age_days": 12,
+  "observation_age_days": 6,
   "research_status": "weekly_backup_observation",
   "research_stale_threshold_days": 14,
   "status_note": "14-day threshold is a research display warning, not a provider SLA or CORE age limit",
@@ -26,9 +26,8 @@
   "terms_url": "https://data.bis.org/help/legal",
   "attribution": "Source: BIS, Central bank policy rates; Reserve Bank of New Zealand.",
   "translation_notice": "German descriptions, if displayed, are not an official BIS translation.",
-  "payload_sha256": "3134f3a207a3342d6519bb801074558cbaf3a5ea2df4493a6fc82ea665f8549d",
+  "payload_sha256": "0482f27772a85e812bb5fdd58f98a92dcd708b6235befada7e94a81d7178bf4a",
   "missing_observation_dates": [
-    "2026-09-27",
     "2026-10-03",
     "2026-10-04",
     "2026-10-10",
@@ -36,7 +35,9 @@
     "2026-10-17",
     "2026-10-18",
     "2026-10-24",
-    "2026-10-25"
+    "2026-10-25",
+    "2026-10-31",
+    "2026-11-01"
   ],
   "observations": [
     {
@@ -137,6 +138,26 @@
     },
     {
       "observation_date": "2026-10-30",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-11-02",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-11-03",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-11-04",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-11-05",
+      "value": 2.75
+    },
+    {
+      "observation_date": "2026-11-06",
       "value": 2.75
     }
   ]
