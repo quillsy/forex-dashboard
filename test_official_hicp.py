@@ -149,6 +149,37 @@ if __name__=='__main__':unittest.main()
 
 
 class SwissHicpTests(unittest.TestCase):
+    # Synthetic minimal markup from the verified portal's two matching cards,
+    # not a downloaded workbook, saved response or current hard-coded DAM ID.
+    TITLE = ('HVPI Schweiz (2025=100), Detailresultate seit 2005, Warenkorbstruktur '
+             '2025, Indizes, Veränderungsraten. [HICP25B25]')
+    SHORT = 'HVPI Schweiz (2025=100), Detailresultate seit 2005'
+
+    def portal_card(self, asset_id=123, *, accordion=False):
+        master = f'https://dam-api.bfs.admin.ch/hub/api/dam/assets/{asset_id}/master'
+        controls = (f'<a href="{master}">xlsx</a>'
+                    f'<a href="/de/asset/{asset_id}" aria-label="Weiter lesen auf der Seite {self.TITLE}">Details</a>')
+        if accordion:
+            return (f'<li class="accordion__item"><h4 class="accordion__heading">'
+                    f'<button><span class="accordion__title">{self.SHORT}</span></button></h4>'
+                    f'<div><a class="download-item" href="{master}">Detailresultate</a>{controls}</div></li>')
+        return (f'<article class="bfs-dam-asset-card"><div class="card__content">'
+                f'<div class="card__body"><h4 class="card__title">{self.TITLE}</h4></div>'
+                f'{controls}</div></article>')
+
+    def portal_page(self, *cards):
+        return ('<html><body><h1>Harmonisierter Verbraucherpreisindex (HVPI)</h1>'
+                + ''.join(cards) + '</body></html>').encode('utf-8')
+
+    def portal_response(self, *cards, **overrides):
+        from unittest.mock import Mock
+        from official_hicp import BFS_HICP_DISCOVERY
+        fields = {'status_code': 200, 'url': BFS_HICP_DISCOVERY, 'history': [],
+                  'headers': {'Content-Type': 'text/html; charset=utf-8'},
+                  'content': self.portal_page(*cards)}
+        fields.update(overrides)
+        return Mock(**fields)
+
     def fixture(self):
         import io
         import openpyxl
@@ -210,18 +241,65 @@ class SwissHicpTests(unittest.TestCase):
             self.parse(book, metadata)
 
     def test_dynamic_discovery_and_ambiguous_results(self):
-        import json
         from official_hicp import discover_swiss_hicp
-        item = {'damId': 987, 'url': 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/987',
-                'title': 'HVPI Schweiz (2025=100), Detailresultate seit 2005'}
-        self.assertEqual(discover_swiss_hicp({'assetListAsJson': json.dumps({'list': [item]})}), item['url'])
-        for items in [[], [item, item], [dict(item, url='https://example.org/private')]]:
+        expected = 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/987'
+        featured = self.portal_card(987)
+        accordion = self.portal_card(987, accordion=True)
+        unrelated = self.portal_card(654).replace(self.TITLE, 'Landesindex der Konsumentenpreise [LIK25B25]')
+        absolute = featured.replace('/de/asset/987', 'https://statistik.admin.ch/de/asset/987')
+        for cards in [(featured,), (absolute,), (accordion,), (featured, accordion), (featured, featured),
+                      (unrelated, featured, accordion)]:
+            with self.subTest(cards=len(cards)):
+                self.assertEqual(discover_swiss_hicp(self.portal_page(*cards)), expected)
+        for cards in [(), (unrelated,), (featured, self.portal_card(988)),
+                      (featured, self.portal_card(988, accordion=True))]:
+            with self.subTest(cards=len(cards)), self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                discover_swiss_hicp(self.portal_page(*cards))
+
+    def test_discovery_rejects_unbound_detail_links_and_product_identity(self):
+        from official_hicp import discover_swiss_hicp
+        card = self.portal_card(123)
+        for bad_href in ('https://example.org/de/asset/123', '//statistik.admin.ch/de/asset/123',
+                         'http://statistik.admin.ch/de/asset/123', '/de/asset/123?x=1', '/de/asset/123#x',
+                         '/de/asset/123/', '/de/asset/%31%32%33', '/de/asset/0', '/de/asset/0123',
+                         '/de/asset/-1', '/de/asset/124'):
+            with self.subTest(href=bad_href), self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                discover_swiss_hicp(self.portal_page(card.replace('/de/asset/123', bad_href)))
+        wrong_aria = card.replace('Weiter lesen auf der Seite ' + self.TITLE, 'Weiter lesen auf der Seite LIK')
+        wrong_code = card.replace('[HICP25B25]', '[LIK25B25]')
+        missing_details = card.replace('>Details</a>', '>Andere</a>')
+        # A valid-looking link and title outside the actual product card are not discovery evidence.
+        wrong_container = card.replace('bfs-dam-asset-card', 'unverified-card')
+        duplicate_heading = card.replace('</h4>', '</h4><h4 class="card__title">Other</h4>')
+        for invalid in (wrong_aria, wrong_code, missing_details, wrong_container, duplicate_heading):
             with self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
-                discover_swiss_hicp({'assetListAsJson': json.dumps({'list': items})})
+                discover_swiss_hicp(self.portal_page(invalid))
+
+    def test_discovery_requires_master_and_all_matching_cards_agree(self):
+        from official_hicp import discover_swiss_hicp
+        card = self.portal_card(123)
+        master = 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/123/master'
+        for bad_href in (master.replace('/123/', '/124/'), master + '?x=1', master + '#x',
+                         master.replace('https://', 'http://'), master.replace('dam-api.bfs.admin.ch', 'example.org')):
+            malformed = card.replace(master, bad_href)
+            with self.subTest(href=bad_href), self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                # A second good card must not hide a broken matching card.
+                discover_swiss_hicp(self.portal_page(card, malformed))
+        for malformed in (card.replace('>xlsx</a>', '>pdf</a>'),
+                          card.replace('</article>', '<a href="https://example.org/other">Other</a></article>')):
+            with self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                discover_swiss_hicp(self.portal_page(card, malformed))
+        # The exact product Details label still identifies this second card,
+        # even though its heading is missing/wrong. Do not ignore its different ID.
+        other = self.portal_card(124)
+        for malformed in (other.replace(f'<h4 class="card__title">{self.TITLE}</h4>',
+                                        '<h4 class="card__title">Unexpected title</h4>'),
+                          other.replace(f'<h4 class="card__title">{self.TITLE}</h4>', '')):
+            with self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                discover_swiss_hicp(self.portal_page(card, malformed))
 
     def test_fetch_uses_discovered_asset_and_propagates_transport_failure(self):
         import io
-        import json
         import requests
         from unittest.mock import Mock
         from official_hicp import fetch_swiss_hicp, BFS_HICP_DISCOVERY
@@ -229,19 +307,59 @@ class SwissHicpTests(unittest.TestCase):
         stream = io.BytesIO()
         book.save(stream)
         asset = 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/123'
-        discovery = {'assetListAsJson': json.dumps({'list': [{'damId': 123, 'url': asset,
-                     'title': metadata['description']['titles']['main']}]})}
-        responses = [Mock(), Mock(), Mock()]
-        responses[0].json.return_value = discovery
+        responses = [self.portal_response(self.portal_card(), self.portal_card(accordion=True)), Mock(), Mock()]
         responses[1].json.return_value = metadata
         responses[2].content = stream.getvalue()
         session = Mock()
         session.get.side_effect = responses
         self.assertEqual(fetch_swiss_hicp(session=session, now=datetime(2026, 9, 8, tzinfo=timezone.utc))['value'], 0.9)
         self.assertEqual([x.args[0] for x in session.get.call_args_list], [BFS_HICP_DISCOVERY, asset, asset + '/master'])
+        self.assertEqual(session.get.call_args_list[0].kwargs, {'timeout': 30, 'allow_redirects': False})
+        self.assertEqual([x.kwargs for x in session.get.call_args_list[1:]], [{'timeout': 30}, {'timeout': 30}])
         session.get.side_effect = requests.Timeout('offline')
         with self.assertRaises(requests.Timeout):
             fetch_swiss_hicp(session=session)
+
+    def test_malformed_or_redirected_discovery_never_requests_asset(self):
+        from unittest.mock import Mock
+        from official_hicp import fetch_swiss_hicp
+        card = self.portal_card()
+        for overrides in ({'status_code': 302}, {'status_code': 204},
+                          {'url': 'https://example.org/'}, {'history': [Mock()]},
+                          {'headers': {'Content-Type': 'application/json'}},
+                          {'headers': {}}, {'content': b'<html>No original product</html>'},
+                          {'content': b'\xff\xfe'},
+                          {'content': b''}, {'content': b'x' * 2_000_001}):
+            session = Mock()
+            session.get.return_value = self.portal_response(card, **overrides)
+            with self.assertRaisesRegex(ValueError, 'DISCOVERY_INVALID'):
+                fetch_swiss_hicp(session=session)
+            self.assertEqual(session.get.call_count, 1)
+
+    def test_discovery_http_404_stays_transport_error(self):
+        import requests
+        from unittest.mock import Mock
+        from official_hicp import fetch_swiss_hicp
+        response = self.portal_response(self.portal_card(), status_code=404)
+        response.raise_for_status.side_effect = requests.HTTPError('not found')
+        session = Mock()
+        session.get.return_value = response
+        with self.assertRaises(requests.HTTPError):
+            fetch_swiss_hicp(session=session)
+        self.assertEqual(session.get.call_count, 1)
+
+    def test_discovered_asset_must_match_dam_metadata_before_workbook(self):
+        from unittest.mock import Mock
+        from official_hicp import fetch_swiss_hicp
+        _, metadata = self.fixture()
+        metadata['ids']['damId'] = 124
+        response = Mock()
+        response.json.return_value = metadata
+        session = Mock()
+        session.get.side_effect = [self.portal_response(self.portal_card()), response]
+        with self.assertRaisesRegex(ValueError, 'BFS_HICP_ASSET_ID_MISMATCH'):
+            fetch_swiss_hicp(session=session)
+        self.assertEqual(session.get.call_count, 2)
 
     def test_provisional_must_be_explicit_boolean_and_title_is_preserved(self):
         book, metadata = self.fixture()
@@ -260,20 +378,14 @@ class SwissHicpTests(unittest.TestCase):
             self.parse(book, metadata)
 
     def test_invalid_json_is_contract_failure_not_transport_failure(self):
-        import json
         from unittest.mock import Mock
         import requests
         from official_hicp import fetch_swiss_hicp
-        asset = 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/123'
-        discovery = {'assetListAsJson': json.dumps({'list': [{'damId': 123, 'url': asset,
-                     'title': 'HVPI Schweiz (2025=100), Detailresultate seit 2005'}]})}
-        for position, code in [(0, 'DISCOVERY_INVALID'), (1, 'METADATA_INVALID')]:
-            responses = [Mock(), Mock()]
-            responses[0].json.return_value = discovery
-            responses[position].json.side_effect = requests.exceptions.JSONDecodeError('bad json', '<html>', 0)
-            session = Mock()
-            session.get.side_effect = responses
-            with self.subTest(position=position), self.assertRaisesRegex(ValueError, code) as caught:
-                fetch_swiss_hicp(session=session)
-            self.assertNotIsInstance(caught.exception, requests.RequestException)
-            self.assertEqual(session.get.call_count, position + 1)
+        response = Mock()
+        response.json.side_effect = requests.exceptions.JSONDecodeError('bad json', '<html>', 0)
+        session = Mock()
+        session.get.side_effect = [self.portal_response(self.portal_card()), response]
+        with self.assertRaisesRegex(ValueError, 'METADATA_INVALID') as caught:
+            fetch_swiss_hicp(session=session)
+        self.assertNotIsInstance(caught.exception, requests.RequestException)
+        self.assertEqual(session.get.call_count, 2)

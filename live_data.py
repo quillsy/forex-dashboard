@@ -533,9 +533,19 @@ def public_observation(observation):
             if isinstance(value, str) and re.fullmatch(r"https://dam-api\.bfs\.admin\.ch/hub/api/dam/assets/[1-9]\d*/master", value):
                 result[key] = value
                 continue
-            if isinstance(value, str) and re.fullmatch(
-                    r"https://www\.esri\.cao\.go\.jp/jp/sna/data/data_list/sokuhou/files/(\d{4})/qe(\d{3})_([12])/tables/gaku-jk\2\3\.csv", value):
-                result[key] = value
+            esri_path = re.fullmatch(
+                r"https://www\.esri\.cao\.go\.jp/jp/sna/data/data_list/sokuhou/files/(\d{4})/qe(\d{2})([1-4])(?:_([12]))?/tables/gaku-jk\2\3([12])\.csv",
+                value) if isinstance(value, str) else None
+            if esri_path:
+                # First preliminary releases may omit _1 in the directory,
+                # but the exact GDP filename still ends with stage 1.
+                stage = esri_path[4] or "1"
+                if (int(esri_path[1]) > 0 and int(esri_path[1]) % 100 == int(esri_path[2])
+                        and esri_path[5] == stage
+                        and observation.get("series_id") in (None, "ESRI:GDP:Expenditure:Real:SA:2020:YoY")
+                        and observation.get("reference_period") in (None, f"{esri_path[1]}-Q{esri_path[3]}")
+                        and observation.get("release_stage") in (None, "1st" if stage == "1" else "2nd")):
+                    result[key] = value
                 continue
             if isinstance(value, str) and value in official_links:
                 result[key] = value

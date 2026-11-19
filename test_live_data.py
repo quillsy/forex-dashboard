@@ -928,6 +928,37 @@ class LiveDataTests(unittest.TestCase):
                 for bad in (url + '?api_key=private', url + '#private', url.replace('https:', 'http:')):
                     self.assertNotIn('source_url', live.public_observation({'source_url': bad}))
 
+    def test_esri_gdp_public_source_preserves_only_stage_bound_directory_variants(self):
+        base = 'https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/2026/'
+        series = 'ESRI:GDP:Expenditure:Real:SA:2020:YoY'
+        for path, period, stage in (
+                ('qe263/tables/gaku-jk2631.csv', '2026-Q3', '1st'),
+                ('qe262_2/tables/gaku-jk2622.csv', '2026-Q2', '2nd'),
+                ('qe261_1/tables/gaku-jk2611.csv', '2026-Q1', '1st')):
+            url = base + path
+            with self.subTest(path=path):
+                self.assertEqual(live.public_observation({'source_url': url})['source_url'], url)
+                self.assertEqual(live.public_observation({'source_url': url, 'series_id': series,
+                    'reference_period': period, 'release_stage': stage})['source_url'], url)
+
+    def test_esri_gdp_public_source_rejects_other_series_and_mismatched_release_identity(self):
+        url = ('https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/2026/'
+               'qe263/tables/gaku-jk2631.csv')
+        for bad in (
+                url.replace('https:', 'http:'), url.replace('www.esri.cao.go.jp', 'example.invalid'),
+                url + '?token=private', url + '#private', url.replace('/2026/', '/2027/'),
+                url.replace('qe263', 'qe269').replace('jk2631', 'jk2691'),
+                url.replace('gaku-jk2631', 'gaku-jk2632'), url.replace('gaku-jk2631', 'gaku-jk2621'),
+                url.replace('/qe263/', '/qe263_2/'), url.replace('gaku-jk2631', 'kgaku-jk2631')):
+            with self.subTest(bad=bad):
+                self.assertNotIn('source_url', live.public_observation({'source_url': bad}))
+        obs = {'source_url': url, 'series_id': 'ESRI:GDP:Expenditure:Real:SA:2020:YoY',
+               'reference_period': '2026-Q3', 'release_stage': '1st'}
+        for key, bad in (('series_id', 'ESRI:GDP:Other'), ('reference_period', '2026-Q2'),
+                         ('reference_period', '2027-Q3'), ('release_stage', '2nd')):
+            with self.subTest(key=key, bad=bad):
+                self.assertNotIn('source_url', live.public_observation({**obs, key: bad}))
+
     def test_source_table_shows_both_policy_and_yield_when_value_is_null(self):
         record=live.build_record('Geldpolitik',20,{'value':None,'yield_2y':4.34,'policy_rate':4.25,
             'date':'2026-09-04','source':'FRED'},'FRESH',NOW.isoformat())

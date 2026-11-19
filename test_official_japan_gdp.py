@@ -1,4 +1,4 @@
-"""Official Japan GDP regression tests; fixture from ESRI second Q2 release2026."""
+"""Official Japan GDP regression tests for suffixed and suffixless ESRI releases."""
 import csv
 import io
 import unittest
@@ -13,6 +13,12 @@ NOW = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
 MENU = 'https://www.esri.cao.go.jp/en/sna/data/sokuhou/files/2026/qe262_2/gdemenuea.html'
 CSV = 'https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/2026/qe262_2/tables/gaku-jk2622.csv'
 ARCHIVE = 'https://www.esri.cao.go.jp/en/sna/data/sokuhou/files/2026/toukei_2026.html'
+Q3_NOW = datetime(2026, 11, 19, 13, tzinfo=timezone.utc)
+Q3_MENU_HREF = '/en/sna/data/sokuhou/files/2026/qe263/gdemenuea.html'
+Q3_CSV_HREF = '/jp/sna/data/data_list/sokuhou/files/2026/qe263/tables/gaku-jk2631.csv'
+Q3_MENU = 'https://www.esri.cao.go.jp' + Q3_MENU_HREF
+Q3_CSV = 'https://www.esri.cao.go.jp' + Q3_CSV_HREF
+Q3_ARCHIVE_LABEL = 'Quarterly Estimates of GDP for Jul.-Sep.2026 (The First preliminary Estimates)'
 
 
 def index(menu=MENU):
@@ -25,6 +31,36 @@ def menu():
 
 def archive():
     return f'<h1>Quarterly Estimates of GDP - Release Archive - 2026</h1><table><tr><td>Sep 8, 2026</td><td><a href="{MENU}">Q2 release</a></td></tr></table>'.encode()
+
+
+def q3_menu():
+    # Minimal HTML of the visible labels and relative hrefs verified 2026-11-19;
+    # the similarly labelled household series is deliberately present as well.
+    household = Q3_CSV_HREF.replace('/gaku-', '/kgaku-')
+    return (f'<h1>Jul.-Sep.2026 (The 1st preliminary)</h1>'
+            f'<h3>GDP (Expenditure Approach) and Its Components</h3>'
+            f'<a href="{Q3_CSV_HREF}">Real, Seasonally Adjusted Series (csv:42KB)</a>'
+            f'<h3>Household Consumption</h3>'
+            f'<a href="{household}">Real, Seasonally Adjusted Series (csv:25KB)</a>').encode()
+
+
+def q3_archive_row(date, href, period, ordinal):
+    return (f'<tr><td>{date}</td><td><a href="{href}">Quarterly Estimates of GDP for '
+            f'{period}2026 (The {ordinal} preliminary Estimates)</a> (Benchmark year=2020)</td></tr>')
+
+
+def q3_archive():
+    # The 2026 archive contains suffixless first and suffixed second estimates.
+    prefix = '/en/sna/data/sokuhou/files/2026/'
+    rows = [
+        q3_archive_row('Nov  16, 2026', Q3_MENU_HREF, 'Jul.-Sep.', 'First'),
+        q3_archive_row('Sep 8, 2026', prefix + 'qe262_2/gdemenuea.html', 'Apr.-Jun.', 'Second'),
+        q3_archive_row('Aug  17, 2026', prefix + 'qe262/gdemenuea.html', 'Apr.-Jun.', 'First'),
+        q3_archive_row('Jun 8, 2026', prefix + 'qe261_2/gdemenuea.html', 'Jan.-Mar.', 'Second'),
+        q3_archive_row('May  19, 2026', prefix + 'qe261/gdemenuea.html', 'Jan.-Mar.', 'First'),
+    ]
+    return ('<h1>Quarterly Estimates of GDP - Release Archive - 2026</h1><table>'
+            + ''.join(rows) + '</table>').encode()
 
 
 def csv_rows():
@@ -87,6 +123,91 @@ class JapanGDPProposalTests(unittest.TestCase):
         found = discover_japan_gdp_menu(index(later))
         page = menu().replace(b'Apr.-Jun.2026 (The 2nd', b'Jan.-Mar.2027 (The 1st').replace(b'2026', b'2027').replace(b'qe262_2', b'qe271_1').replace(b'gaku-jk2622', b'gaku-jk2711')
         self.assertEqual(parse_japan_gdp_menu(page, found)['reference_period'], '2027-Q1')
+
+    def test_suffixless_first_preliminary_uses_verified_index_menu_archive_and_csv_link(self):
+        # Only the link metadata is from the current official release. The
+        # added Q3 level below is synthetic, not a downloaded GDP value.
+        rows = csv_rows()
+        rows.insert(-1, ['7- 9.', '600,000.0 '] + [''] * 31)
+        client = Mock()
+        client.get.side_effect = [Mock(content=body, url=url) for body, url in
+                                  [(index(Q3_MENU_HREF), JP_GDP_LATEST), (q3_menu(), Q3_MENU),
+                                   (q3_archive(), ARCHIVE), (content(rows), Q3_CSV)]]
+        result = fetch_japan_gdp(now=Q3_NOW, session=client)
+        self.assertEqual([call.args[0] for call in client.get.call_args_list],
+                         [JP_GDP_LATEST, Q3_MENU, ARCHIVE, Q3_CSV])
+        self.assertTrue(all(call.kwargs == {'timeout': 20} for call in client.get.call_args_list))
+        self.assertEqual(result['reference_period'], '2026-Q3')
+        self.assertEqual(result['release_stage'], '1st')
+        self.assertEqual(result['release_date_known'], '2026-11-16')
+        self.assertEqual(result['date'], '2026-09-30')
+        self.assertEqual(result['source_url'], Q3_CSV)
+        self.assertAlmostEqual(result['value'], 100 * (600000.0 / 592407.5 - 1))
+        self.assertIsNone(result['published_at'])
+        self.assertIsNone(result['next_due_at'])
+        self.assertTrue(result['needs_hourly_check'])
+        self.assertTrue(result['is_estimate'])
+
+    def test_suffixless_menu_requires_matching_year_quarter_and_first_stage(self):
+        for url in (Q3_MENU.replace('/2026/', '/2027/'), Q3_MENU.replace('qe263', 'qe2640'),
+                    Q3_MENU.replace('qe263', 'qe269'), Q3_MENU.replace('qe263', 'qe263_3')):
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, 'MENU_PATH_INVALID'):
+                discover_japan_gdp_menu(index(url))
+        for title in (b'Jul.-Sep.2027 (The 1st preliminary)',
+                      b'Apr.-Jun.2026 (The 1st preliminary)', b'Jul.-Sep.2026 (The 2nd preliminary)'):
+            with self.subTest(title=title), self.assertRaisesRegex(ValueError, 'MENU_IDENTITY_INVALID'):
+                parse_japan_gdp_menu(q3_menu().replace(b'Jul.-Sep.2026 (The 1st preliminary)', title), Q3_MENU)
+        self.assertEqual(parse_japan_gdp_menu(q3_menu(), Q3_MENU)['source_url'], Q3_CSV)
+
+    def test_suffixless_menu_cannot_substitute_csv_directory_series_quarter_year_or_stage(self):
+        valid = Q3_CSV_HREF.encode()
+        for invalid in (Q3_CSV_HREF.replace('/qe263/', '/qe263_1/'),
+                        Q3_CSV_HREF.replace('/2026/', '/2027/'),
+                        Q3_CSV_HREF.replace('qe263', 'qe262'),
+                        Q3_CSV_HREF.replace('gaku-jk2631', 'kgaku-jk2631'),
+                        Q3_CSV_HREF.replace('gaku-jk2631', 'gaku-jk2632'),
+                        Q3_CSV_HREF.replace('gaku-jk2631', 'gaku-jk2621')):
+            page = q3_menu().replace(valid, invalid.encode())
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'LEVEL_CSV_AMBIGUOUS'):
+                parse_japan_gdp_menu(page, Q3_MENU)
+        duplicate = q3_menu() + f'<a href="{Q3_CSV_HREF}">Real, Seasonally Adjusted Series (csv:42KB)</a>'.encode()
+        with self.assertRaisesRegex(ValueError, 'LEVEL_CSV_AMBIGUOUS'):
+            parse_japan_gdp_menu(duplicate, Q3_MENU)
+
+    def test_suffixless_archive_requires_consistent_stated_release_identity(self):
+        meta = parse_japan_gdp_menu(q3_menu(), Q3_MENU)
+        label = Q3_ARCHIVE_LABEL.encode()
+        for invalid in (label.replace(b'First', b'Second'), label.replace(b'2026', b'2027'),
+                        label.replace(b'Jul.-Sep.', b'Apr.-Jun.'), b'Q3 release'):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'ARCHIVE_RELEASE_IDENTITY_INVALID'):
+                parse_japan_gdp_release(q3_archive().replace(label, invalid), meta, now=Q3_NOW)
+        for field, invalid in (('reference_period', '2026-Q2'), ('release_stage', '2nd'),
+                               ('archive_url', ARCHIVE.replace('2026', '2027'))):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'ARCHIVE_IDENTITY_INVALID'):
+                parse_japan_gdp_release(q3_archive(), {**meta, field: invalid}, now=Q3_NOW)
+
+    def test_archive_rejects_duplicate_match_same_day_rival_and_later_suffixless_release(self):
+        meta = parse_japan_gdp_menu(q3_menu(), Q3_MENU)
+        entries = (
+            q3_archive_row('Nov  16, 2026', Q3_MENU_HREF, 'Jul.-Sep.', 'First'),
+            q3_archive_row('Nov  16, 2026', Q3_MENU_HREF.replace('qe263', 'qe263_1'), 'Jul.-Sep.', 'First'),
+            q3_archive_row('Nov  17, 2026', Q3_MENU_HREF.replace('qe263', 'qe264'), 'Oct.-Dec.', 'First'),
+        )
+        for entry in entries:
+            page = q3_archive().replace(b'</table>', entry.encode() + b'</table>')
+            with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, 'RELEASE_NOT_LATEST'):
+                parse_japan_gdp_release(page, meta, now=Q3_NOW)
+
+    def test_archive_rejects_unrecognized_official_release_path_instead_of_hiding_it(self):
+        meta = parse_japan_gdp_menu(q3_menu(), Q3_MENU)
+        other_material = q3_archive_row('Nov  17, 2026', Q3_MENU_HREF.replace('gdemenuea.html', 'summary.pdf'),
+                                       'Jul.-Sep.', 'First')
+        # A release-like title alone is not evidence that a PDF is a menu.
+        page = q3_archive().replace(b'</table>', other_material.encode() + b'</table>')
+        self.assertEqual(parse_japan_gdp_release(page, meta, now=Q3_NOW)['release_date_known'], '2026-11-16')
+        entry = q3_archive_row('Nov  17, 2026', Q3_MENU_HREF.replace('qe263', 'qe264_3'), 'Oct.-Dec.', 'First')
+        with self.assertRaisesRegex(ValueError, 'MENU_PATH_INVALID'):
+            parse_japan_gdp_release(q3_archive().replace(b'</table>', entry.encode() + b'</table>'), meta, now=Q3_NOW)
 
     def test_foreign_host_and_credential_queries_are_rejected(self):
         for url in (MENU.replace('www.esri.cao.go.jp', 'evil.example'), MENU + '?token=private', MENU.replace('https:', 'http:')):
