@@ -146,4 +146,120 @@ class LiveContextTests(unittest.TestCase):
         self.assertEqual(list(bar.call_args.kwargs['customdata']), ['Federal Reserve', 'UNAVAILABLE'])
 
 
+class LiveDateRolloverTests(unittest.TestCase):
+    @staticmethod
+    def ui_tab(name):
+        return next(node for node in ast.walk(TREE) if isinstance(node, ast.With)
+                    and any(isinstance(item.context_expr, ast.Name) and item.context_expr.id == name
+                            for item in node.items))
+
+    @staticmethod
+    def date_picker():
+        return [node for node in ast.walk(TREE) if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == 'dashboard_date' for target in node.targets)]
+
+    def namespace(self, demo=False):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        import pandas as pd
+        import requests
+
+        class Clock(datetime):
+            reads = 0
+
+            @classmethod
+            def now(cls, tz=None):
+                cls.reads += 1
+                moment = (datetime(2026, 11, 19, 23, 59, 59) if cls.reads == 1
+                          else datetime(2026, 11, 20))
+                return moment if tz is None else moment.replace(tzinfo=timezone.utc).astimezone(tz)
+
+        def observation(score, value):
+            return {'Inflation': score, '_observations': {'Inflation': {
+                'value': value, 'date': '2026-09-01', 'source': 'Fixture', 'series_id': 'fixture'}},
+                '_freshness': {'Inflation': 'UNAVAILABLE' if score is None else 'FRESH'}}
+
+        records = {'USD': observation(None, 3.0), 'EUR': observation(20.0, 2.4),
+                   'CHF': observation(0.0, 0.0)}
+        ui = Mock()
+        ui.session_state = {'demo_mode_chk': demo}
+        ns = {'st': ui, 'datetime': Clock, 'timedelta': timedelta, 'pd': pd, 'requests': requests,
+              'os': SimpleNamespace(environ={}), 'live_data': Mock(details=Mock(side_effect=records.__getitem__)),
+              'CURRENCIES': {currency: {'flag': currency} for currency in records},
+              'CPI_SERIES': {'USD': 'CPIAUCNS', 'EUR': 'fixture', 'CHF': 'fixture'},
+              'FRED_KEY': 'fixture', 'OECD_INFLATION_EXP_SERIES': {'USD': 'fixture'}}
+        for name in ('get_fred_data', 'get_fred_data_historical', 'get_current_official_cpi'):
+            ns[name] = Mock(side_effect=AssertionError('Unexpected live provider read'))
+        wanted = {'check_demo_active', 'use_live_core_cache', 'get_cpi_yoy_details',
+                  'get_inflation_expectations_data'}
+        nodes = [node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<cpi-readers>', 'exec'), ns)
+        return ns
+
+    def assert_no_provider_reads(self, ns):
+        for name in ('get_fred_data', 'get_fred_data_historical', 'get_current_official_cpi'):
+            ns[name].assert_not_called()
+
+    def test_actual_inflation_tab_remains_in_live_cache_at_midnight(self):
+        from contextlib import nullcontext
+        ns = self.namespace()
+        ns['tab4'] = nullcontext()
+        nodes = self.date_picker() + [self.ui_tab('tab4')]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<cpi-tab>', 'exec'), ns)
+        self.assertGreaterEqual(ns['datetime'].reads, 2)  # clock crossed midnight during rendering
+        self.assertTrue(any('nur zentral geprüfte CPI-Werte' in call.args[0]
+                            for call in ns['st'].caption.call_args_list))
+        rows = ns['st'].dataframe.call_args.args[0]
+        self.assertEqual(list(rows['Inflation YoY']), ['N/A', '2.40% (HICP YoY)', '0.00% (HICP YoY)'])
+        self.assertEqual(list(rows['Freshness']), ['UNAVAILABLE', 'FRESH', 'FRESH'])
+        for column in ('Change', 'Trend', 'OECD Expectations'):
+            self.assertEqual(list(rows[column]), ['N/A'] * 3)
+        self.assert_no_provider_reads(ns)
+
+    def test_live_inflation_expectations_keep_selected_cache_route(self):
+        for date in (None, '2026-11-19'):
+            with self.subTest(date=date):
+                ns = self.namespace()
+                reader = Mock(wraps=ns['get_cpi_yoy_details'])
+                ns['get_cpi_yoy_details'] = reader
+                result = ns['get_inflation_expectations_data']('CHF', date)
+                reader.assert_called_once_with('CHF', None)
+                self.assertEqual(result['actual_cpi'], 0.0)
+                for field in ('cpi_trend', 'oecd_expectation', 'market_breakeven'):
+                    self.assertIsNone(result[field])
+                self.assert_no_provider_reads(ns)
+
+    def test_demo_and_explicit_historical_dates_still_reach_the_dated_reader(self):
+        for demo in (False, True):
+            with self.subTest(demo=demo):
+                ns = self.namespace(demo=demo)
+                if demo:
+                    exec(compile(ast.Module(body=self.date_picker(), type_ignores=[]), '<demo-date>', 'exec'), ns)
+                    date = ns['dashboard_date']
+                    self.assertEqual(date, '2026-11-19')
+                else:
+                    date = '2026-10-01'
+                reader = Mock(side_effect=[(2.0, '2026-09-01', 'CPI_YOY', 'Fixture', 'fixture', 'FRESH'),
+                                           (1.0, '2026-08-01', 'CPI_YOY', 'Fixture', 'fixture', 'FRESH')])
+                ns.update(get_cpi_yoy_details=reader, FRED_KEY=None)
+                result = ns['get_inflation_expectations_data']('USD', date)
+                self.assertEqual(reader.call_args_list[0].args, ('USD', date))
+                self.assertEqual(result['date'], date)
+                self.assertEqual(result['cpi_trend'], 1.0)
+                self.assert_no_provider_reads(ns)
+
+    def test_other_macro_tabs_use_shared_today_route(self):
+        for tab, readers in {'tab1': {'get_cpi_yoy_value': 1, 'get_gdp_yoy_value': 1},
+                             'tab2': {'get_series_trend_points': 1},
+                             'tab5': {'get_live_labour_display_row': 2},
+                             'tab7': {'get_macro_observation_details': 2},
+                             'tab8': {'get_cpi_yoy_value': 1, 'get_gdp_yoy_value': 1}}.items():
+            for reader, position in readers.items():
+                with self.subTest(tab=tab, reader=reader):
+                    calls = [node for node in ast.walk(self.ui_tab(tab)) if isinstance(node, ast.Call)
+                             and isinstance(node.func, ast.Name) and node.func.id == reader]
+                    self.assertTrue(calls)
+                    self.assertTrue(all(ast.unparse(call.args[position]) == 'dashboard_date' for call in calls))
+
+
 if __name__=='__main__':unittest.main()
