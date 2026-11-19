@@ -423,7 +423,12 @@ def fetch_official_cpi(currency, *, client=None, estat_key=None, now=None, diagn
                 code = "ESTAT_API_RELEASE_LAG"
             elif result["reference_period"] != release["latest_period"] or result["value"] != release["value"] or calendar["current_release_date"] not in (None, release["release_date_known"]):
                 code = "ESTAT_RELEASE_CONFLICT"
-            elif due_at and _now(now) >= due_at:
+            # The API can finish before a release boundary and the remaining
+            # proof afterwards. Only the completed three-way check is the
+            # observation/confirmation time, including an explicit due failure.
+            verified_at = _now(now)
+            result["checked_at"] = verified_at.isoformat()
+            if code is None and due_at and verified_at >= due_at:
                 code = "ESTAT_DUE_UNCONFIRMED"
             if code:
                 diagnostic["code"] = code

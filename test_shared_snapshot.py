@@ -32,6 +32,10 @@ def frontier(currency='AUD', factor='Arbeitsmarkt'):
     if (currency, factor) == ('EUR', 'GDP'):
         return {'source': source, 'series_id': series_id, 'date': '2025-12-31',
                 'latest_date': '2025-12-31', 'next_due_at': None, 'next_due_precision': None}
+    if (currency, factor) == ('JPY', 'Inflation'):
+        return {'source': source, 'series_id': series_id, 'date': '2025-12-01',
+                'latest_date': '2025-12-01', 'next_due_at': '2026-01-09T23:30:00+00:00',
+                'next_due_precision': 'official_scheduled_time'}
     return {'source': source, 'series_id': series_id, 'date': '2026-01-01',
             'latest_date': '2026-01-01', 'next_due_at': '2026-01-09T00:00:00+00:00',
             'next_due_precision': 'official_scheduled_time'}
@@ -126,6 +130,62 @@ class SharedSnapshotTests(unittest.TestCase):
             bundled = shared.bundled_snapshot_directory(source, self.root)
         self.assertIsNotNone(bundled)
         self.assertEqual(json.loads((bundled / shared.FILES[0]).read_text()), docs[shared.FILES[0]])
+
+    def test_japan_reader_accepts_exact_frontier_and_rejects_unproven_schema(self):
+        completed = NOW-timedelta(minutes=1)
+        for due, precision in (('2026-01-09T23:30:00+00:00', 'official_scheduled_time'),
+                               ('2026-01-09T15:00:00+00:00', 'date_only_start_of_JP_day'), (None, None)):
+            shared._validate_frontier(dict(frontier('JPY', 'Inflation'), next_due_at=due,
+                                           next_due_precision=precision), 'JPY', 'Inflation', completed)
+        for changes in ({'series_id': 'other'}, {'date': '2025-12-02', 'latest_date': '2025-12-02'},
+                        {'latest_date': '2026-01-01'}, {'next_due_precision': 'date_only_start_of_AU_day'},
+                        {'next_due_precision': 'date_only_start_of_JP_day'}, {'next_due_at': None},
+                        {'next_due_at': '2025-11-20T23:30:00+00:00'}):
+            with self.subTest(changes=changes), self.assertRaises(shared.Invalid):
+                shared._validate_frontier(dict(frontier('JPY', 'Inflation'), **changes),
+                                          'JPY', 'Inflation', completed)
+        with self.assertRaises(shared.Invalid):
+            shared._validate_frontier(dict(frontier(), next_due_precision='date_only_start_of_JP_day'),
+                                      'AUD', 'Arbeitsmarkt', completed)
+        with patch.object(live_data, '_release_frontier', None), self.assertRaises(shared.Invalid):
+            shared._validate_frontier(frontier('JPY', 'Inflation'), 'JPY', 'Inflation', completed)
+
+    def test_legacy_and_b_packet_shape_read_and_reject_post_completion_confirmation(self):
+        docs = fixture()
+        core, status = docs[shared.FILES[0]], docs[shared.FILES[1]]
+        completed = shared._time(core['completed_at'])
+        f = frontier('JPY', 'Inflation')
+        observation = {'value': 2.0, 'unit': 'percent_yoy', 'date': f['date'], 'source': f['source'],
+                       'series_id': f['series_id'], 'next_due_at': '2026-01-10T15:00:00+00:00',
+                       'next_due_precision': 'date_only_start_of_JP_day', 'reference_period': '2025-12',
+                       'frequency': 'monthly', 'seasonal_adjustment': 'unadjusted',
+                       'source_url': 'https://www.e-stat.go.jp/en/stat-search/database?layout=dataset&statdisp_id=0004052037',
+                       'release_date_known': '2026-01-09', 'checked_at': completed.isoformat()}
+        legacy = live_data.build_record('Inflation', 0.0, observation, 'FRESH',
+                                        (completed-timedelta(seconds=30)).isoformat())
+        self.assertNotIn('release_frontier', legacy)
+        core['currencies']['JPY']['Inflation'] = legacy
+        core.update(status='PARTIAL', eligible_factors=1)
+        status['last_run_status'] = 'PARTIAL'
+        status['components']['live_core'].update(status='PARTIAL', eligible_factors=1)
+        self.assertEqual(shared._validate(docs, NOW), completed)
+        # A mixed pre-rollout live_data module does not yet have the new
+        # future-proof helper. Package timing uses the old timestamp interface.
+        with patch.object(live_data, '_japan_cpi_confirmation_after', None):
+            self.assertEqual(shared._validate(docs, NOW), completed)
+        b_shaped = dict(copy.deepcopy(legacy), release_frontier=live_data._japan_cpi_record_frontier(
+            legacy, 'Inflation', completed))
+        core['currencies']['JPY']['Inflation'] = b_shaped
+        self.assertEqual(shared._validate(docs, NOW), completed)
+        bad = copy.deepcopy(b_shaped)
+        bad.update(validation='UNVERIFIED', score=None)
+        bad['observation']['checked_at'] = (completed+timedelta(seconds=1)).isoformat()
+        core['currencies']['JPY']['Inflation'] = bad
+        core.update(status='FAILED', eligible_factors=0)
+        status['last_run_status'] = 'FAILED'
+        status['components']['live_core'].update(status='FAILED', eligible_factors=0)
+        with self.assertRaises(shared.Invalid):
+            shared._validate(docs, NOW)
 
     def test_release_frontier_blocks_old_observation_even_without_other_due(self):
         docs = fixture()

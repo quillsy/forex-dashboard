@@ -287,6 +287,10 @@ def eligible(record, now=None, factor=None, currency=None):
     except (TypeError, ValueError):
         return False, "Referenzperiode fehlt"
     identity = (factor, observation.get("source"), observation.get("series_id"))
+    if identity == _JAPAN_CPI_FRONTIER:
+        if ((currency is not None and currency != "JPY")
+                or _japan_cpi_record_frontier(record, factor, now) is None):
+            return False, "Japan-CPI: Originalreihe oder Veröffentlichungsbeleg widersprüchlich"
     if identity in _PERIOD_ONLY_FRONTIER_SERIES:
         if not _ea21_gdp_observation(observation):
             return False, "Eurostat-GDP: Originalreihe oder Quartalsdefinition widersprüchlich"
@@ -473,6 +477,8 @@ def details(currency, now=None, data=None):
         valid, reason = eligible(record, now, factor=factor, currency=currency)
         if not result['_live_checked'] and valid:
             valid, reason = False, 'Kein abgeschlossener Live-Datensatz'
+        if valid and (currency, factor) == ("JPY", "Inflation") and _japan_cpi_confirmation_after(record, completed):
+            valid, reason = False, "Japan-CPI: Bestätigung nach Abschluss des Live-Datensatzes"
         result[factor] = number(record.get("score")) if valid else None
         result["_freshness"][factor] = current_freshness(record, now, factor) if valid else "UNAVAILABLE"
         result["_observations"][factor] = copy.deepcopy(record.get("observation", {}))
@@ -551,14 +557,17 @@ def public_observation(observation):
     return result
 
 
-# Exact period-based surveys; revision-only series deliberately stay separate.
-_RELEASE_FRONTIER_SERIES = {
+# Readers accept the JPY frontier before any upgraded writer is deployed.
+# Keep the existing writer contract separate during the reader-first rollout.
+_JAPAN_CPI_FRONTIER = ("Inflation", "Statistics Japan e-Stat 2025-base headline CPI YoY", "0004052037")
+_WRITABLE_RELEASE_FRONTIER_SERIES = {
     ("Arbeitsmarkt", "ABS", "LF:M13.3.1599.20.AUS.M"): "AUD",
     ("GDP", "ABS", "ANA_AGG:M1.GPM.20.AUS.Q"): "AUD",
     ("Arbeitsmarkt", "Stats NZ", "HLFS:unemployment_rate:Total:SA:Q"): "NZD",
     ("GDP", "Stats NZ GDP expenditure", "SNEQ.SG02RSC00B15"): "NZD",
     ("GDP", "Eurostat", "namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21"): "EUR",
 }
+_RELEASE_FRONTIER_SERIES = {**_WRITABLE_RELEASE_FRONTIER_SERIES, _JAPAN_CPI_FRONTIER: "JPY"}
 
 # The original EA21 series supplies observations without a confirmed release
 # calendar. Keep its observed quarter floor without inventing a release time.
@@ -583,6 +592,17 @@ def _ea21_gdp_observation(observation):
         return False
 
 
+def _japan_cpi_due_precision(due, precision):
+    if precision is None:
+        return True  # An older known UTC deadline may lack a precision label.
+    if due is None or not isinstance(precision, str):
+        return False
+    from zoneinfo import ZoneInfo
+    expected = {"date_only_start_of_JP_day": (0, 0), "official_scheduled_time": (8, 30)}.get(precision)
+    local = due.astimezone(ZoneInfo("Asia/Tokyo"))
+    return (local.hour, local.minute) == expected and local.second == local.microsecond == 0
+
+
 def _release_frontier(factor, candidate):
     """Strict public projection of an already observed release frontier."""
     if not isinstance(candidate, dict):
@@ -595,11 +615,17 @@ def _release_frontier(factor, candidate):
     except (TypeError, ValueError):
         return None
     period_only = identity in _PERIOD_ONLY_FRONTIER_SERIES
+    japan_cpi = identity == _JAPAN_CPI_FRONTIER
     if (identity not in _RELEASE_FRONTIER_SERIES or latest < reference
-            or (due is None and not period_only)
+            or (due is None and not (period_only or japan_cpi))
             or (candidate.get("next_due_at") is not None and due is None)):
         return None
     precision = candidate.get("next_due_precision")
+    if japan_cpi:
+        from zoneinfo import ZoneInfo
+        if (reference.day != 1 or reference != latest or not _japan_cpi_due_precision(due, precision)
+                or (due is not None and due.astimezone(ZoneInfo("Asia/Tokyo")).date().replace(day=1) <= reference)):
+            return None
     if period_only:
         import calendar
         if (any(day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
@@ -609,8 +635,104 @@ def _release_frontier(factor, candidate):
     return {"source": identity[1], "series_id": identity[2], "date": reference.isoformat(),
             "latest_date": latest.isoformat(),
             "next_due_at": due.isoformat() if due is not None else None,
-            "next_due_precision": precision if precision in (
+            "next_due_precision": precision if japan_cpi or precision in (
                 "official_scheduled_time", "date_only_start_of_NZ_day", "date_only_start_of_AU_day") else None}
+
+
+def _japan_cpi_observation_frontier(factor, observation, now=None):
+    """Require the identity and public metadata of the original CPI proof."""
+    if (not isinstance(observation, dict)
+            or (factor, observation.get("source"), observation.get("series_id")) != _JAPAN_CPI_FRONTIER):
+        return None
+    candidate = _release_frontier(factor, observation)
+    value = number(observation.get("value"))
+    observed_at = timestamp(observation.get("checked_at"))
+    if (candidate is None
+            or observation.get("reference_period") != candidate["date"][:7]
+            or observation.get("source_url") != "https://www.e-stat.go.jp/en/stat-search/database?layout=dataset&statdisp_id=0004052037"
+            or observation.get("unit") != "percent_yoy" or observation.get("frequency") != "monthly"
+            or observation.get("seasonal_adjustment") != "unadjusted"
+            or observed_at is None or value is None or not -25 <= value <= 25):
+        return None
+    try:
+        released = datetime.strptime(observation.get("release_date_known"), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    from official_inflation import _japan_cpi_scheduled_at
+    from zoneinfo import ZoneInfo
+    release_at = _japan_cpi_scheduled_at(released.isoformat())
+    due = timestamp(candidate["next_due_at"])
+    if (released.isoformat() != observation.get("release_date_known")
+            or candidate["date"][:7] >= released.strftime("%Y-%m") or release_at > observed_at
+            or (now is not None and observed_at > now)
+            or (due is not None and released >= due.astimezone(ZoneInfo("Asia/Tokyo")).date())):
+        return None
+    return candidate
+
+
+def _japan_cpi_record_frontier(record, factor, now=None):
+    candidate = _japan_cpi_observation_frontier(factor, record.get("observation"), now)
+    return (candidate if candidate is not None
+            and timestamp(record.get("next_due_at")) == timestamp(candidate["next_due_at"]) else None)
+
+
+def _japan_cpi_confirmation_after(record, bound):
+    """A later confirmation cannot be attributed to an older batch."""
+    observation = record.get("observation") if isinstance(record, dict) else None
+    if (bound is None or not isinstance(observation, dict)
+            or ("Inflation", observation.get("source"), observation.get("series_id")) != _JAPAN_CPI_FRONTIER):
+        return False
+    confirmed = timestamp(observation.get("checked_at"))
+    return confirmed is not None and confirmed > bound
+
+
+def japan_cpi_reader_proof(data, now=None):
+    """Exercise both loaded readers on a genuine legacy proof, without writes."""
+    now = now or now_utc()
+    try:
+        completed = timestamp(data.get("completed_at"))
+        record = data["currencies"]["JPY"]["Inflation"]
+        checked = timestamp(record.get("checked_at"))
+        confirmed = timestamp(record["observation"].get("checked_at"))
+        if (data.get("model_version") != MODEL or completed is None or completed > now or checked is None or confirmed is None
+                or max(checked, confirmed) > completed or record.get("release_frontier") is not None):
+            return None
+        proof_at = max(checked, confirmed)
+        frontier = _japan_cpi_record_frontier(record, "Inflation", proof_at)
+        if (frontier is None or frontier["next_due_at"] is None or frontier["next_due_precision"] is None
+                or not eligible(record, proof_at, "Inflation", "JPY")[0]):
+            return None
+        # The actual record stays untouched. Exercise a B-shaped copy at its
+        # own real proof time, not as a claim that the rate is current today.
+        probe = copy.deepcopy(record)
+        probe["release_frontier"] = frontier
+        if not eligible(probe, proof_at, "Inflation", "JPY")[0]:
+            return None
+        probe["observation"]["reference_period"] = None
+        if eligible(probe, proof_at, "Inflation", "JPY")[0]:
+            return None
+        probe["observation"]["reference_period"] = record["observation"]["reference_period"]
+        probe["next_due_at"] = None
+        probe["observation"].update(next_due_at=None, next_due_precision=None)
+        if eligible(probe, timestamp(frontier["next_due_at"]), "Inflation", "JPY") != (
+                False, "Bekannte Folge-Veröffentlichung fällig; neue Referenzperiode nicht bestätigt"):
+            return None
+        import shared_snapshot
+        from official_inflation import _japan_cpi_scheduled_at
+        shared_snapshot._validate_frontier(frontier, "JPY", "Inflation", completed)
+        impossible = dict(frontier, next_due_at=_japan_cpi_scheduled_at(frontier["date"]).isoformat(),
+                          next_due_precision="official_scheduled_time")
+        try:
+            shared_snapshot._validate_frontier(impossible, "JPY", "Inflation", completed)
+        except shared_snapshot.Invalid:
+            pass
+        else:
+            return None
+        return {"reader_checked_at": now.astimezone(timezone.utc).isoformat(),
+                "source_verified_at": confirmed.isoformat(), "completed_at": completed.isoformat(),
+                "period": frontier["date"][:7]}
+    except (AttributeError, ImportError, KeyError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def build_record(factor, score, observation, freshness, checked_at, previous=None, validation="VALID", reason=None):
@@ -620,6 +742,11 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
     frontier = None
     if isinstance(previous, dict):
         frontier = _release_frontier(factor, previous.get("release_frontier"))
+        if frontier is not None and (factor, frontier["source"], frontier["series_id"]) == _JAPAN_CPI_FRONTIER:
+            # Never learn or advance JPY release metadata in this old writer.
+            # A pre-existing qualified packet's frontier is read-only here.
+            record["release_frontier"] = frontier
+            return record
         if frontier is None:
             # Upgrade a legacy valid record without changing its timestamps.
             old = previous.get("observation")
@@ -635,14 +762,15 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
                                     and old_checked <= timestamp(checked_at)
                                     and eligible(previous, old_checked, factor=factor,
                                                  currency=_RELEASE_FRONTIER_SERIES[old_identity])[0])
-                if (known is not None and old_identity not in _PERIOD_ONLY_FRONTIER_SERIES) or qualified_period:
+                if (old_identity in _WRITABLE_RELEASE_FRONTIER_SERIES
+                        and ((known is not None and old_identity not in _PERIOD_ONLY_FRONTIER_SERIES) or qualified_period)):
                     old["next_due_at"] = known.isoformat() if known is not None else None
                     frontier = _release_frontier(factor, old)
     current = record.get("observation", {})
     identity = (factor, current.get("source"), current.get("series_id"))
     checked = timestamp(checked_at)
     valid = (record.get("validation") == "VALID"
-             and identity in _RELEASE_FRONTIER_SERIES
+             and identity in _WRITABLE_RELEASE_FRONTIER_SERIES
              and eligible(record, checked, factor=factor,
                           currency=_RELEASE_FRONTIER_SERIES[identity])[0])
     if frontier is not None:
@@ -1183,6 +1311,8 @@ def render_status(st, authorized=False):
             valid, reason = eligible(record, now, factor=factor, currency=currency)
             if not completed and valid:
                 valid, reason = False, "Kein abgeschlossener Live-Datensatz"
+            if valid and (currency, factor) == ("JPY", "Inflation") and _japan_cpi_confirmation_after(record, checked):
+                valid, reason = False, "Japan-CPI: Bestätigung nach Abschluss des Live-Datensatzes"
             observation = record.get("observation", {})
             rights_hold = (currency, factor) in PUBLIC_RIGHTS_HOLDS
             bls_embargo = (observation.get("bls_embargo_ends_at") or record.get("published_at")
@@ -1310,6 +1440,16 @@ def render_status(st, authorized=False):
             st.caption("Alle 40 Faktoren sind aktuell freigegeben.")
     if authorized:
         with st.expander("Anbieter und Anfragebudget", expanded=False):
+            reader_proof = japan_cpi_reader_proof(data, now)
+            if reader_proof is None:
+                st.caption("Japanische Inflation · Die Vorab-Leseprüfung benötigt eine geeignete Charge im bisherigen Format. "
+                           "Nach der Umstellung auf das neue Format entfällt sie.")
+            else:
+                st.caption("Japanische Inflation · Vorab-Leseprüfung für die einmalige Umstellung auf das neue Format bestanden."
+                           + " · Leseprüfung (UTC): " + reader_proof["reader_checked_at"]
+                           + " · Ursprüngliche amtliche Prüfung (UTC): " + reader_proof["source_verified_at"]
+                           + " · Berichtsmonat " + reader_proof["period"] + " · Frühere Datencharge: " + reader_proof["completed_at"]
+                           + " · Keine neue Quellenprüfung oder Signal-Freigabe.")
             try:
                 status = json.loads((selected_live_directory() / "data_collection_status.json").read_text())
             except (OSError, ValueError):

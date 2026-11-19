@@ -29,6 +29,7 @@ FRONTIER_SERIES = {
     ('NZD', 'Arbeitsmarkt'): ('Stats NZ', 'HLFS:unemployment_rate:Total:SA:Q'),
     ('NZD', 'GDP'): ('Stats NZ GDP expenditure', 'SNEQ.SG02RSC00B15'),
     ('EUR', 'GDP'): ('Eurostat', 'namq_10_gdp:Q.CLV_PCH_SM.SCA.B1GQ.EA21'),
+    ('JPY', 'Inflation'): ('Statistics Japan e-Stat 2025-base headline CPI YoY', '0004052037'),
 }
 FRONTIER_PRECISIONS = {None, 'official_scheduled_time', 'date_only_start_of_NZ_day', 'date_only_start_of_AU_day'}
 POLICY = set('currency rate previous_rate upper_bound instrument central_bank rate_effective_date last_policy_decision_date verified_at verification_timestamp last_verified_at primary_source secondary_source verification_evidence verification_status last_attempt_at last_attempt_error candidate_rate'.split())
@@ -151,7 +152,10 @@ def _validate_frontier(frontier, currency, factor, completed):
         raise Invalid()
     reference = _frontier_day(frontier['date'], completed)
     latest = _frontier_day(frontier['latest_date'], completed)
-    if latest < reference or frontier['next_due_precision'] not in FRONTIER_PRECISIONS:
+    japan_cpi = (currency, factor) == ('JPY', 'Inflation')
+    precision = frontier['next_due_precision']
+    if latest < reference or (precision not in FRONTIER_PRECISIONS
+                             and not (japan_cpi and precision == 'date_only_start_of_JP_day')):
         raise Invalid()
     if (currency, factor) == ('EUR', 'GDP'):
         import calendar
@@ -161,10 +165,16 @@ def _validate_frontier(frontier, currency, factor, completed):
                        for day in (reference, latest))):
             raise Invalid()
     if frontier['next_due_at'] is None:
-        if (currency, factor) != ('EUR', 'GDP') or frontier['next_due_precision'] is not None:
+        if (not (japan_cpi or (currency, factor) == ('EUR', 'GDP'))
+                or precision is not None):
             raise Invalid()
     else:
         _time(frontier['next_due_at'])
+    if japan_cpi:
+        import live_data
+        reader = getattr(live_data, '_release_frontier', None)
+        if not callable(reader) or reader(factor, frontier) is None:
+            raise Invalid()
 
 
 def _validate(documents, now):
@@ -198,6 +208,13 @@ def _validate(documents, now):
             _keys(observation, live_data.OBS_FIELDS)
             if any(isinstance(v, (dict, list)) for v in observation.values()):
                 raise Invalid()
+            if ((currency, factor) == ('JPY', 'Inflation')
+                    and (observation.get('source'), observation.get('series_id')) == FRONTIER_SERIES[(currency, factor)]):
+                # Use the existing timestamp parser even if live_data is still
+                # the pre-rollout module in this running process.
+                confirmed = live_data.timestamp(observation.get('checked_at'))
+                if confirmed is not None and confirmed > completed:
+                    raise Invalid()
             if ((currency, factor) == ('EUR', 'GDP')
                     and (record.get('next_due_at') is not None
                          or observation.get('next_due_at') is not None
