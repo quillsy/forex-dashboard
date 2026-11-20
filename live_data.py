@@ -64,6 +64,9 @@ def temporary_source_outage(error):
     if isinstance(error, (http.exceptions.Timeout, http.exceptions.ConnectionError,
                           http.exceptions.ChunkedEncodingError)):
         return True
+    if isinstance(error, http.RequestException) and error.args == ("PROVIDER_COOLDOWN",):
+        from provider_transport import TemporaryProviderCooldown
+        return isinstance(error, TemporaryProviderCooldown) and error.host == "www150.statcan.gc.ca"
     return (isinstance(error, http.exceptions.RequestException)
             and error.args == ("STATCAN_OFFICIAL_OUTAGE",))
 
