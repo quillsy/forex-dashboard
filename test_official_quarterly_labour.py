@@ -209,6 +209,209 @@ class QuarterlyLabourTests(unittest.TestCase):
 
 
 
+class SwissCatalogueFloorTests(unittest.TestCase):
+    """Synthetic issue changes through the real app route, collector and restart.
+
+    Dates and replacement values are fixtures, not new Swiss publications.
+    """
+    H0 = '2026-11-12T07:30:00+00:00'
+    H1 = '2026-11-20T10:30:01+00:00'
+    H2 = '2026-11-20T10:33:01+00:00'
+    BASE = datetime(2026, 11, 20, 10, 6, tzinfo=timezone.utc)
+
+    def setUp(self):
+        import ast
+        import socket
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import requests
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'live.json'
+        self.socket_guard = patch.object(socket.socket, 'connect', side_effect=AssertionError('NO_NETWORK'))
+        self.socket_mock = self.socket_guard.start(); self.addCleanup(self.socket_guard.stop)
+        self.http_guard = patch.object(requests.sessions.Session, 'request', side_effect=AssertionError('NO_NETWORK'))
+        self.http_mock = self.http_guard.start(); self.addCleanup(self.http_guard.stop)
+        tree = ast.parse(Path(__file__).with_name('app.py').read_text())
+        names = {'get_macro_observation_details', 'compute_currency_details', 'observation_freshness',
+                 'normalized_freshness', 'finite_number'}
+        self.app_code = compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef)
+                                                  and n.name in names], type_ignores=[]), '<chf-collector>', 'exec')
+
+    def tearDown(self):
+        self.socket_mock.assert_not_called()
+        self.http_mock.assert_not_called()
+
+    @staticmethod
+    def issue_catalog(issued, *, valid_rights=True, ties=False):
+        payload = catalog()
+        package = payload['result']['results'][0]
+        # The production public URL allowlist is part of the real collector.
+        package['name'] = 'erwerbslosenquote-gemass-ilo-fixture'
+        package['resources'][0]['issued'] = issued
+        if not valid_rights:
+            package['resources'][0]['rights'] = 'https://opendata.swiss/terms-of-use#terms_by_ask'
+        if ties:
+            package['resources'].append(dict(package['resources'][0], url=URL.replace('123456', '777777')))
+        return Response(payload=payload)
+
+    @staticmethod
+    def q3_csv(value='5.2'):
+        return Response(content=ch_csv().replace(b'2026-Q2', b'2026-Q3').replace(b'5.11906217648145', value.encode()))
+
+    def collect(self, start, responses, *, source_at=None):
+        import types
+        from unittest.mock import Mock, patch
+        import numpy as np
+        import pandas as pd
+        import requests
+        import live_data as live
+        import official_quarterly_labour as labour
+        source_at = source_at or start + timedelta(seconds=2)
+        completed = max(start, source_at) + timedelta(seconds=1)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return source_at.astimezone(tz) if tz else source_at.replace(tzinfo=None)
+
+        transport = types.SimpleNamespace(get=Mock(side_effect=responses), exceptions=requests.exceptions,
+                                          RequestException=requests.RequestException)
+        env = {'live_data': live, 'requests': transport, 'np': np, 'pd': pd, 'datetime': Clock,
+               'CORE_FACTOR_WEIGHTS': {'Arbeitsmarkt': 20.0}, 'use_live_core_cache': lambda *a: False}
+        exec(self.app_code, env)
+        app = types.SimpleNamespace(FRED_KEY=None, requests=transport,
+                                    compute_currency_details=env['compute_currency_details'])
+        real_now = labour._now
+        first = [True]
+
+        def collector_clock():
+            if first[0]:
+                first[0] = False
+                return start
+            return completed
+
+        with patch.object(live, 'CURRENCIES', ('CHF',)), patch.object(live, 'FACTORS', {'Arbeitsmarkt': 20}), \
+             patch.object(live, 'now_utc', side_effect=collector_clock), \
+             patch.object(labour, '_now', side_effect=lambda now=None: source_at if now is None else real_now(now)):
+            result = live.collect(app, self.path)
+        self.assertEqual(transport.get.call_count, len(responses))
+        row = live.load(self.path)['currencies']['CHF']['Arbeitsmarkt']
+        self.assertEqual(result['eligible_factors'], int(live.eligible(row, completed, 'Arbeitsmarkt', 'CHF')[0]))
+        return row, completed
+
+    def current(self):
+        return self.collect(self.BASE, [self.issue_catalog(self.H0), self.q3_csv()])[0]
+
+    def pending(self, row, issued):
+        from official_quarterly_labour import CH_CATALOG_BASIS, CH_LABOUR_SERIES
+        self.assertEqual(row['validation'], 'UNVERIFIED')
+        self.assertIsNone(row['score'])
+        self.assertNotIn('checked_at', row)
+        observation = row['observation']
+        self.assertEqual(observation['publication_basis'], CH_CATALOG_BASIS)
+        self.assertEqual(observation['series_id'], CH_LABOUR_SERIES)
+        self.assertEqual(observation['published_at'], issued)
+        for key in ('value', 'date', 'reference_period'):
+            self.assertIsNone(observation.get(key))
+
+    def test_catalogue_and_same_issue_asset_timeout_keep_old_hourly_boundary(self):
+        import requests
+        import live_data as live
+        prior = self.current()
+        for offset, responses in ((10, [requests.Timeout('catalogue offline')]),
+                                  (15, [self.issue_catalog(self.H0), requests.Timeout('asset offline')])):
+            with self.subTest(offset=offset):
+                row, completed = self.collect(self.BASE+timedelta(minutes=offset), responses)
+                for key in ('checked_at', 'published_at', 'expires_at', 'next_due_at', 'score', 'observation'):
+                    self.assertEqual(row[key], prior[key])
+                self.assertEqual(row['last_error'], 'SOURCE_UNAVAILABLE')
+                self.assertTrue(live.eligible(row, completed, 'Arbeitsmarkt', 'CHF')[0])
+                self.assertFalse(live.eligible(row, self.BASE+timedelta(hours=1), 'Arbeitsmarkt', 'CHF')[0])
+
+    def test_new_issue_during_collection_survives_failures_restart_and_older_csv(self):
+        import requests
+        import live_data as live
+        self.current()
+        start = datetime(2026, 11, 20, 10, 30, tzinfo=timezone.utc)
+        # H1 is after the run start and before the actual catalogue check.
+        # One of two simultaneous latest assets succeeds, the other fails.
+        row, completed = self.collect(start, [self.issue_catalog(self.H1, ties=True), self.q3_csv('5.3'), requests.Timeout('asset offline')])
+        self.pending(row, self.H1)
+        proof = row['observation']['checked_at']
+        self.assertEqual(proof, (start+timedelta(seconds=2)).isoformat())
+        self.assertLess(datetime.fromisoformat(row['last_attempt_at']), datetime.fromisoformat(proof))
+        self.assertFalse(live.eligible(row, completed, 'Arbeitsmarkt', 'CHF')[0])
+
+        # collect() reloads the prior disk generation on each invocation.
+        row, _ = self.collect(start+timedelta(minutes=1), [requests.Timeout('catalogue offline')])
+        self.pending(row, self.H1)
+        self.assertEqual(row['observation']['checked_at'], proof)
+        row, _ = self.collect(start+timedelta(minutes=2), [self.issue_catalog(self.H0), self.q3_csv('5.2')])
+        self.pending(row, self.H1)
+        self.assertIn('Älterer BFS-Katalogstand', row['reason'])
+        self.assertEqual(row['observation']['checked_at'], proof)
+
+        # Even an invalid CSV cannot erase a newer independently qualified issue.
+        row, _ = self.collect(start+timedelta(minutes=3), [self.issue_catalog(self.H2), Response(content=b'invalid CSV')])
+        self.pending(row, self.H2)
+        row, _ = self.collect(start+timedelta(minutes=4), [self.issue_catalog(self.H1), self.q3_csv('5.3')])
+        self.pending(row, self.H2)
+        row, completed = self.collect(start+timedelta(minutes=5), [self.issue_catalog(self.H2), self.q3_csv('5.4')])
+        self.assertEqual(row['published_at'], self.H2)
+        self.assertEqual(row['observation']['reference_period'], '2026-Q3')
+        self.assertEqual(row['observation']['value'], 5.4)
+        self.assertIsNone(row['observation'].get('publication_basis'))
+        self.assertTrue(live.eligible(row, completed, 'Arbeitsmarkt', 'CHF')[0])
+
+    def test_equal_issued_distinct_assets_need_complete_agreement_despite_timeout(self):
+        import requests
+        import live_data as live
+        from official_quarterly_labour import CH_CATALOG_TIE_REASON
+        prior = self.current()
+        at = self.BASE+timedelta(minutes=20)
+        disputed, completed = self.collect(at, [self.issue_catalog(self.H0, ties=True),
+                                                self.q3_csv('5.6'), requests.Timeout('second asset offline')])
+        self.assertEqual(prior['observation']['value'], 5.2)
+        self.pending(disputed, self.H0)
+        self.assertIn(CH_CATALOG_TIE_REASON, disputed['reason'])
+        self.assertFalse(live.eligible(disputed, completed, 'Arbeitsmarkt', 'CHF')[0])
+
+        recovered, completed = self.collect(at+timedelta(minutes=1), [self.issue_catalog(self.H0, ties=True),
+                                                                    self.q3_csv('5.6'), self.q3_csv('5.6')])
+        self.assertEqual(recovered['published_at'], self.H0)
+        self.assertEqual(recovered['observation']['value'], 5.6)
+        self.assertTrue(live.eligible(recovered, completed, 'Arbeitsmarkt', 'CHF')[0])
+
+    def test_qualified_recovery_keeps_monotone_issue_with_or_without_another_outage(self):
+        import requests
+        self.current()
+        start = datetime(2026, 11, 20, 10, 30, tzinfo=timezone.utc)
+        self.collect(start, [self.issue_catalog(self.H1), requests.Timeout('asset offline')])
+        for offset, intervening_error in ((1, False), (4, True)):
+            at = start+timedelta(minutes=offset)
+            recovered, _ = self.collect(at, [self.issue_catalog(self.H1), self.q3_csv('5.3')])
+            self.assertEqual((recovered['validation'], recovered['published_at']), ('VALID', self.H1))
+            if intervening_error:
+                kept, _ = self.collect(at+timedelta(minutes=1), [requests.Timeout('catalogue offline')])
+                self.assertEqual((kept['checked_at'], kept['published_at']), (recovered['checked_at'], self.H1))
+                at += timedelta(minutes=1)
+            rejected, _ = self.collect(at+timedelta(minutes=1), [self.issue_catalog(self.H0), self.q3_csv('5.2')])
+            self.pending(rejected, self.H1)
+
+    def test_invalid_catalogue_or_non_temporary_asset_error_cannot_qualify_old_value(self):
+        import requests
+        self.current()
+        start = datetime(2026, 11, 20, 10, 30, tzinfo=timezone.utc)
+        bad, _ = self.collect(start, [self.issue_catalog(self.H1, valid_rights=False)])
+        self.pending(bad, self.H0)  # unverified catalogue did not establish H1
+        self.collect(start+timedelta(minutes=1), [self.issue_catalog(self.H0), self.q3_csv()])
+        forbidden = requests.Response(); forbidden.status_code = 403; forbidden._content = b''
+        bad, _ = self.collect(start+timedelta(minutes=2), [self.issue_catalog(self.H0), forbidden])
+        self.pending(bad, self.H0)
+
+
 class JapanLabourTests(unittest.TestCase):
     CURRENT_NOW = datetime(2026, 10, 2, 13, tzinfo=timezone.utc)
 
