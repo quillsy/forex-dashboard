@@ -775,6 +775,16 @@ def _jp_gdp_url(base, href):
     return url
 
 
+def _jp_gdp_menu_path(menu_url):
+    _jp_gdp_url(JP_GDP_LATEST, menu_url)
+    # ESRI's first preliminary releases can use qeYYQ without _1;
+    # the second preliminary release still has _2 (verified 2026 archive).
+    path = re.fullmatch(r'https://www\.esri\.cao\.go\.jp/en/sna/data/sokuhou/files/(\d{4})/qe(\d{2})([1-4])(?:_([12]))?/gdemenuea\.html', menu_url)
+    if not path or int(path[1]) % 100 != int(path[2]):
+        raise ValueError('JP_GDP_MENU_PATH_INVALID')
+    return path
+
+
 def discover_japan_gdp_menu(content):
     soup = BeautifulSoup(content, 'html.parser')
     heading = soup.find('h1')
@@ -784,24 +794,21 @@ def discover_japan_gdp_menu(content):
              if a.get_text(' ', strip=True) == 'Time series table']
     if len(links) != 1:
         raise ValueError('JP_GDP_LATEST_MENU_AMBIGUOUS')
-    if not re.fullmatch(r'https://www\.esri\.cao\.go\.jp/en/sna/data/sokuhou/files/\d{4}/qe\d{3}_[12]/gdemenuea\.html', links[0]):
-        raise ValueError('JP_GDP_MENU_PATH_INVALID')
+    _jp_gdp_menu_path(links[0])
     return links[0]
 
 
 def parse_japan_gdp_menu(content, menu_url):
-    _jp_gdp_url(JP_GDP_LATEST, menu_url)
-    path = re.fullmatch(r'https://www\.esri\.cao\.go\.jp/en/sna/data/sokuhou/files/(\d{4})/qe(\d{2})([1-4])_([12])/gdemenuea\.html', menu_url)
-    if not path or int(path[1]) % 100 != int(path[2]):
-        raise ValueError('JP_GDP_MENU_PATH_INVALID')
+    path = _jp_gdp_menu_path(menu_url)
     soup = BeautifulSoup(content, 'html.parser')
     heading = soup.find('h1')
     title = heading.get_text(' ', strip=True) if heading else ''
     match = re.fullmatch(r'(Jan\.-Mar\.|Apr\.-Jun\.|Jul\.-Sep\.|Oct\.-Dec\.)(\d{4}) \(The (1st|2nd) preliminary\)', title)
-    if not match or (int(match[2]), _JP_GDP_QUARTERS[match[1]], int(match[3][0])) != (int(path[1]), int(path[3]), int(path[4])):
+    if not match or (int(match[2]), _JP_GDP_QUARTERS[match[1]], match[3][0]) != (int(path[1]), int(path[3]), path[4] or '1'):
         raise ValueError('JP_GDP_MENU_IDENTITY_INVALID')
-    suffix = f'{path[2]}{path[3]}{path[4]}'
-    expected = f'https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/{path[1]}/qe{path[2]}{path[3]}_{path[4]}/tables/gaku-jk{suffix}.csv'
+    release_dir = f'qe{path[2]}{path[3]}' + (f'_{path[4]}' if path[4] else '')
+    suffix = f'{path[2]}{path[3]}{match[3][0]}'
+    expected = f'https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/{path[1]}/{release_dir}/tables/gaku-jk{suffix}.csv'
     links = []
     for a in soup.find_all('a', href=True):
         if re.fullmatch(r'Real, Seasonally Adjusted Series \(csv:[0-9]+KB\)', a.get_text(' ', strip=True)):
@@ -820,24 +827,46 @@ def parse_japan_gdp_release(content, metadata, *, now=None):
     soup = BeautifulSoup(content, 'html.parser')
     heading = soup.find('h1')
     year = metadata['reference_period'][:4]
-    if not heading or heading.get_text(' ', strip=True) != f'Quarterly Estimates of GDP - Release Archive - {year}':
+    release_path = _jp_gdp_menu_path(metadata['release_url'])
+    if (not heading or heading.get_text(' ', strip=True) != f'Quarterly Estimates of GDP - Release Archive - {year}'
+            or metadata['reference_period'] != f'{release_path[1]}-Q{release_path[3]}'
+            or metadata['release_stage'] != ('2nd' if release_path[4] == '2' else '1st')
+            or metadata['archive_url'] != f'https://www.esri.cao.go.jp/en/sna/data/sokuhou/files/{year}/toukei_{year}.html'):
         raise ValueError('JP_GDP_ARCHIVE_IDENTITY_INVALID')
     releases = []
     for row in soup.find_all('tr'):
         cells = row.find_all(['td', 'th'], recursive=False)
         for a in row.find_all('a', href=True):
-            if not re.search(r'/qe\d{3}_[12]/gdemenuea\.html$', a['href']):
+            # Only time-series menu links participate. Other archive material
+            # may also bear the official release title (e.g. a summary PDF).
+            # Recognize the menu basename even for an invalid path/query, so
+            # a changed menu variant cannot silently disappear from the gate.
+            target_path = re.split(r'[?#]', a['href'], maxsplit=1)[0]
+            if target_path.rsplit('/', 1)[-1] != 'gdemenuea.html':
                 continue
+            label = a.get_text(' ', strip=True)
+            release_label = label.startswith('Quarterly Estimates of GDP for ')
             link = _jp_gdp_url(metadata['archive_url'], a['href'])
-            if len(cells) < 2:
+            path = _jp_gdp_menu_path(link)
+            if len(cells) < 2 or path[1] != year:
                 raise ValueError('JP_GDP_ARCHIVE_SCHEMA_INVALID')
+            # A suffixless path does not independently encode the release
+            # stage. Bind it to the explicit first-preliminary archive label.
+            # For old suffixed paths retain the path binding and also check
+            # full official release labels whenever supplied.
+            if not path[4] or release_label:
+                identity = re.fullmatch(r'Quarterly Estimates of GDP for (Jan\.-Mar\.|Apr\.-Jun\.|Jul\.-Sep\.|Oct\.-Dec\.)(\d{4}) \(The (First|Second) preliminary Estimates\)', label)
+                if (not identity or (identity[2], _JP_GDP_QUARTERS[identity[1]], identity[3])
+                        != (path[1], int(path[3]), 'Second' if path[4] == '2' else 'First')):
+                    raise ValueError('JP_GDP_ARCHIVE_RELEASE_IDENTITY_INVALID')
             try:
                 day = datetime.strptime(cells[0].get_text(' ', strip=True), '%b %d, %Y').date()
             except ValueError:
                 raise ValueError('JP_GDP_RELEASE_DATE_INVALID') from None
             releases.append((day, link))
     matches = [day for day, link in releases if link == metadata['release_url']]
-    if len(matches) != 1 or not releases or matches[0] != max(day for day, link in releases):
+    if (len(matches) != 1 or not releases or matches[0] != max(day for day, link in releases)
+            or sum(day == matches[0] for day, link in releases) != 1):
         raise ValueError('JP_GDP_RELEASE_NOT_LATEST')
     day = matches[0]
     if day > checked.astimezone(ZoneInfo('Asia/Tokyo')).date():
