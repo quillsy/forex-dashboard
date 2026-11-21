@@ -20,6 +20,33 @@ DATA_NAME = 'niche_context.json'
 ECB_CSV_NAME = 'niche_ecb_est.csv'
 JOURNAL_NAME = 'niche_context_vintages.json'
 STATUS_NAME = 'niche_context_status.json'
+_SOURCE_FILES = ('collect_niche_context.py', 'niche_context.py')
+
+
+def _attempt_source_sha256():
+    """Observe two public source files at attempt entry, not loaded process code."""
+    hashes = dict.fromkeys(_SOURCE_FILES)
+    try:
+        directory = Path(__file__).resolve().parent
+    except OSError:
+        return hashes
+    for name in _SOURCE_FILES:
+        try:
+            hashes[name] = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return hashes
+
+
+def _public_attempt_source(value):
+    """Legacy/untrusted status metadata is unknown unless its exact shape is safe."""
+    if not isinstance(value, dict) or set(value) != set(_SOURCE_FILES):
+        return None
+    if any(item is not None and (not isinstance(item, str) or len(item) != 64
+            or any(char not in '0123456789abcdef' for char in item))
+            for item in value.values()):
+        return None
+    return {name: value[name] for name in _SOURCE_FILES}
 
 
 def _failure_diagnostics(diagnostics):
@@ -164,7 +191,8 @@ def collect(output_dir, *, now=None, session=None):
                  'core_eligible': False, 'signal': None, 'status': 'attempt_started',
                  'last_attempt_at': now.isoformat(),
                  'last_success_at': previous_status.get('last_success_at'),
-                 'archive_head': anchor, 'archive_event_count': len(events), 'error_code': None}
+                 'archive_head': anchor, 'archive_event_count': len(events), 'error_code': None,
+                 'attempt_source_sha256': _attempt_source_sha256()}
         atomic_json(status_path, state)
         diagnostics = {}
         try:
@@ -207,9 +235,11 @@ def main():
     parser.add_argument('--output-dir', type=Path, default=Path(__file__).parent / 'research_data')
     args = parser.parse_args()
     result = collect(args.output_dir)
-    print(json.dumps({key: result.get(key) for key in ('status', 'collection_action',
-                                                       'last_attempt_at', 'error_code',
-                                                       'diagnostic_source', 'diagnostic_stage')}))
+    public = {key: result.get(key) for key in ('status', 'collection_action',
+                                              'last_attempt_at', 'error_code',
+                                              'diagnostic_source', 'diagnostic_stage')}
+    public['attempt_source_sha256'] = _public_attempt_source(result.get('attempt_source_sha256'))
+    print(json.dumps(public))
     return int(result['status'] == 'failed')
 
 
