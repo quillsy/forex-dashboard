@@ -617,6 +617,10 @@ def build_record(factor, score, observation, freshness, checked_at, previous=Non
     """Keep release knowledge independent of unsuccessful observation checks."""
     record = _build_record(factor, score, observation, freshness, checked_at,
                            previous, validation, reason)
+    if factor == "Arbeitsmarkt":
+        swiss = _bind_ch_labour_issue(record, observation, previous, checked_at)
+        if swiss is not None:
+            return swiss
     frontier = None
     if isinstance(previous, dict):
         frontier = _release_frontier(factor, previous.get("release_frontier"))
@@ -730,6 +734,106 @@ def _build_record(factor, score, observation, freshness, checked_at, previous=No
             "next_due_at": observation.get("next_due_at"),
             "expires_at": (reference + timedelta(days=max_days)).isoformat(),
             "observation": public_observation(observation)}
+
+
+def _ch_labour_issue(observation):
+    """An issued resource is metadata, not an observed quarter or value."""
+    from official_quarterly_labour import CH_LABOUR_SOURCE, CH_LABOUR_SERIES, CH_CATALOG_BASIS
+    if (not isinstance(observation, dict)
+            or (observation.get("source"), observation.get("series_id")) != (CH_LABOUR_SOURCE, CH_LABOUR_SERIES)):
+        return None
+    issued = timestamp(observation.get("published_at"))
+    proved = timestamp(observation.get("checked_at"))
+    if issued is None or proved is None or issued > proved:
+        return None
+    if observation.get("publication_basis") == CH_CATALOG_BASIS:
+        if any(observation.get(key) is not None for key in ("date", "reference_period", "value")):
+            return None
+    else:
+        import calendar
+        try:
+            day = datetime.strptime(observation.get("date"), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
+        value = number(observation.get("value"))
+        source_url = observation.get("source_url")
+        if (day.month not in (3, 6, 9, 12) or day.day != calendar.monthrange(day.year, day.month)[1]
+                or day > issued.date() or observation.get("reference_period") != f"{day.year}-Q{day.month // 3}"
+                or observation.get("unit") != "percent of labour force" or observation.get("frequency") != "quarterly"
+                or observation.get("seasonal_adjustment") != "SA"
+                # An unusual public catalogue slug may be stripped by the
+                # existing projection; it must not invalidate a real value.
+                or (source_url is not None and not re.fullmatch(r"https://opendata\.swiss/(?:en/)?dataset/[a-z0-9-]+/?", str(source_url)))
+                or (observation.get("value") is not None and (value is None or not 0 <= value <= 100))):
+            return None
+    return issued, proved
+
+
+def _ch_labour_qualified_issue(record):
+    from official_quarterly_labour import CH_CATALOG_BASIS
+    if not isinstance(record, dict) or record.get("validation") != "VALID":
+        return None
+    observation = record.get("observation", {})
+    evidence = _ch_labour_issue(observation)
+    checked = timestamp(record.get("checked_at"))
+    if (evidence is None or checked is None or observation.get("publication_basis") == CH_CATALOG_BASIS
+            or timestamp(record.get("published_at")) != evidence[0]):
+        return None
+    return evidence if eligible(record, max(checked, evidence[1]), "Arbeitsmarkt", "CHF")[0] else None
+
+
+def _bind_ch_labour_issue(record, observation, previous, checked_at):
+    """Preserve a CHF catalogue issue across a failed or lagging CSV, without a new schema."""
+    from official_quarterly_labour import CH_LABOUR_SOURCE, CH_LABOUR_SERIES, CH_CATALOG_BASIS, CH_CATALOG_TIE_REASON
+    old = previous.get("observation", {}) if isinstance(previous, dict) else {}
+    identity = (CH_LABOUR_SOURCE, CH_LABOUR_SERIES)
+    if not any(isinstance(item, dict) and (item.get("source"), item.get("series_id")) == identity
+               for item in (old, observation)):
+        return None  # Not the Swiss quarterly ILO source; keep existing paths.
+    checked = timestamp(checked_at)
+    prior = _ch_labour_issue(old)
+    attempted = timestamp(previous.get("last_attempt_at")) if isinstance(previous, dict) else None
+    if prior is not None:
+        # Only a verified past observation or a metadata-only blocked record
+        # can be the inherited publication floor. The enclosing attempt may
+        # have begun before its original catalogue confirmation.
+        if attempted is None or max(attempted, prior[1]) > checked:
+            prior = None
+        elif old.get("publication_basis") == CH_CATALOG_BASIS:
+            if previous.get("validation") != "UNVERIFIED" or previous.get("score") is not None:
+                prior = None
+        else:
+            prior = _ch_labour_qualified_issue(previous)
+    incoming = _ch_labour_issue(observation)
+    qualified = _ch_labour_qualified_issue(record)
+    # A newer catalogue may legitimately be confirmed after the collector
+    # start; compare its own proof time, not that start, with its issued time.
+    latest = prior
+    for candidate in (incoming, qualified):
+        if candidate is not None and (latest is None or candidate[0] > latest[0]):
+            latest = candidate
+    regressed = prior is not None and incoming is not None and incoming[0] < prior[0]
+    bad_metadata = observation.get("publication_basis") == CH_CATALOG_BASIS and incoming is None
+    if not regressed and not bad_metadata and (latest is None or (qualified is not None and qualified[0] == latest[0])):
+        # Includes catalogue timeout and same-issued transient asset error:
+        # the established valid cache stays byte-for-byte at its old times.
+        return record
+    if latest is None:
+        return _build_record("Arbeitsmarkt", None, {}, "UNAVAILABLE", checked_at, validation="UNVERIFIED",
+                             reason="BFS-Katalogbeleg widersprüchlich")
+    if regressed:
+        reason = "Älterer BFS-Katalogstand als bereits festgestellt"
+    elif record.get("reason") == CH_CATALOG_TIE_REASON:
+        reason = CH_CATALOG_TIE_REASON
+    else:
+        reason = "Bekannte BFS-Katalogausgabe; zugehöriger CSV-Wert noch nicht qualifiziert"
+    metadata = {"source": CH_LABOUR_SOURCE, "series_id": CH_LABOUR_SERIES,
+                "published_at": latest[0].isoformat(), "checked_at": latest[1].isoformat(),
+                "publication_basis": CH_CATALOG_BASIS}
+    # The only surviving evidence is issued metadata. Do not attach a stale
+    # or guessed period/value or advance a successful value-check timestamp.
+    return _build_record("Arbeitsmarkt", None, metadata, "UNAVAILABLE", checked_at, validation="UNVERIFIED",
+                         reason=reason + ": " + latest[0].isoformat())
 
 
 def record_not_due(record, currency, factor, now):

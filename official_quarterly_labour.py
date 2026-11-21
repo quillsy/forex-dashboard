@@ -21,6 +21,10 @@ CH_CATALOG = 'https://opendata.swiss/api/3/action/package_search'
 CH_TITLE = ('Erwerbslosenquote gemäss ILO nach Geschlecht, Nationalität und Altersgruppen, '
             'brutto- und saisonbereinigte Werte. Durchschnittliche Quartalswerte')
 CH_RIGHTS = 'https://opendata.swiss/terms-of-use#terms_by'
+CH_LABOUR_SOURCE = 'BFS (Swiss Labour Force Survey, ILO)'
+CH_LABOUR_SERIES = 'BFS:ts-x-03.03.01.03b:P:SA:Q'
+CH_CATALOG_BASIS = 'BFS catalogue issued; CSV qualification pending'
+CH_CATALOG_TIE_REASON = 'Gleichrangige BFS-CSV-Ausgaben nicht vollständig bestätigt'
 MONTHS = {name: i for i, name in enumerate(calendar.month_name) if name}
 
 
@@ -259,20 +263,36 @@ def parse_ch_labour(content, *, published_at, source_url, now=None):
                 next_due, precision = due, release['next_due_precision']
     return {'value': values[end], 'date': end.isoformat(), 'reference_period': f'{end.year}-Q{end.month // 3}',
             'unit': 'percent of labour force', 'frequency': 'quarterly', 'seasonal_adjustment': 'SA',
-            'source': 'BFS (Swiss Labour Force Survey, ILO)', 'source_url': source_url,
-            'series_id': 'BFS:ts-x-03.03.01.03b:P:SA:Q', 'checked_at': checked.isoformat(),
+            'source': CH_LABOUR_SOURCE, 'source_url': source_url,
+            'series_id': CH_LABOUR_SERIES, 'checked_at': checked.isoformat(),
             'published_at': published.isoformat(),
             'next_due_at': next_due.isoformat() if next_due else None,
             'next_due_precision': precision, 'needs_hourly_check': True, 'reuse_terms': CH_RIGHTS}
 
 
-def fetch_ch_labour(*, now=None, session=None):
-    checked = _now(now)
+def fetch_ch_labour(*, now=None, session=None, diagnostics=None):
+    if isinstance(diagnostics, dict):
+        diagnostics.pop('catalog_observation', None)
+        diagnostics.pop('catalog_distinct_latest_assets', None)
     transport = session or requests
     response = transport.get(CH_CATALOG, params={
         'q': '"Erwerbslosenquote gemäss ILO nach Geschlecht, Nationalität und Altersgruppen"', 'rows': 100}, timeout=20)
     response.raise_for_status()
-    resources = select_ch_labour_resources(response.json(), now=checked)
+    payload = response.json()
+    checked = _now(now)
+    resources = select_ch_labour_resources(payload, now=checked)
+    if resources and isinstance(diagnostics, dict):
+        # A completely qualified catalogue proves an issued resource even if
+        # the following CSV is unavailable or fails its independent checks.
+        # It does NOT prove a reference quarter, unemployment value or score.
+        diagnostics['catalog_observation'] = {
+            'source': CH_LABOUR_SOURCE, 'series_id': CH_LABOUR_SERIES,
+            'published_at': resources[0]['issued'], 'checked_at': checked.isoformat(),
+            'publication_basis': CH_CATALOG_BASIS,
+        }
+        # Equality of issued timestamps is not agreement between different
+        # CSV assets. Every distinct newest asset must still be checked.
+        diagnostics['catalog_distinct_latest_assets'] = len({item['url'] for item in resources}) > 1
     observations = []
     for resource in resources:
         response = transport.get(resource['url'], timeout=20)
@@ -286,12 +306,12 @@ def fetch_ch_labour(*, now=None, session=None):
     return observations[0]
 
 
-def fetch_quarterly_labour(currency, *, now=None, session=None):
+def fetch_quarterly_labour(currency, *, now=None, session=None, diagnostics=None):
     """Common collector entrypoint; no currencies or definitions are substituted."""
     if currency == 'NZD':
         result = fetch_nz_labour(now=now, session=session)
     elif currency == 'CHF':
-        result = fetch_ch_labour(now=now, session=session)
+        result = fetch_ch_labour(now=now, session=session, diagnostics=diagnostics)
     else:
         raise ValueError('QUARTERLY_LABOUR_CURRENCY_NOT_SUPPORTED')
     if result is not None:
