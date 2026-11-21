@@ -10,6 +10,67 @@ from provider_transport import CollectorTransport
 
 
 class ProviderRetryTests(unittest.TestCase):
+    def test_statcan_gdp_can_identify_the_cause_of_a_skipped_request(self):
+        from live_data import temporary_source_outage
+        from official_macro import fetch_statcan_gdp, STATCAN_BASE
+
+        for status, retry_after, temporary in (
+                (503, "", True), (429, "", True), (503, "60", True),
+                (429, "60", True), (401, "", False), (403, "", False)):
+            with self.subTest(status=status, retry_after=retry_after):
+                self.client.post.reset_mock()
+                response = requests.Response()
+                response.status_code = status
+                response.headers["Retry-After"] = retry_after
+                self.client.post.return_value = response
+                transport = self.transport()
+                transport.post(STATCAN_BASE + "getDataFromVectorsAndLatestNPeriods",
+                               json=[{"vectorId": 41690973, "latestN": 13}])
+                with self.assertRaisesRegex(requests.RequestException, "PROVIDER_COOLDOWN") as skipped:
+                    fetch_statcan_gdp(session=transport)
+                self.assertEqual(temporary_source_outage(skipped.exception), temporary)
+                self.assertIsNone(skipped.exception.response)
+                self.assertEqual(self.client.post.call_count, 1)
+
+    def test_statcan_backoff_proof_is_local_and_expires_with_its_deadline(self):
+        from live_data import temporary_source_outage
+        from official_macro import STATCAN_BASE
+
+        self.response(503, "60")
+        transport = self.transport(durable=True)
+        transport.get(STATCAN_BASE + "first")
+        restarted = self.transport(durable=True)
+        with self.assertRaises(requests.RequestException) as unknown:
+            restarted.get(STATCAN_BASE + "second")
+        self.assertFalse(temporary_source_outage(unknown.exception))
+        self.assertEqual(self.client.get.call_count, 1)
+        self.now += timedelta(seconds=60)
+        self.response(403, "")
+        transport.get(STATCAN_BASE + "third")
+        with self.assertRaises(requests.RequestException) as denied:
+            transport.get(STATCAN_BASE + "fourth")
+        self.assertFalse(temporary_source_outage(denied.exception))
+        self.assertEqual(self.client.get.call_count, 2)
+
+    def test_other_hosts_and_local_run_limit_do_not_qualify_statcan_cache(self):
+        from live_data import temporary_source_outage
+        from official_macro import STATCAN_BASE
+
+        self.response(503, "")
+        transport = self.transport()
+        transport.get("https://official.example/data")
+        with self.assertRaises(requests.RequestException) as other:
+            transport.get("https://official.example/other")
+        self.assertFalse(temporary_source_outage(other.exception))
+        self.response(200, "")
+        transport.get(STATCAN_BASE + "first")
+        transport.usage["www150.statcan.gc.ca"]["requests_this_run"] = 80
+        for path, code in (("second", "RUN_SAFETY_LIMIT"), ("third", "PROVIDER_COOLDOWN")):
+            with self.assertRaisesRegex(requests.RequestException, code) as limited:
+                transport.get(STATCAN_BASE + path)
+            self.assertFalse(temporary_source_outage(limited.exception))
+        self.assertEqual(self.client.get.call_count, 2)
+
     def test_statcan_html_outage_is_labelled_without_persisting_body(self):
         from official_macro import fetch_statcan_labour
         response = requests.Response()
