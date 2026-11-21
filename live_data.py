@@ -743,6 +743,18 @@ def record_not_due(record, currency, factor, now):
     return due is not None and due > now and eligible(record, now, factor=factor, currency=currency)[0]
 
 
+def _bls_period_mismatch_reason(observed_date, report_period):
+    """Include only canonical calendar months in the public diagnostic."""
+    try:
+        observed = datetime.strptime(observed_date, "%Y-%m-%d").date()
+        reported = datetime.strptime(report_period, "%Y-%m")
+    except (TypeError, ValueError):
+        return "Referenzmonat von FRED oder BLS nicht eindeutig bestätigt"
+    if observed.isoformat() != observed_date or reported.strftime("%Y-%m") != report_period:
+        return "Referenzmonat von FRED oder BLS nicht eindeutig bestätigt"
+    return f"FRED-Referenzmonat {observed:%Y-%m} weicht vom amtlichen BLS-Berichtsmonat {reported:%Y-%m} ab"
+
+
 def _fred_raw_for_bls(app, factor, observation, period):
     """Read the original FRED index for CPI; its pc1 score stays untouched."""
     from official_bls import BlsInvalid, _raw_decimal
@@ -956,6 +968,7 @@ def collect(app, path=PATH):
             observation.setdefault("frequency", "daily" if factor == "Geldpolitik" else "quarterly" if factor == "GDP" or (factor == "Inflation" and currency == "NZD") else "monthly")
             validation = observation.pop("_validation", "VALID")
             reason = observation.pop("_reason", None)
+            bls_mismatch_reason = None
             if currency == "USD" and factor in bls_states:
                 check = bls_states[factor]
                 state = check.get("state")
@@ -969,9 +982,12 @@ def collect(app, path=PATH):
                 elif observation.get("date") is not None:
                     observed_period = str(observation["date"])[:7]
                     expected_series = REPORTS[factor]["series_id"]
-                    if (observation.get("series_id") != expected_series
-                            or observed_period != state["period"]):
-                        validation, reason = "UNVERIFIED", "FRED-Periode entspricht nicht der neuesten amtlichen BLS-Ausgabe"
+                    if observation.get("series_id") != expected_series:
+                        validation = "UNVERIFIED"
+                        bls_mismatch_reason = f"Erwartete FRED-Reihe {expected_series} für den BLS-Abgleich nicht bestätigt"
+                    elif observed_period != state["period"]:
+                        validation = "UNVERIFIED"
+                        bls_mismatch_reason = _bls_period_mismatch_reason(observation["date"], state["period"])
                     elif state.get("proof_source") == "BLS_API_V1":
                         try:
                             fred_raw = _fred_raw_for_bls(app, factor, observation, state["period"])
@@ -1004,6 +1020,7 @@ def collect(app, path=PATH):
                                            provider_status="Amtlicher BLS-PDF-Veröffentlichungsbeleg" if state.get("proof_source") == "BLS_PDF" else "Amtlicher DOL-PDF-Veröffentlichungsbeleg",
                                            publication_basis="Amtliche DOL/BLS-Mitteilung: Berichtsmonat, Embargo-Ende als früheste Freigabe und geplanter Folgetermin; tatsächliche Verfügbarkeit erst bei Prüfung bestätigt")
                     if now_utc() >= timestamp(state["next_due_at"]):
+                        bls_mismatch_reason = None
                         validation, reason = "UNVERIFIED", "Neue BLS-Veröffentlichung fällig; Folgeperiode nicht bestätigt"
             if factor == "PMI":
                 validation, reason = "UNVERIFIED", "PMI: Survey-Identität und öffentliche Nutzungsrechte noch nicht bestätigt"
@@ -1089,7 +1106,7 @@ def collect(app, path=PATH):
                     observation.setdefault("seasonal_adjustment", "NSA")
             record = build_record(factor, raw.get(factor), observation,
                 raw.get("_freshness", {}).get(factor, "UNAVAILABLE"), checked_at,
-                previous.get("currencies", {}).get(currency, {}).get(factor), validation, reason)
+                previous.get("currencies", {}).get(currency, {}).get(factor), validation, bls_mismatch_reason or reason)
             data["currencies"][currency][factor] = record
     counts = [eligible(record, factor=factor, currency=currency)[0]
               for currency, records in data["currencies"].items() for factor, record in records.items()]

@@ -83,6 +83,13 @@ def api_state(factor):
 
 
 class BlsBulletinTests(unittest.TestCase):
+    NOVEMBER_CASES = (
+        ("Arbeitsmarkt", "Employment Situation", "December 4, 2026", "January 8, 2027",
+         "2026-12-04T13:30:00+00:00", "2027-01-08T13:30:00+00:00"),
+        ("Inflation", "Consumer Price Index", "December 10, 2026", "January 13, 2027",
+         "2026-12-10T13:30:00+00:00", "2027-01-13T13:30:00+00:00"),
+    )
+
     def test_heading_embargo_and_successor_are_distinct(self):
         state = parse_pdf_release(bulletin("Arbeitsmarkt"), "Arbeitsmarkt", NOW)
         self.assertEqual(state["period"], "2026-08")
@@ -116,6 +123,97 @@ class BlsBulletinTests(unittest.TestCase):
                          "2026-11-06T13:30:00+00:00")
         with self.assertRaises(BlsInvalid):
             parse_schedule(head + row + row + tail, "Arbeitsmarkt")
+
+    def test_december_reference_pins_match_official_january_calendar_rows(self):
+        for factor, release_title, _, january, _, expected in self.NOVEMBER_CASES:
+            with self.subTest(factor=factor):
+                day = datetime.strptime(january, "%B %d, %Y").strftime("%d")
+                # Text of the confirmed calendar row; the existing Eastern
+                # convention converts the January time to UTC.
+                html = (f"<h1>Schedule of Releases for the {release_title}</h1>"
+                        "<table><tr><th>Reference Month</th><th>Release Date</th>"
+                        "<th>Release Time</th></tr><tr><td>December 2026</td>"
+                        f"<td>Jan. {day}, 2027</td><td>08:30 AM</td></tr></table>"
+                        "<p>Subscribe to the BLS Online Calendar</p>")
+                self.assertEqual(parse_schedule(html, factor)["2026-12"].isoformat(), expected)
+                self.assertEqual(PINNED_DUES[factor]["2026-12"], expected)
+
+    def test_2027_fall_clock_change_separates_the_two_october_report_deadlines(self):
+        cases = (
+            ("Arbeitsmarkt", "November 5, 2027", "December 3, 2027",
+             datetime(2027, 11, 5, 12, 30, tzinfo=timezone.utc), "2027-12-03T13:30:00+00:00"),
+            ("Inflation", "November 10, 2027", "December 10, 2027",
+             datetime(2027, 11, 10, 13, 30, tzinfo=timezone.utc), "2027-12-10T13:30:00+00:00"),
+        )
+        for factor, embargo, successor_date, published, due in cases:
+            with self.subTest(factor=factor):
+                client = Mock(get=Mock(return_value=pdf_response(url=_pdf_url(factor, published))))
+                text = bulletin(factor, period="October 2027", embargo=embargo,
+                                successor="November 2027", due=successor_date)
+                with patch("official_bls._pdf_text", return_value=text):
+                    state = fetch_release_state(factor, session=client, now=published)
+                self.assertEqual(state["period"], "2027-10")
+                self.assertEqual(state["embargo_ends_at"], published.isoformat())
+                self.assertEqual(state["next_due_at"], due)
+                self.assertEqual(client.get.call_count, 1)
+
+    def test_november_dol_proof_uses_exact_successor_and_cannot_cross_due(self):
+        for factor, _, embargo, january, published_iso, due_iso in self.NOVEMBER_CASES:
+            with self.subTest(factor=factor):
+                published = datetime.fromisoformat(published_iso)
+                due = datetime.fromisoformat(due_iso)
+                text = bulletin(factor, period="November 2026", embargo=embargo,
+                                successor="December 2026", due=january)
+                client = Mock(get=Mock(return_value=pdf_response(url=_pdf_url(factor, published))))
+                with patch("official_bls._pdf_text", return_value=text):
+                    state = fetch_release_state(factor, session=client, now=published)
+                self.assertEqual((state["period"], state["embargo_ends_at"], state["next_due_at"]),
+                                 ("2026-11", published_iso, due_iso))
+                self.assertEqual(client.get.call_count, 1)
+                client.reset_mock()
+                self.assertEqual(fetch_release_state(factor, session=client,
+                    now=due - timedelta(seconds=1), previous_state=state), state)
+                client.get.assert_not_called()
+                # A stale November report returned on the new December URL
+                # does not renew the previous proof at the exact due instant.
+                client.get.return_value = pdf_response(url=_pdf_url(factor, due))
+                with patch("official_bls._pdf_text", return_value=text), \
+                     self.assertRaisesRegex(BlsInvalid, "BLS_PDF_RELEASE_NOT_CURRENT"):
+                    fetch_release_state(factor, session=client, now=due, previous_state=state)
+                self.assertEqual(client.get.call_count, 1)
+                self.assertEqual(client.get.call_args.args[0], _pdf_url(factor, due))
+
+    def test_november_api_fallback_requires_24h_and_exact_successor_for_both_reports(self):
+        for factor, _, _, _, published_iso, due_iso in self.NOVEMBER_CASES:
+            with self.subTest(factor=factor):
+                published = datetime.fromisoformat(published_iso)
+                due = datetime.fromisoformat(due_iso)
+                pdf_attempts = 2 if factor == "Arbeitsmarkt" else 1
+                client = Mock(get=Mock(side_effect=[pdf_response(403) for _ in range(pdf_attempts)]))
+                with self.assertRaisesRegex(BlsInvalid, "BLS_API_WAIT_24H"):
+                    fetch_release_state(factor, session=client,
+                        now=published + timedelta(hours=24) - timedelta(seconds=1))
+                self.assertEqual(client.get.call_count, pdf_attempts)
+                client = Mock(get=Mock(side_effect=[pdf_response(403) for _ in range(pdf_attempts)]
+                                                  + [api_response(factor, period="M11")]))
+                state = fetch_release_state(factor, session=client,
+                                            now=published + timedelta(hours=24))
+                self.assertEqual(state["proof_source"], "BLS_API_V1")
+                self.assertEqual((state["period"], state["embargo_ends_at"], state["next_due_at"]),
+                                 ("2026-11", published_iso, due_iso))
+                self.assertEqual(state["first_observed_at"], (published + timedelta(hours=24)).isoformat())
+                self.assertEqual(client.get.call_count, pdf_attempts + 1)
+                self.assertEqual(client.get.call_args.args[0], _api_url(factor))
+                # No real FRED values: model a matched collector proof and
+                # confirm the exact new successor is required for retention.
+                matched = dict(state, fred_raw_value=state["raw_value"])
+                self.assertEqual(_verified_previous(factor, matched), ("2026-11", published, due))
+                self.assertIsNone(_verified_previous(factor,
+                    dict(matched, next_due_at=(due + timedelta(days=1)).isoformat())))
+                client.reset_mock()
+                self.assertEqual(fetch_release_state(factor, session=client,
+                    now=due - timedelta(seconds=1), previous_state=matched), matched)
+                client.get.assert_not_called()
 
     def test_august_cold_boot_reads_only_official_pdf_not_bls_api(self):
         for factor, text in (("Arbeitsmarkt", bulletin("Arbeitsmarkt")),
@@ -248,7 +346,10 @@ class BlsBulletinTests(unittest.TestCase):
             fetch_release_state("Arbeitsmarkt", session=client, now=NOW, api_budget_blocked=True)
         client.reset_mock()
         client.get.return_value = pdf_response(403)
-        with self.assertRaisesRegex(BlsInvalid, "BLS_API_SCHEDULE_UNKNOWN"):
+        # The synthetic horizon must not move when actual dates are added.
+        with patch.dict(PINNED_DUES["Arbeitsmarkt"],
+                        {"2026-11": "2026-12-04T13:30:00+00:00"}, clear=True), \
+             self.assertRaisesRegex(BlsInvalid, "BLS_API_SCHEDULE_UNKNOWN"):
             fetch_release_state("Arbeitsmarkt", session=client,
                                 now=datetime(2026, 12, 5, 15, tzinfo=timezone.utc))
         self.assertEqual(client.get.call_count, 2)
@@ -294,6 +395,7 @@ class BlsBulletinTests(unittest.TestCase):
                                 diagnostics=diagnostics)
         self.assertNotIn("pdf_attempted", diagnostics)
 
+    @patch.dict(PINNED_DUES["Arbeitsmarkt"], {"2026-11": "2026-12-04T13:30:00+00:00"}, clear=True)
     def test_prior_bulletin_can_derive_unpinned_successor_after_last_known_schedule(self):
         prior = {"period": "2026-11", "embargo_ends_at": PINNED_DUES["Arbeitsmarkt"]["2026-11"],
                  "next_due_at": "2027-01-08T13:30:00+00:00",
@@ -379,6 +481,32 @@ class BlsPdfFallbackTests(unittest.TestCase):
                     self.assertEqual(call.kwargs["cookies"], {})
                     self.assertEqual(call.kwargs["headers"]["Cookie"], "")
                     self.assertEqual(call.kwargs["headers"]["User-Agent"], USER_AGENT)
+
+    def test_november_bls_employment_pdf_cache_uses_verified_january_successor(self):
+        factor = "Arbeitsmarkt"
+        published = datetime(2026, 12, 4, 13, 30, tzinfo=timezone.utc)
+        due = datetime(2027, 1, 8, 13, 30, tzinfo=timezone.utc)
+        text = bulletin(factor, period="November 2026", embargo="December 4, 2026",
+                        successor="December 2026", due="January 8, 2027")
+        client = Mock(get=Mock(side_effect=[requests.exceptions.Timeout(), pdf_response(url=self.URL)]))
+        with patch("official_bls._pdf_text", return_value=text):
+            state = fetch_release_state(factor, session=client, now=published)
+        self.assertEqual(state["proof_source"], "BLS_PDF")
+        self.assertEqual(state["next_due_at"], due.isoformat())
+        self.assertEqual(_verified_previous(factor, state), ("2026-11", published, due))
+        self.assertEqual([call.args[0] for call in client.get.call_args_list],
+                         [_pdf_url(factor, published), self.URL])
+        client.reset_mock()
+        self.assertEqual(fetch_release_state(factor, session=client,
+            now=due - timedelta(seconds=1), previous_state=state), state)
+        client.get.assert_not_called()
+        # At the boundary a new official release is required, even if the
+        # preceding BLS transport was successful and its dates were pinned.
+        client.get.side_effect = [pdf_response(401)]
+        with self.assertRaises(requests.exceptions.HTTPError):
+            fetch_release_state(factor, session=client, now=due, previous_state=state)
+        self.assertEqual(client.get.call_count, 1)
+        self.assertEqual(client.get.call_args.args[0], _pdf_url(factor, due))
 
     def test_identified_bot_never_sends_a_supplied_session_cookie_or_follows_redirects(self):
         session = requests.Session()
@@ -732,16 +860,20 @@ class BlsPdfFallbackTests(unittest.TestCase):
         self.assertIsNone(_bls_pdf_url("GDP"))
 
     def test_bls_cached_proof_requires_both_pinned_release_dates(self):
-        for previous in (
-                {"period": "2026-05", "embargo_ends_at": "2026-06-05T12:30:00+00:00",
-                 "next_due_at": "2099-01-01T00:00:00+00:00"},
-                {"period": "2026-11", "embargo_ends_at": "2026-12-04T13:30:00+00:00",
-                 "next_due_at": "2099-01-01T00:00:00+00:00"},
-                {"period": "2030-01", "embargo_ends_at": "2030-02-01T13:30:00+00:00",
-                 "next_due_at": "2030-03-01T13:30:00+00:00"}):
-            with self.subTest(period=previous["period"]):
-                self.assertIsNone(_verified_previous("Arbeitsmarkt", {
-                    **previous, "release_url": self.URL, "proof_source": "BLS_PDF"}))
+        # Deliberately limit the synthetic schedule to one pin. Test each
+        # missing boundary even after the real calendar grows.
+        limited = {"2026-11": "2026-12-04T13:30:00+00:00"}
+        with patch.dict(PINNED_DUES["Arbeitsmarkt"], limited, clear=True):
+            for previous in (
+                    {"period": "2026-10", "embargo_ends_at": "2026-11-06T13:30:00+00:00",
+                     "next_due_at": limited["2026-11"]},
+                    {"period": "2026-11", "embargo_ends_at": limited["2026-11"],
+                     "next_due_at": "2027-01-08T13:30:00+00:00"},
+                    {"period": "2030-01", "embargo_ends_at": "2030-02-01T13:30:00+00:00",
+                     "next_due_at": "2030-03-01T13:30:00+00:00"}):
+                with self.subTest(period=previous["period"]):
+                    self.assertIsNone(_verified_previous("Arbeitsmarkt", {
+                        **previous, "release_url": self.URL, "proof_source": "BLS_PDF"}))
 
     def test_unknown_bls_cache_cannot_suppress_primary_reconfirmation(self):
         previous = {"period": "2026-05", "embargo_ends_at": "2026-06-05T12:30:00+00:00",
@@ -859,7 +991,8 @@ class BlsCollectorTests(unittest.TestCase):
         }, "FRESH", checked.isoformat())
 
     def run_collector(self, reports, observations, previous=None, at=NOW,
-                      previous_data=None, attempted=(), api_attempted=(), cpi_raw="321.123"):
+                      previous_data=None, attempted=(), api_attempted=(), cpi_raw="321.123",
+                      metadata_valid=True):
         app = Mock(FRED_KEY="test")
         app.get_fred_data.return_value = (pd.DataFrame({"date": pd.to_datetime(["2026-08-01"]),
                                                          "value": [float(cpi_raw)]}), None, True)
@@ -890,10 +1023,46 @@ class BlsCollectorTests(unittest.TestCase):
                  patch.object(live_data, "FACTORS", {"Inflation": 20, "Arbeitsmarkt": 20}), \
                  patch.object(live_data, "now_utc", return_value=at), \
                  patch("official_bls.fetch_release_state", side_effect=source), \
-                 patch("source_contracts.validate_fred_metadata", return_value=True):
+                 patch("source_contracts.validate_fred_metadata", return_value=metadata_valid):
                 live_data.collect(app, path)
             self.last_dataset = live_data.load(path)
             return self.last_dataset["currencies"]["USD"]
+
+    def test_wrong_fred_series_in_the_right_month_reports_expected_series(self):
+        for metadata_valid in (True, False):
+            with self.subTest(metadata_valid=metadata_valid):
+                observations = {
+                    factor: {"value": 3.4, "date": "2026-08-01", "series_id": "UNEXPECTED_INPUT",
+                             "source": "FRED / BLS" if factor == "Inflation" else "FRED"}
+                    for factor in states()
+                }
+                rows = self.run_collector(states(), observations, metadata_valid=metadata_valid)
+                for factor, expected in (("Arbeitsmarkt", "UNRATE"), ("Inflation", "CPIAUCNS")):
+                    self.assertEqual(rows[factor]["reason"],
+                                     f"Erwartete FRED-Reihe {expected} für den BLS-Abgleich nicht bestätigt")
+                    self.assertEqual(rows[factor]["validation"], "UNVERIFIED")
+                    self.assertIsNone(rows[factor]["score"])
+
+    def test_fred_month_mismatch_names_only_confirmed_calendar_months(self):
+        for day, reason in (
+                ("2026-07-01", "FRED-Referenzmonat 2026-07 weicht vom amtlichen BLS-Berichtsmonat 2026-08 ab"),
+                ("2026-07-40", "Referenzmonat von FRED oder BLS nicht eindeutig bestätigt"),
+                ("kein-datum", "Referenzmonat von FRED oder BLS nicht eindeutig bestätigt")):
+            with self.subTest(day=day):
+                observation = {"value": 3.4, "date": day, "series_id": "CPIAUCNS", "source": "FRED / BLS"}
+                row = self.run_collector(states(), {"Inflation": observation})["Inflation"]
+                self.assertEqual(row["reason"], reason)
+                self.assertEqual(row["validation"], "UNVERIFIED")
+                self.assertIsNone(row["score"])
+
+    def test_due_release_takes_precedence_over_prior_month_mismatch(self):
+        reports = states()
+        due = datetime.fromisoformat(reports["Inflation"]["next_due_at"])
+        observation = {"value": 3.4, "date": "2026-07-01", "series_id": "CPIAUCNS", "source": "FRED / BLS"}
+        row = self.run_collector(reports, {"Inflation": observation}, at=due)["Inflation"]
+        self.assertEqual(row["reason"], "Neue BLS-Veröffentlichung fällig; Folgeperiode nicht bestätigt")
+        self.assertEqual(row["validation"], "UNVERIFIED")
+        self.assertIsNone(row["score"])
 
     def test_current_period_qualifies_with_explicit_metadata_and_due_blocks_read_time(self):
         observations = {
