@@ -21,41 +21,36 @@
   "seasonal_adjustment": "seasonally_adjusted_not_calendar_adjusted",
   "geography": "EA21",
   "frequency": "monthly",
-  "retrieved_at": "2026-11-27T09:57:12.250909+00:00",
-  "dataset_updated_at": "2026-10-29T10:00:00+00:00",
+  "retrieved_at": "2026-11-27T11:07:18.043585+00:00",
+  "dataset_updated_at": "2026-11-27T10:00:00+00:00",
   "published_at": null,
-  "reference_period": "2026-10",
-  "value": -3.4,
-  "latest_indexed_period": "2026-10",
+  "reference_period": "2026-11",
+  "value": -5.1,
+  "latest_indexed_period": "2026-11",
   "latest_indexed_period_missing": false,
   "missing_periods": [],
   "absent_calendar_periods": [],
-  "reference_period_age_days": 27,
+  "reference_period_age_days": 0,
   "age_basis": "days since reference month end; current incomplete month is zero; not publication age",
   "observations": [
     {
-      "reference_period": "2025-10",
-      "value": -8.2,
-      "status": null
-    },
-    {
       "reference_period": "2025-11",
-      "value": -9.1,
+      "value": -9.0,
       "status": null
     },
     {
       "reference_period": "2025-12",
-      "value": -8.8,
+      "value": -8.6,
       "status": null
     },
     {
       "reference_period": "2026-01",
-      "value": -7.0,
+      "value": -6.8,
       "status": null
     },
     {
       "reference_period": "2026-02",
-      "value": -7.3,
+      "value": -7.2,
       "status": null
     },
     {
@@ -65,12 +60,12 @@
     },
     {
       "reference_period": "2026-04",
-      "value": -7.5,
+      "value": -7.4,
       "status": null
     },
     {
       "reference_period": "2026-05",
-      "value": -7.7,
+      "value": -7.6,
       "status": null
     },
     {
@@ -80,26 +75,31 @@
     },
     {
       "reference_period": "2026-07",
-      "value": -6.0,
+      "value": -6.1,
       "status": null
     },
     {
       "reference_period": "2026-08",
-      "value": -5.1,
+      "value": -5.2,
       "status": null
     },
     {
       "reference_period": "2026-09",
-      "value": -3.9,
+      "value": -4.0,
       "status": null
     },
     {
       "reference_period": "2026-10",
-      "value": -3.4,
+      "value": -3.6,
+      "status": null
+    },
+    {
+      "reference_period": "2026-11",
+      "value": -5.1,
       "status": null
     }
   ],
-  "payload_sha256": "98884db66172ca972994adcce29bedeed1ed3e18c18ffd664d4e488d51324a41",
+  "payload_sha256": "2a58a2f7c6ac14a1eed2e6d3e909ddd84ff94df23d9a25da1ff1c1455bf5e080",
   "source_snapshot": {
     "version": "2.0",
     "class": "dataset",
@@ -121,21 +121,21 @@
       13
     ],
     "value": {
-      "0": -8.2,
-      "1": -9.1,
-      "2": -8.8,
-      "3": -7.0,
-      "4": -7.3,
-      "5": -6.9,
-      "6": -7.5,
-      "7": -7.7,
-      "8": -7.4,
-      "9": -6.0,
-      "10": -5.1,
-      "11": -3.9,
-      "12": -3.4
+      "0": -9.0,
+      "1": -8.6,
+      "2": -6.8,
+      "3": -7.2,
+      "4": -6.9,
+      "5": -7.4,
+      "6": -7.6,
+      "7": -7.4,
+      "8": -6.1,
+      "9": -5.2,
+      "10": -4.0,
+      "11": -3.6,
+      "12": -5.1
     },
-    "updated": "2026-10-29T11:00:00+0100",
+    "updated": "2026-11-27T11:00:00+0100",
     "status": {},
     "extension": {
       "id": "EI_BSIN_M_R2",
@@ -180,19 +180,19 @@
       "time": {
         "category": {
           "index": {
-            "2025-10": 0,
-            "2025-11": 1,
-            "2025-12": 2,
-            "2026-01": 3,
-            "2026-02": 4,
-            "2026-03": 5,
-            "2026-04": 6,
-            "2026-05": 7,
-            "2026-06": 8,
-            "2026-07": 9,
-            "2026-08": 10,
-            "2026-09": 11,
-            "2026-10": 12
+            "2025-11": 0,
+            "2025-12": 1,
+            "2026-01": 2,
+            "2026-02": 3,
+            "2026-03": 4,
+            "2026-04": 5,
+            "2026-05": 6,
+            "2026-06": 7,
+            "2026-07": 8,
+            "2026-08": 9,
+            "2026-09": 10,
+            "2026-10": 11,
+            "2026-11": 12
           }
         }
       }
