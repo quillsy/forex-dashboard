@@ -91,33 +91,76 @@ def fetch_hicp(*, now=None, session=None, geo="EA21"):
     return parse_hicp(response.json(), now=checked, geo=geo)
 
 
-# Public FSO page component supplies the current workbook ID each month.
-BFS_HICP_PAGE = 'https://www.bfs.admin.ch/bfs/de/home/statistiken/preise/harmonisierte-verbraucherpreise.html'
-BFS_HICP_DISCOVERY = ('https://www.bfs.admin.ch/content/bfs/de/home/statistiken/preise/'
-    'harmonisierte-verbraucherpreise/jcr:content/root/main/section/container/'
-    'tabs_419989973/item_1/ws_composed_list.model.json')
+# The FSO moved statistical products to its new portal. The current HICP25B25
+# card links the same DAM asset in its detail and XLSX controls (verified 2026-11-19).
+BFS_HICP_PAGE = 'https://statistik.admin.ch/de/themen/preise/harmonisierter-verbraucherpreisindex-hvpi'
+BFS_HICP_DISCOVERY = BFS_HICP_PAGE
 BFS_ASSET_BASE = 'https://dam-api.bfs.admin.ch/hub/api/dam/assets/'
+BFS_HICP_SHORT_TITLE = 'HVPI Schweiz (2025=100), Detailresultate seit 2005'
+BFS_HICP_TITLE = (BFS_HICP_SHORT_TITLE + ', Warenkorbstruktur 2025, Indizes, '
+                  'Veränderungsraten. [HICP25B25]')
+_BFS_HICP_MAX_HTML_BYTES = 2_000_000
 
 
-def discover_swiss_hicp(payload):
-    """Resolve the official current HICP table; ambiguity fails closed."""
-    import json
+def discover_swiss_hicp(content):
+    """Resolve the current original HICP25B25 product from its scoped portal links."""
+    import re
+    from bs4 import BeautifulSoup
+
+    def text(node):
+        return ' '.join(node.get_text(' ', strip=True).split())
+
     try:
-        listing = json.loads(payload['assetListAsJson'])
-        candidates = [x for x in listing['list']
-                      if x['title'].startswith('HVPI Schweiz (')
-                      and 'Detailresultate seit' in x['title']]
-        if len(candidates) != 1:
+        if not isinstance(content, bytes) or not 0 < len(content) <= _BFS_HICP_MAX_HTML_BYTES:
             raise ValueError()
-        item = candidates[0]
-        if type(item['damId']) is not int or item['damId'] <= 0:
+        soup = BeautifulSoup(content.decode('utf-8'), 'html.parser')
+        asset_ids = set()
+        # Both layouts occur on the official topic page. The second uses an
+        # abbreviated heading, but the Details control repeats the full title.
+        for container, heading, title in (
+                ('article.bfs-dam-asset-card', 'h4.card__title', BFS_HICP_TITLE),
+                ('li.accordion__item', 'span.accordion__title', BFS_HICP_SHORT_TITLE)):
+            for card in soup.select(container):
+                headings = card.select(heading)
+                links = card.find_all('a')
+                expected_label = 'Weiter lesen auf der Seite ' + BFS_HICP_TITLE
+                has_product_label = any(isinstance(a.get('aria-label'), str)
+                                        and ' '.join(a['aria-label'].split()) == expected_label
+                                        for a in links)
+                if not any(text(h) == title for h in headings) and not has_product_label:
+                    continue
+                # A malformed card that still identifies the original product
+                # must not be silently hidden by another well-formed card.
+                if len(headings) != 1 or text(headings[0]) != title:
+                    raise ValueError()
+                details = [a for a in links if text(a) == 'Details']
+                downloads = [a for a in links if text(a) == 'xlsx']
+                if not details or not downloads:
+                    raise ValueError()
+                ids = set()
+                for link in details:
+                    href = link.get('href')
+                    match = re.fullmatch(r'(?:https://statistik\.admin\.ch)?/de/asset/([1-9][0-9]*)',
+                                         href) if isinstance(href, str) else None
+                    label = link.get('aria-label')
+                    if (match is None or not isinstance(label, str) or ' '.join(label.split()) != expected_label):
+                        raise ValueError()
+                    ids.add(match[1])
+                if len(ids) != 1:
+                    raise ValueError()
+                asset_id = next(iter(ids))
+                master = BFS_ASSET_BASE + asset_id + '/master'
+                # The accordion also links its description to the same master.
+                # Every other control in a matching card must bind that master;
+                # never follow a link from an unrelated or ambiguous product.
+                if any(a.get('href') != master for a in links if text(a) != 'Details'):
+                    raise ValueError()
+                asset_ids.add(asset_id)
+        if len(asset_ids) != 1:
             raise ValueError()
-        expected = BFS_ASSET_BASE + str(item['damId'])
-        if item['url'] != expected:
-            raise ValueError()
-        return expected
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError('BFS_HICP_DISCOVERY_INVALID') from exc
+        return BFS_ASSET_BASE + next(iter(asset_ids))
+    except (TypeError, ValueError, AttributeError, KeyError):
+        raise ValueError('BFS_HICP_DISCOVERY_INVALID') from None
 
 
 def parse_swiss_hicp(content, metadata, *, now=None):
@@ -217,7 +260,15 @@ def fetch_swiss_hicp(*, now=None, session=None):
         if not isinstance(payload, dict):
             raise ValueError(error_code)
         return payload
-    asset_url = discover_swiss_hicp(get_json(BFS_HICP_DISCOVERY, 'BFS_HICP_DISCOVERY_INVALID'))
+    # The new discovery is a single public HTML GET, not a search/API fallback.
+    # Do not follow redirects: resolve only the verified, fixed topic URL.
+    discovery = client.get(BFS_HICP_DISCOVERY, timeout=30, allow_redirects=False)
+    discovery.raise_for_status()
+    if (discovery.status_code != 200 or discovery.url != BFS_HICP_DISCOVERY
+            or discovery.history
+            or discovery.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'text/html'):
+        raise ValueError('BFS_HICP_DISCOVERY_INVALID')
+    asset_url = discover_swiss_hicp(discovery.content)
     metadata = get_json(asset_url, 'BFS_HICP_METADATA_INVALID')
     if BFS_ASSET_BASE + str(metadata.get('ids', {}).get('damId')) != asset_url:
         raise ValueError('BFS_HICP_ASSET_ID_MISMATCH')
