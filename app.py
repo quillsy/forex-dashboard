@@ -5180,10 +5180,12 @@ def get_macro_observation_details(curr, category, target_date=None):
                 "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly", "freshness": "UNAVAILABLE", "_validation": validation,
                 "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED" else "Amtliche Quelle vorübergehend nicht erreichbar"}
     if category == "Arbeitsmarkt" and curr in ("CHF", "NZD") and (target_date is None or pd.Timestamp(target_date).date() == datetime.now().date()):
-        from official_quarterly_labour import fetch_quarterly_labour
+        from official_quarterly_labour import fetch_quarterly_labour, CH_CATALOG_TIE_REASON
         validation = "UNVERIFIED"
+        catalog_diagnostics = {}
         try:
-            result = fetch_quarterly_labour(curr, session=requests)
+            result = (fetch_quarterly_labour(curr, session=requests, diagnostics=catalog_diagnostics)
+                      if curr == "CHF" else fetch_quarterly_labour(curr, session=requests))
             if result:
                 result["freshness"] = observation_freshness(result["date"], target_dt, 120, 180, monthly=False)
                 result["period_label"] = "Saisonbereinigte Quartalsquote"
@@ -5196,10 +5198,19 @@ def get_macro_observation_details(curr, category, target_date=None):
             validation = "SOURCE_UNAVAILABLE" if live_data.temporary_source_outage(error) else "UNVERIFIED"
         except Exception:
             pass
-        return {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": None,
+        unresolved_tie = curr == "CHF" and catalog_diagnostics.get("catalog_distinct_latest_assets") is True
+        if unresolved_tie:
+            validation = "UNVERIFIED"
+        unavailable = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": None,
                 "frequency": "quarterly", "freshness": "UNAVAILABLE", "_validation": validation,
-                "_reason": "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED"
+                "_reason": CH_CATALOG_TIE_REASON if unresolved_tie else
+                           "Amtlicher Datenvertrag oder Veröffentlichungsstand nicht bestätigt" if validation == "UNVERIFIED"
                            else "Amtliche Quelle vorübergehend nicht erreichbar"}
+        # For Switzerland only, keep the already verified catalogue's issue
+        # metadata if a subsequent CSV check failed; no observed value/date.
+        if curr == "CHF":
+            unavailable.update(catalog_diagnostics.get("catalog_observation", {}))
+        return unavailable
     series_id = (UNEMP_SERIES if category == "Arbeitsmarkt" else GDP_SERIES).get(curr)
     result = {"value": None, "date": None, "source": "UNAVAILABLE", "series_id": series_id,
               "freshness": "UNAVAILABLE", "frequency": "monthly" if category == "Arbeitsmarkt" else "quarterly"}
