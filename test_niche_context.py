@@ -1,4 +1,6 @@
 import contextlib
+import hashlib
+import importlib.util
 import io
 import json
 import tempfile
@@ -348,6 +350,231 @@ class NicheDiagnosticTests(unittest.TestCase):
             self.assertEqual(result.get('diagnostic_source'), 'UNKNOWN')
             self.assertEqual(result.get('diagnostic_stage'), 'UNKNOWN')
             self.assertNotIn(SECRET, output.getvalue())
+
+
+class NicheSourceProvenanceTests(unittest.TestCase):
+    SOURCE_NAMES = ('collect_niche_context.py', 'niche_context.py')
+    SOURCE_A = {name: 'a' * 64 for name in SOURCE_NAMES}
+    SOURCE_B = {name: 'b' * 64 for name in SOURCE_NAMES}
+
+    def cache_bytes(self, directory):
+        return {name: Path(directory, name).read_bytes()
+                for name in (DATA_NAME, collector.ECB_CSV_NAME, JOURNAL_NAME)}
+
+    def test_actual_public_source_hashes_have_exact_keys_and_lowercase_digests(self):
+        directory = Path(collector.__file__).resolve().parent
+        expected = {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                    for name in self.SOURCE_NAMES}
+        self.assertEqual(collector._attempt_source_sha256(), expected)
+        self.assertEqual(collector._public_attempt_source(expected), expected)
+
+    def test_new_success_captures_once_before_first_status_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            writes = []
+            original_atomic = collector.atomic_json
+
+            def record(path, value):
+                if Path(path).name == STATUS_NAME:
+                    writes.append(json.loads(json.dumps(value)))
+                return original_atomic(path, value)
+
+            with patch.object(collector, '_attempt_source_sha256',
+                              side_effect=[self.SOURCE_A, self.SOURCE_B]) as hashes, \
+                    patch.object(collector, 'atomic_json', side_effect=record):
+                result = collector.collect(temp, now=NOW, session=Session())
+            hashes.assert_called_once_with()
+            self.assertEqual([item['status'] for item in writes], ['attempt_started', 'success'])
+            for item in writes:
+                self.assertEqual(item['attempt_source_sha256'], self.SOURCE_A)
+                self.assertEqual(item['last_attempt_at'], NOW.isoformat())
+            self.assertEqual(result['attempt_source_sha256'], self.SOURCE_A)
+            self.assertEqual(load_context(temp, now=NOW)[1], 1)
+
+    def test_failed_new_attempt_stamps_itself_not_retained_success_and_cooldown_keeps_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(collector, '_attempt_source_sha256', return_value=self.SOURCE_A):
+                first = collector.collect(temp, now=NOW, session=Session())
+            old_cache = self.cache_bytes(temp)
+            later = NOW + timedelta(days=1)
+            with patch.object(collector, '_attempt_source_sha256', return_value=self.SOURCE_B):
+                failed = collector.collect(temp, now=later, session=Session(fail=True))
+            self.assertEqual(failed['status'], 'failed')
+            self.assertEqual(failed['attempt_source_sha256'], self.SOURCE_B)
+            self.assertEqual(failed['last_attempt_at'], later.isoformat())
+            for key in ('last_success_at', 'archive_head', 'archive_event_count'):
+                self.assertEqual(failed[key], first[key])
+            self.assertEqual(self.cache_bytes(temp), old_cache)
+            status_bytes = Path(temp, STATUS_NAME).read_bytes()
+            session = Session()
+            with patch.object(collector, '_attempt_source_sha256') as hashes:
+                skipped = collector.collect(temp, now=later + timedelta(hours=1), session=session)
+            hashes.assert_not_called()
+            self.assertEqual(session.calls, [])
+            self.assertEqual(skipped, {**failed, 'collection_action': 'not_due'})
+            self.assertEqual(Path(temp, STATUS_NAME).read_bytes(), status_bytes)
+
+    def test_not_due_fresh_module_does_not_stamp_simulated_changed_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(collector, '_attempt_source_sha256', return_value=self.SOURCE_A):
+                first = collector.collect(temp, now=NOW, session=Session())
+            before = self.cache_bytes(temp)
+            status_bytes = Path(temp, STATUS_NAME).read_bytes()
+            spec = importlib.util.spec_from_file_location('fresh_niche_collector', collector.__file__)
+            fresh = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fresh)
+            session = Session()
+            with patch.object(fresh, '_attempt_source_sha256', return_value=self.SOURCE_B) as hashes:
+                result = fresh.collect(temp, now=NOW + timedelta(hours=1), session=session)
+            hashes.assert_not_called()
+            self.assertEqual(result, {**first, 'collection_action': 'not_due'})
+            self.assertEqual(session.calls, [])
+            self.assertEqual(self.cache_bytes(temp), before)
+            self.assertEqual(Path(temp, STATUS_NAME).read_bytes(), status_bytes)
+
+    def test_not_due_legacy_status_retains_missing_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            collector.collect(temp, now=NOW, session=Session())
+            status = json.loads(Path(temp, STATUS_NAME).read_text())
+            del status['attempt_source_sha256']
+            Path(temp, STATUS_NAME).write_text(json.dumps(status))
+            before = Path(temp, STATUS_NAME).read_bytes()
+            session = Session()
+            with patch.object(collector, '_attempt_source_sha256') as hashes:
+                result = collector.collect(temp, now=NOW + timedelta(hours=1), session=session)
+            hashes.assert_not_called()
+            self.assertNotIn('attempt_source_sha256', result)
+            self.assertEqual(result['collection_action'], 'not_due')
+            self.assertEqual(session.calls, [])
+            self.assertEqual(Path(temp, STATUS_NAME).read_bytes(), before)
+
+    def test_already_running_has_no_identity_or_status_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            session = Session()
+            with patch.object(collector.fcntl, 'flock', side_effect=BlockingIOError), \
+                    patch.object(collector, '_attempt_source_sha256') as hashes:
+                result = collector.collect(temp, now=NOW, session=session)
+            self.assertEqual(result, {'status': 'already_running'})
+            hashes.assert_not_called()
+            self.assertEqual(session.calls, [])
+            self.assertFalse(Path(temp, STATUS_NAME).exists())
+
+    def test_archive_and_clock_early_errors_do_not_add_current_identity(self):
+        for invalid in ('archive', 'clock'):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                collector.collect(temp, now=NOW, session=Session())
+                status = json.loads(Path(temp, STATUS_NAME).read_text())
+                if invalid == 'archive':
+                    status['schema'] = 'invalid'
+                else:
+                    status['last_attempt_at'] = (NOW + timedelta(days=2)).isoformat()
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                before = Path(temp, STATUS_NAME).read_bytes()
+                old_cache = self.cache_bytes(temp)
+                session = Session()
+                with patch.object(collector, '_attempt_source_sha256') as hashes:
+                    result = collector.collect(temp, now=NOW + timedelta(hours=1), session=session)
+                hashes.assert_not_called()
+                self.assertEqual(result['error_code'], 'NICHE_ARCHIVE_INVALID' if invalid == 'archive'
+                                 else 'NICHE_STATUS_INVALID')
+                self.assertNotIn('attempt_source_sha256', result)
+                self.assertEqual(session.calls, [])
+                self.assertEqual(Path(temp, STATUS_NAME).read_bytes(), before)
+                self.assertEqual(self.cache_bytes(temp), old_cache)
+
+    def test_unreadable_public_sources_are_explicit_unknown_without_failing_collection(self):
+        original_read = Path.read_bytes
+        for unreadable in [('niche_context.py',), self.SOURCE_NAMES]:
+            with self.subTest(unreadable=unreadable), tempfile.TemporaryDirectory() as temp:
+                def read(path):
+                    if path.name in unreadable:
+                        raise OSError('/private/' + SECRET)
+                    return original_read(path)
+
+                with patch.object(Path, 'read_bytes', new=read):
+                    result = collector.collect(temp, now=NOW, session=Session())
+                self.assertEqual(result['status'], 'success')
+                self.assertEqual(set(result['attempt_source_sha256']), set(self.SOURCE_NAMES))
+                for name in unreadable:
+                    self.assertIsNone(result['attempt_source_sha256'][name])
+                self.assertNotIn(SECRET, Path(temp, STATUS_NAME).read_text())
+                self.assertEqual(load_context(temp, now=NOW)[1], 1)
+
+    def test_unavailable_source_directory_is_unknown_not_exception(self):
+        with patch.object(Path, 'resolve', side_effect=OSError('/private/' + SECRET)):
+            self.assertEqual(collector._attempt_source_sha256(),
+                             dict.fromkeys(self.SOURCE_NAMES))
+
+    def test_cli_projects_only_exact_public_hash_shape_from_retained_status(self):
+        malformed = [None, SECRET, [SECRET], {},
+                     {**self.SOURCE_A, '/private/path': SECRET},
+                     {'collect_niche_context.py': SECRET, 'niche_context.py': 'a' * 64},
+                     {'collect_niche_context.py': 'A' * 64, 'niche_context.py': 'a' * 64},
+                     {'collect_niche_context.py': 1, 'niche_context.py': 'a' * 64}]
+        for value in malformed + [self.SOURCE_A, dict.fromkeys(self.SOURCE_NAMES)]:
+            with self.subTest(value=value):
+                previous = {'status': 'failed', 'collection_action': 'not_due',
+                            'attempt_source_sha256': value}
+                before = json.dumps(previous)
+                output = io.StringIO()
+                with patch('sys.argv', ['collect_niche_context.py']), \
+                        patch.object(collector, 'collect', return_value=previous), \
+                        contextlib.redirect_stdout(output):
+                    code = collector.main()
+                self.assertEqual(code, 1)
+                public = json.loads(output.getvalue())
+                self.assertEqual(public['attempt_source_sha256'],
+                                 value if value in [self.SOURCE_A, dict.fromkeys(self.SOURCE_NAMES)] else None)
+                self.assertNotIn(SECRET, output.getvalue())
+                self.assertNotIn('/private', output.getvalue())
+                self.assertEqual(json.dumps(previous), before)
+        for result in ({'status': 'already_running'}, {'status': 'success', 'collection_action': 'not_due'}):
+            output = io.StringIO()
+            with patch('sys.argv', ['collect_niche_context.py']), \
+                    patch.object(collector, 'collect', return_value=result), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(collector.main(), 0)
+            self.assertIsNone(json.loads(output.getvalue())['attempt_source_sha256'])
+
+    def test_optional_provenance_does_not_change_legacy_reader_or_render_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            collector.collect(temp, now=NOW, session=Session())
+            original = load_context(temp, now=NOW)
+            before = self.cache_bytes(temp)
+            status = json.loads(Path(temp, STATUS_NAME).read_text())
+            for value in (None, {'/private': SECRET}):
+                if value is None:
+                    status.pop('attempt_source_sha256', None)
+                else:
+                    status['attempt_source_sha256'] = value
+                Path(temp, STATUS_NAME).write_text(json.dumps(status))
+                self.assertEqual(load_context(temp, now=NOW), original)
+                st = Streamlit()
+                with patch('niche_context_panel.load_context', return_value=original):
+                    render_niche_context(st, temp)
+                self.assertFalse(any(SECRET in str(args) for _, args in st.messages))
+            self.assertEqual(self.cache_bytes(temp), before)
+
+    def test_valid_journal_tail_recovery_captures_only_the_new_attempt_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = collector.collect(temp, now=NOW, session=Session())
+            later = NOW + timedelta(days=1)
+            collector.collect(temp, now=later, session=Session())
+            prior_events = json.loads(Path(temp, JOURNAL_NAME).read_text())['events']
+            status = json.loads(Path(temp, STATUS_NAME).read_text())
+            status['archive_head'] = first['archive_head']
+            status['archive_event_count'] = 1
+            Path(temp, STATUS_NAME).write_text(json.dumps(status))
+            session = Session()
+            with patch.object(collector, '_attempt_source_sha256', return_value=self.SOURCE_B) as hashes:
+                result = collector.collect(temp, now=later + timedelta(minutes=1), session=session)
+            hashes.assert_called_once_with()
+            self.assertEqual(result['status'], 'success')
+            self.assertEqual(result['attempt_source_sha256'], self.SOURCE_B)
+            self.assertEqual(result['last_attempt_at'], (later + timedelta(minutes=1)).isoformat())
+            self.assertEqual(len(session.calls), 3)
+            events = json.loads(Path(temp, JOURNAL_NAME).read_text())['events']
+            self.assertEqual(events[:2], prior_events)
+            self.assertNotIn('attempt_source_sha256', str(events))
 
 
 if __name__ == '__main__':
