@@ -1,7 +1,7 @@
 import copy
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import requests
 import live_data
@@ -493,7 +493,7 @@ def client(month=8, value='1.9', release_month=None, release_value=None, page=No
     release_value = value if release_value is None else release_value
     html = japan_release(month=release_month, value=str(abs(float(release_value))),
                          direction='下落' if float(release_value) < 0 else '横ばい' if float(release_value) == 0 else '上昇',
-                         date='2026年9月18日' if release_month == 8 else '2026年10月23日')
+                         date={8: '2026年9月18日', 9: '2026年10月23日', 10: '2026年11月20日'}[release_month])
     api = Mock(); api.json.return_value = payload
     release = Mock(); release.content = html.encode('utf-8')
     schedule = Mock(); schedule.text = calendar() if page is None else page
@@ -599,6 +599,193 @@ class JapanScheduledClockTests(unittest.TestCase):
         page = page.replace('<td>September</td><td>October 23', '<td>December</td><td>January 22, 2027')
         page = page.replace('<td>October</td><td>November 20', '<td>January, 2027</td><td>February 19')
         self.assertEqual(parse_japan_cpi_calendar(page, '2026-12')['next_due_date'], '2027-02-19')
+
+
+class JapanReaderFirstTests(unittest.TestCase):
+    NEXT_DUE = datetime(2026, 11, 19, 23, 30, tzinfo=timezone.utc)
+
+    def original(self, at, month=9):
+        observation, diagnostic, transport = fetch(at, month=month, value='2.0')
+        self.assertEqual(transport.get.call_count, 3)
+        return observation, diagnostic['code']
+
+    def legacy(self, at, month=9, start=None, date_only=False):
+        observation, diagnostic = self.original(at, month)
+        self.assertEqual(diagnostic, 'OK')
+        if date_only:
+            observation.update(next_due_at='2026-11-19T15:00:00+00:00',
+                               next_due_precision='date_only_start_of_JP_day')
+        record = live_data.build_record('Inflation', 0.0, observation, 'FRESH', (start or at).isoformat())
+        self.assertNotIn('release_frontier', record)
+        return record
+
+    def producer_b_shape(self, record, at):
+        # Canonical B packet shape; the A writer must not create this metadata.
+        frontier = live_data._japan_cpi_record_frontier(record, 'Inflation', at)
+        self.assertIsNotNone(frontier)
+        return dict(copy.deepcopy(record), release_frontier=frontier)
+
+    def test_legacy_and_b_shaped_reads_use_real_deadline_and_original_contract(self):
+        legacy = self.legacy(DUE, date_only=True)
+        self.assertTrue(live_data.eligible(legacy, DUE, 'Inflation', 'JPY')[0])
+        old_batch = self.producer_b_shape(legacy, DUE)
+        self.assertTrue(live_data.eligible(old_batch, DUE, 'Inflation', 'JPY')[0])
+        due = datetime.fromisoformat(legacy['next_due_at'])
+        old_batch['next_due_at'] = None
+        old_batch['observation'].update(next_due_at=None, next_due_precision=None)
+        self.assertEqual(live_data.eligible(old_batch, due, 'Inflation', 'JPY'),
+                         (False, 'Bekannte Folge-Veröffentlichung fällig; neue Referenzperiode nicht bestätigt'))
+        for changes in ({'reference_period': '2026-08'}, {'unit': 'index'}, {'source_url': None}):
+            bad = self.producer_b_shape(legacy, DUE)
+            bad['observation'].update(changes)
+            self.assertFalse(live_data.eligible(bad, DUE, 'Inflation', 'JPY')[0])
+
+    def test_b_newer_month_and_future_confirmation_are_read_time_bound(self):
+        at = self.NEXT_DUE + timedelta(seconds=2)
+        october = self.legacy(at, month=10, start=self.NEXT_DUE - timedelta(seconds=2))
+        b_record = self.producer_b_shape(october, at)
+        self.assertFalse(live_data.eligible(b_record, at-timedelta(microseconds=1), 'Inflation', 'JPY')[0])
+        self.assertTrue(live_data.eligible(b_record, at, 'Inflation', 'JPY')[0])
+        self.assertIsNone(b_record['release_frontier']['next_due_at'])
+        self.assertFalse(live_data.eligible(b_record, at+timedelta(hours=1), 'Inflation', 'JPY')[0])
+        old = self.legacy(DUE)
+        old['release_frontier'] = b_record['release_frontier']
+        self.assertIn('Ältere Referenzperiode', live_data.eligible(old, at, 'Inflation', 'JPY')[1])
+        batch = {'completed_at': (at-timedelta(seconds=1)).isoformat(),
+                 'currencies': {'JPY': {'Inflation': b_record}}}
+        self.assertIsNone(live_data.details('JPY', at, batch)['Inflation'])
+        batch['completed_at'] = at.isoformat()
+        self.assertEqual(live_data.details('JPY', at, batch)['Inflation'], 0.0)
+
+    def test_loaded_reader_proof_is_data_bound_and_operator_only(self):
+        import tempfile
+        from pathlib import Path
+        import shared_snapshot
+        legacy = self.legacy(DUE, start=DUE-timedelta(seconds=30), date_only=True)
+        completed = DUE+timedelta(seconds=10)
+        batch = {'model_version': live_data.MODEL, 'completed_at': completed.isoformat(),
+                 'currencies': {'JPY': {'Inflation': legacy}}}
+        original = copy.deepcopy(batch)
+        now = self.NEXT_DUE + timedelta(minutes=1)  # This is a reader check, not present-time eligibility.
+        expected = {'reader_checked_at': now.isoformat(), 'source_verified_at': DUE.isoformat(),
+                    'completed_at': completed.isoformat(), 'period': '2026-09'}
+        self.assertEqual(live_data.japan_cpi_reader_proof(batch, now), expected)
+        self.assertEqual(batch, original)
+        retained = copy.deepcopy(batch)
+        later_record_time = (DUE+timedelta(seconds=5)).isoformat()
+        retained['currencies']['JPY']['Inflation'].update(checked_at=later_record_time, last_attempt_at=later_record_time)
+        self.assertEqual(live_data.japan_cpi_reader_proof(retained, now), expected)
+        with patch.object(shared_snapshot, 'FRONTIER_SERIES',
+                          {key: value for key, value in shared_snapshot.FRONTIER_SERIES.items() if key != ('JPY', 'Inflation')}):
+            self.assertIsNone(live_data.japan_cpi_reader_proof(batch, now))
+        with patch.object(live_data, '_RELEASE_FRONTIER_SERIES', live_data._WRITABLE_RELEASE_FRONTIER_SERIES):
+            self.assertIsNone(live_data.japan_cpi_reader_proof(batch, now))
+        self.assertIsNone(live_data.japan_cpi_reader_proof({'completed_at': DUE.isoformat()}, now))
+        new_format = copy.deepcopy(batch)
+        new_format['currencies']['JPY']['Inflation'] = self.producer_b_shape(legacy, DUE)
+        self.assertIsNone(live_data.japan_cpi_reader_proof(new_format, now))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(live_data, 'load', return_value=batch), \
+             patch.object(live_data, 'now_utc', return_value=now), \
+             patch.object(live_data, 'selected_live_directory', return_value=Path(directory)), \
+             patch.object(live_data, 'checkout_revision', return_value={'head': None, 'tracked_sources_match': None}):
+            public, operator = MagicMock(), MagicMock()
+            live_data.render_status(public, authorized=False)
+            live_data.render_status(operator, authorized=True)
+            marker = 'Japanische Inflation · '
+            self.assertFalse(any(marker in call.args[0] for call in public.caption.call_args_list))
+            proof = next(call.args[0] for call in operator.caption.call_args_list if marker in call.args[0])
+            self.assertIn('Vorab-Leseprüfung für die einmalige Umstellung auf das neue Format bestanden', proof)
+            self.assertIn('Leseprüfung (UTC): ' + now.isoformat(), proof)
+            self.assertIn('Ursprüngliche amtliche Prüfung (UTC): ' + DUE.isoformat(), proof)
+            self.assertIn('Berichtsmonat 2026-09 · Frühere Datencharge: ' + completed.isoformat(), proof)
+            self.assertIn('Keine neue Quellenprüfung oder Signal-Freigabe', proof)
+            with patch.object(live_data, 'load', return_value=retained):
+                retained_ui = MagicMock()
+                live_data.render_status(retained_ui, authorized=True)
+            retained_proof = next(call.args[0] for call in retained_ui.caption.call_args_list if marker in call.args[0])
+            self.assertIn('Ursprüngliche amtliche Prüfung (UTC): ' + DUE.isoformat(), retained_proof)
+            self.assertNotIn('Ursprüngliche amtliche Prüfung (UTC): ' + later_record_time, retained_proof)
+            with patch.object(shared_snapshot, 'FRONTIER_SERIES', {}):
+                older = MagicMock()
+                live_data.render_status(older, authorized=True)
+            self.assertIn('Nach der Umstellung auf das neue Format entfällt sie',
+                          next(call.args[0] for call in older.caption.call_args_list if marker in call.args[0]))
+            with patch.object(live_data, 'load', return_value=new_format):
+                transitioned = MagicMock()
+                live_data.render_status(transitioned, authorized=True)
+            neutral = next(call.args[0] for call in transitioned.caption.call_args_list if marker in call.args[0])
+            self.assertIn('benötigt eine geeignete Charge im bisherigen Format', neutral)
+            self.assertNotIn('bestanden', neutral)
+        self.assertEqual(batch, original)
+
+    def collect_legacy(self, path, at, observation=None, score=None, requested=True):
+        from types import SimpleNamespace
+        app = SimpleNamespace(FRED_KEY=None, requests=Mock(), compute_currency_details=Mock(return_value={
+            'Inflation': score, '_observations': {'Inflation': observation or {}},
+            '_freshness': {'Inflation': 'FRESH' if score is not None else 'UNAVAILABLE'}}))
+        with patch.object(live_data, 'CURRENCIES', ('JPY',)), \
+             patch.object(live_data, 'FACTORS', {'Inflation': 20}), \
+             patch.object(live_data, 'now_utc', return_value=at):
+            live_data.collect(app, path)
+        app.requests.get.assert_not_called()
+        self.assertEqual(app.compute_currency_details.call_count, 1 if requested else 0)
+        record = live_data.load(path)['currencies']['JPY']['Inflation']
+        self.assertNotIn('release_frontier', record)
+        return record
+
+    def test_reader_first_writer_cannot_emit_jpy_frontier_across_real_collector_paths(self):
+        import tempfile
+        from pathlib import Path
+        good, _ = self.original(DUE)
+        outage = {'_validation': 'SOURCE_UNAVAILABLE', '_reason': 'Fixture unavailable'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'live.json'
+            cold = self.collect_legacy(path, DUE, good, 0.0)
+            self.assertTrue(live_data.eligible(cold, DUE, 'Inflation', 'JPY')[0])
+            retained = self.collect_legacy(path, DUE+timedelta(minutes=1), requested=False)
+            self.assertEqual(cold, retained)
+            at = self.NEXT_DUE
+            due_only, diagnostic = self.original(at)
+            self.assertEqual(diagnostic, 'ESTAT_DUE_UNCONFIRMED')
+            failed = self.collect_legacy(path, at, due_only)
+            self.assertEqual(failed['validation'], 'UNVERIFIED')
+            self.collect_legacy(path, at+timedelta(minutes=1), outage)
+            successor, diagnostic = self.original(at+timedelta(minutes=2), 10)
+            self.assertEqual(diagnostic, 'OK')
+            new = self.collect_legacy(path, at+timedelta(minutes=2), successor, 0.0)
+            self.assertTrue(live_data.eligible(new, at+timedelta(minutes=2), 'Inflation', 'JPY')[0])
+
+            # A separate legacy known-date record exercises the actual outage
+            # cache copy at its deadline and a restart of that invalidated proof.
+            live_data.save({'model_version': live_data.MODEL, 'completed_at': DUE.isoformat(),
+                            'currencies': {'JPY': {'Inflation': cold}}}, path)
+            cached = self.collect_legacy(path, at, outage)
+            self.assertEqual(cached['checked_at'], cold['checked_at'])
+            self.assertFalse(live_data.eligible(cached, at, 'Inflation', 'JPY')[0])
+            self.collect_legacy(path, at+timedelta(minutes=1), outage)
+
+    def test_final_original_proof_clock_crosses_release_without_emission(self):
+        from official_inflation import _now as original_now
+        start, finish = self.NEXT_DUE-timedelta(seconds=2), self.NEXT_DUE+timedelta(seconds=2)
+        for month, code in ((9, 'ESTAT_DUE_UNCONFIRMED'), (10, 'OK')):
+            transport = client(month=month, value='2.0')
+            clock = [start]
+            responses = iter(zip((start, self.NEXT_DUE+timedelta(seconds=1), finish),
+                                 list(transport.get.side_effect)))
+            def respond(*args, **kwargs):
+                clock[0], response = next(responses)
+                return response
+            transport.get.side_effect = respond
+            diagnostic = {}
+            with patch('official_inflation._now', side_effect=lambda now=None: clock[0] if now is None else original_now(now)):
+                row = fetch_official_cpi('JPY', client=transport, estat_key='fixture-only', diagnostics=diagnostic)
+            self.assertEqual((diagnostic['code'], row['checked_at']), (code, finish.isoformat()))
+            validation = row.pop('_validation', 'VALID'); reason = row.pop('_reason', None)
+            record = live_data.build_record('Inflation', 0.0 if validation == 'VALID' else None,
+                                            row, 'FRESH', start.isoformat(), validation=validation, reason=reason)
+            self.assertNotIn('release_frontier', record)
+            self.assertEqual(live_data.eligible(record, finish, 'Inflation', 'JPY')[0], month == 10)
 
 
 
