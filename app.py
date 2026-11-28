@@ -7374,9 +7374,12 @@ def get_inflation_expectations_data(curr, target_date=None):
         except Exception:
             dt_str = datetime.now().strftime("%Y-%m-%d")
             
-    cpi_val, obs_date_cur, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, dt_str)
+    live = use_live_core_cache(target_date)
+    cpi_val, obs_date_cur, metric_type, source, series_id, freshness = get_cpi_yoy_details(
+        curr, None if live else dt_str
+    )
 
-    if use_live_core_cache(target_date):
+    if live:
         return {"actual_cpi": cpi_val, "cpi_trend": None,
                 "oecd_expectation": None, "market_breakeven": None,
                 "date": dt_str, "source": source}
@@ -8263,6 +8266,8 @@ def save_all_g10_live_snapshots():
 # Daily G10 snapshots & outcome updates are automatically executed by the GitHub Actions workflow scheduler
 
 if not getattr(st, "_mock_mode", False):
+    # An undated live read stays on the central batch if rendering crosses midnight.
+    dashboard_date = None if use_live_core_cache() else datetime.now().strftime("%Y-%m-%d")
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
         "🏆 Currency Strength Overview",
         "📊 Fundamental Score",
@@ -8315,8 +8320,8 @@ if not getattr(st, "_mock_mode", False):
             weakest_c = "N/A"
             
         vix = get_vix_value()
-        cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-        gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        cpi_us = get_cpi_yoy_value("USD", dashboard_date)
+        gdp_us = get_gdp_yoy_value("USD", dashboard_date)
         
         if vix is None:
             global_regime = "Unbekannt · VIX nicht geprüft"
@@ -8490,10 +8495,10 @@ if not getattr(st, "_mock_mode", False):
             if use_live_core_cache():
                 st.caption("Für den Live-Betrieb liegen keine zentral geprüften Trend-Zeitreihen vor. Fehlende Trends sind keine Nullwerte.")
             y_trends = get_yield_trends(sel_curr_fund)
-            cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), datetime.now().strftime("%Y-%m-%d"))
-            unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), datetime.now().strftime("%Y-%m-%d"), reverse=True)
-            pmi_trend_pts = get_series_trend_points(PMI_SERIES.get(sel_curr_fund, "MANEMP") if sel_curr_fund in PMI_SERIES else "USISMT", datetime.now().strftime("%Y-%m-%d"))
-            gdp_trend_pts = get_series_trend_points(GDP_SERIES.get(sel_curr_fund, "GDPC1"), datetime.now().strftime("%Y-%m-%d"))
+            cpi_trend_pts = get_series_trend_points(CPI_SERIES.get(sel_curr_fund, "CPIAUCSL"), dashboard_date)
+            unemp_trend_pts = get_series_trend_points(UNEMP_SERIES.get(sel_curr_fund, "UNRATE"), dashboard_date, reverse=True)
+            pmi_trend_pts = get_series_trend_points(PMI_SERIES.get(sel_curr_fund, "MANEMP") if sel_curr_fund in PMI_SERIES else "USISMT", dashboard_date)
+            gdp_trend_pts = get_series_trend_points(GDP_SERIES.get(sel_curr_fund, "GDPC1"), dashboard_date)
     
             trend_metrics = [
                 {"Faktor": "2Y Sovereign Yield (1W Change)", "Wert": f"{y_trends.get('chg_1w', 0.0):+.3f}%" if y_trends.get('chg_1w') is not None else "N/A"},
@@ -8642,11 +8647,10 @@ if not getattr(st, "_mock_mode", False):
         if use_live_core_cache():
             st.caption("Live werden nur zentral geprüfte CPI-Werte angezeigt. Trend und Erwartungen sind derzeit nicht gesammelt und erscheinen als N/A.")
         
-        today_s = datetime.now().strftime("%Y-%m-%d")
         cpi_rows = []
         for curr, info in CURRENCIES.items():
-            c_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, today_s)
-            inf_data = get_inflation_expectations_data(curr, today_s)
+            c_val, obs_date, metric_type, source, series_id, freshness = get_cpi_yoy_details(curr, dashboard_date)
+            inf_data = get_inflation_expectations_data(curr, dashboard_date)
             c_trend = inf_data.get("cpi_trend")
             oecd_val = inf_data.get("oecd_expectation")
             
@@ -8675,10 +8679,9 @@ if not getattr(st, "_mock_mode", False):
         st.header("👷 Labour Market Hub")
         st.caption("Arbeitslosenquoten und Beschäftigungsdynamik der 8 G8-Währungen.")
         
-        today_s = datetime.now().strftime("%Y-%m-%d")
         unemp_rows = []
         for curr, info in CURRENCIES.items():
-            unemp_rows.append(get_live_labour_display_row(curr, info, today_s))
+            unemp_rows.append(get_live_labour_display_row(curr, info, dashboard_date))
             
         st.dataframe(pd.DataFrame(unemp_rows), hide_index=True, use_container_width=True)
     
@@ -8721,10 +8724,9 @@ if not getattr(st, "_mock_mode", False):
         st.header("📈 GDP Growth (Reales BIP-Wachstum)")
         st.caption("Reale Wirtschaftswachstumsraten (YoY) im internationalen G8-Vergleich.")
         
-        today_s = datetime.now().strftime("%Y-%m-%d")
         gdp_rows = []
         for curr, info in CURRENCIES.items():
-            gdp_observation = get_macro_observation_details(curr, "GDP", today_s)
+            gdp_observation = get_macro_observation_details(curr, "GDP", dashboard_date)
             g_val = finite_number(gdp_observation.get("value"))
             gdp_rows.append({
                 "Währung": f"{info['flag']} {curr}",
@@ -8742,8 +8744,8 @@ if not getattr(st, "_mock_mode", False):
         st.caption("Globales Marktregime, Volatilität (VIX), Rohstoffeinflüsse und strukturelle Makrokorrekturen (Leistungsbilanz & Staatsverschuldung).")
         
         vix = get_vix_value()
-        cpi_us = get_cpi_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
-        gdp_us = get_gdp_yoy_value("USD", datetime.now().strftime("%Y-%m-%d"))
+        cpi_us = get_cpi_yoy_value("USD", dashboard_date)
+        gdp_us = get_gdp_yoy_value("USD", dashboard_date)
         
         if vix is None:
             current_regime = "Unbekannt · VIX nicht geprüft"
