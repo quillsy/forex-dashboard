@@ -60,6 +60,14 @@ def provider_day_counts(info, day):
                                and observed is not None and reserved is not None)}
 
 
+class TemporaryProviderCooldown(http.RequestException):
+    """This process saw a 429 or 503 that still blocks this host."""
+
+    def __init__(self, host):
+        super().__init__("PROVIDER_COOLDOWN")
+        self.host = host
+
+
 class CollectorTransport:
     RequestException = http.RequestException
     exceptions = http.exceptions
@@ -77,6 +85,7 @@ class CollectorTransport:
         self.usage = {}
         self.cooldown = set()
         self.retry_after = {}
+        self._temporary_cooldowns = {}
         self._restore_retry_after()
 
     def _restore_retry_after(self):
@@ -215,6 +224,11 @@ class CollectorTransport:
     def post(self, url, **kwargs):
         return self.request("post", url, **kwargs)
 
+    def _cooldown_error(self, host, deadline):
+        if host in self._temporary_cooldowns and self._temporary_cooldowns[host] == deadline:
+            return TemporaryProviderCooldown(host)
+        return http.RequestException("PROVIDER_COOLDOWN")
+
     def request(self, method, url, *, before_request=None, after_request=None, **kwargs):
         if os.environ.get("FX_COLLECTOR") != "1":
             raise http.RequestException("LIVE_DATA_IS_COLLECTED_CENTRALLY")
@@ -239,12 +253,13 @@ class CollectorTransport:
         deadline = self.retry_after.get(host)
         if deadline and deadline > self.clock():
             usage.update(status="PROVIDER_COOLDOWN", retry_after_at=deadline.isoformat())
-            raise http.RequestException("PROVIDER_COOLDOWN")
+            raise self._cooldown_error(host, deadline)
         if deadline:
             self.retry_after.pop(host, None)
             usage.pop("retry_after_at", None)
         if host in self.cooldown:
-            raise http.RequestException("PROVIDER_COOLDOWN")
+            raise self._cooldown_error(host, None)
+        self._temporary_cooldowns.pop(host, None)
         if usage["requests_this_run"] >= 80:
             usage["status"] = "RUN_SAFETY_LIMIT"
             self.cooldown.add(host)
@@ -283,6 +298,7 @@ class CollectorTransport:
         self._record_outcome(usage, usage["status"])
         if response.status_code in (429, 503):
             deadline = self._parse_retry_after(response.headers.get("Retry-After"))
+            self._temporary_cooldowns[host] = deadline
             if deadline:
                 self.retry_after[host] = deadline
                 usage["retry_after_at"] = deadline.isoformat()
